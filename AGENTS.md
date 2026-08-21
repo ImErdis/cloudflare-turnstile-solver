@@ -160,13 +160,15 @@ value — if a function — is invoked as `fn(initObj, sendHelper)`. That path
 emits the follow-up. The follow-up **response** is ~2.4k (not another packed
 program). Envelope: `src/solver/fo_followup.rs`. Field-set **kind**: the
 mutated init object plus numeric `"1".."N"` VM entries plus extra ident keys
-the VM adds (`src/solver/fo_followup_json.rs`). Key **names** come from headed
+the VM adds (`src/solver/fo_followup_json.rs`). Branch-`b` headed Chrome (same
+SolveGate day): 46 of 47 init keys (`MaOkK2` dropped), numeric `"1"`..`"39"`,
+and 14 extra ident names. Early `f4` is init + `xBCsP4` with no numeric slots;
+the oracle picker prefers the numeric shape. Key **names** come from headed
 Chrome Debugger on `f4`'s first argument or the `setTimeout(send, 100)` helper
 (kinds/lengths only — do not dump values). `JSON.stringify` of a
-`CSSStyleDeclaration` is not the `/fo/` object and is rejected. Extra ident
-**names** still need that iframe harvest. Do **not** fill or POST that JSON.
-Next gap is still `fo_followup_json` until extra ident names are snapshotted;
-do not run handlers as a solver.
+`CSSStyleDeclaration` is not the `/fo/` object and is rejected. Do **not** fill
+or POST that JSON. Next gap is `handler_semantics`; do not run handlers as a
+solver.
 
 `probe_iframe` / `solve_test` should get iframe HTTP 200 + parsed options, then an honest
 failure: orchestrate is not the VM, live `/fo/` without a valid init body 400s. `/cmg/1` 404s

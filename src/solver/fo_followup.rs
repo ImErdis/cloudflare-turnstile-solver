@@ -27,8 +27,8 @@ use crate::solver::fo_body::{
 };
 use serde::Serialize;
 
-/// Remaining live gap after the follow-up **envelope**: the JSON field set
-/// (copied vs computed keys). See [`crate::solver::fo_followup_json`].
+/// Remaining live gap after the follow-up **envelope**: handler semantics
+/// (follow-up JSON names are snapshotted). See [`crate::solver::fo_followup_json`].
 pub const NEXT_AFTER_FOLLOWUP_SHAPE: &str = crate::solver::fo_followup_json::NEXT_AFTER_FOLLOWUP_JSON;
 
 /// XHR send helper on the 56907 iframe (`case 8: send(f4(n))`).
@@ -132,7 +132,7 @@ mod tests {
             LIVE_FO_FOLLOWUP.plaintext_kind,
             FoFollowUpPlaintextKind::CompressedBlobAfterRunProgram
         );
-        assert_eq!(NEXT_AFTER_FOLLOWUP_SHAPE, "fo_followup_json");
+        assert_eq!(NEXT_AFTER_FOLLOWUP_SHAPE, "handler_semantics");
         for &len in CHROME_FO_FOLLOW_UP_LENS {
             assert_eq!(classify_fo_body_len(len), FoBodyLenBand::FollowUp, "{len}");
             let blob = approx_lz_xtea_len(len);

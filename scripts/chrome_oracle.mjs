@@ -633,10 +633,12 @@ function classifyFoPlaintext(shape, initKeys) {
       rejected: "css-style",
     };
   }
-  const initSet = new Set(initKeys || []);
+  const initList = initKeys || [];
+  const initSet = new Set(initList);
   const ident = shape.identKeys;
   const copied = ident.filter((k) => initSet.has(k));
   const extraIdent = ident.filter((k) => !initSet.has(k));
+  const droppedInit = initList.filter((k) => !ident.includes(k));
   let kind = "other";
   if (initSet.size && copied.length < 40) {
     kind = "other";
@@ -660,6 +662,8 @@ function classifyFoPlaintext(shape, initKeys) {
     copiedCount: copied.length,
     extraIdent,
     extraIdentCount: extraIdent.length,
+    droppedInit,
+    droppedInitCount: droppedInit.length,
   };
 }
 
@@ -668,13 +672,25 @@ function pickFollowUpShape(shapes, initKeys) {
     .map((s) => ({ shape: s, cls: classifyFoPlaintext(s, initKeys) }))
     .filter((r) => r.cls && r.cls.kind === "followUp");
   if (!rows.length) return null;
+  // Prefer the mutated VM object (numeric slots), not the early 47+1 extra snapshot.
   rows.sort((a, b) => {
-    const copy = (b.cls.copiedCount || 0) - (a.cls.copiedCount || 0);
-    if (copy) return copy;
-    return (b.cls.numericKeyCount || 0) - (a.cls.numericKeyCount || 0);
+    const numeric = (b.cls.numericKeyCount || 0) - (a.cls.numericKeyCount || 0);
+    if (numeric) return numeric;
+    const extra = (b.cls.extraIdentCount || 0) - (a.cls.extraIdentCount || 0);
+    if (extra) return extra;
+    return (b.cls.copiedCount || 0) - (a.cls.copiedCount || 0);
   });
   const best = rows[0];
-  return { ...best.cls, identKeys: best.shape.identKeys };
+  const kinds = best.shape.kinds || {};
+  const extraIdentKinds = {};
+  for (const k of best.cls.extraIdent || []) {
+    if (kinds[k]) extraIdentKinds[k] = kinds[k].split(":")[0];
+  }
+  return {
+    ...best.cls,
+    identKeys: best.shape.identKeys,
+    extraIdentKinds,
+  };
 }
 
 function sourceLineCol(scriptSource, idx) {
@@ -893,9 +909,26 @@ function selfTestInject() {
     numericKeyMin: 1,
     numericKeyMax: 12,
   };
+  const earlyExtraOnly = {
+    via: "f4",
+    keyCount: 48,
+    identKeys: [...fakeInitKeys, "xBCsP4"],
+    numericKeyCount: 0,
+  };
+  const richFollowUp = {
+    via: "f4",
+    keyCount: 46 + 14 + 39,
+    identKeys: [...fakeInitKeys.slice(0, 46), "SMrTl9", "OQbM0", "xBCsP4"],
+    numericKeyCount: 39,
+    numericKeyMin: 1,
+    numericKeyMax: 39,
+  };
   const initCls = classifyFoPlaintext(fakeInitShape, fakeInitKeys);
   const foCls = classifyFoPlaintext(fakeFoShape, fakeInitKeys);
-  const picked = pickFollowUpShape([fakeInitShape, fakeFoShape], fakeInitKeys);
+  const picked = pickFollowUpShape(
+    [fakeInitShape, earlyExtraOnly, richFollowUp, fakeFoShape],
+    fakeInitKeys,
+  );
   const bp = compressorBreakpointAt(
     "void 0;function f4(a,Et,nT,n,d){return Et={a:1},a}",
   );
@@ -961,6 +994,8 @@ function selfTestInject() {
       foCls.extraIdentCount === 3 &&
       picked &&
       picked.kind === "followUp" &&
+      picked.numericKeyCount === 39 &&
+      picked.droppedInitCount === 1 &&
       bp &&
       bp.pat === "function f4(" &&
       sendBp &&
@@ -988,6 +1023,7 @@ function selfTestInject() {
       followUpKind: foCls && foCls.kind,
       copiedCount: foCls && foCls.copiedCount,
       extraIdentCount: foCls && foCls.extraIdentCount,
+      pickedNumeric: picked && picked.numericKeyCount,
       compressorBp: bp && bp.pat,
       sendHelperBp: sendBp && sendBp.name,
       cssRejected: cssCls && cssCls.kind,
@@ -1561,6 +1597,9 @@ const summary = {
         copiedCount: followUpJson.copiedCount,
         extraIdentCount: followUpJson.extraIdentCount,
         extraIdent: followUpJson.extraIdent,
+        extraIdentKinds: followUpJson.extraIdentKinds || {},
+        droppedInit: followUpJson.droppedInit || [],
+        droppedInitCount: followUpJson.droppedInitCount || 0,
         identKeys: followUpJson.identKeys,
         note: "key names and value kinds only; do not dump values or POST",
       }
@@ -1651,6 +1690,7 @@ console.log(
             extraIdentCount: followUpJson.extraIdentCount,
             numericKeyCount: followUpJson.numericKeyCount,
             extraIdent: followUpJson.extraIdent,
+            droppedInit: followUpJson.droppedInit,
           }
         : null,
       headerCompare: summary.headerCompare,

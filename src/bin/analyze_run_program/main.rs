@@ -292,9 +292,30 @@ fn verify_oracle_file(path: &PathBuf) -> Result<Value> {
                     errors.push("foFollowUpJson.numericVmEntries should be true".into());
                 }
                 if let Some(n) = fj.get("copiedCount").and_then(|x| x.as_u64())
-                    && n != INIT_JSON_KEY_COUNT as u64
+                    && n != cf::FOLLOWUP_COPIED_COUNT_B as u64
                 {
-                    errors.push(format!("foFollowUpJson.copiedCount={n} expected {INIT_JSON_KEY_COUNT}"));
+                    errors.push(format!(
+                        "foFollowUpJson.copiedCount={n} expected {}",
+                        cf::FOLLOWUP_COPIED_COUNT_B
+                    ));
+                }
+                if let Some(extra) = fj.get("extraIdent").and_then(|x| x.as_array()) {
+                    let got: Vec<&str> = extra.iter().filter_map(|k| k.as_str()).collect();
+                    if got != cf::FOLLOWUP_EXTRA_IDENT_B {
+                        errors.push(format!(
+                            "foFollowUpJson.extraIdent={got:?} expected {:?}",
+                            cf::FOLLOWUP_EXTRA_IDENT_B
+                        ));
+                    }
+                }
+                if let Some(dropped) = fj.get("droppedInit").and_then(|x| x.as_array()) {
+                    let got: Vec<&str> = dropped.iter().filter_map(|k| k.as_str()).collect();
+                    if got != cf::FOLLOWUP_DROPPED_INIT_B {
+                        errors.push(format!(
+                            "foFollowUpJson.droppedInit={got:?} expected {:?}",
+                            cf::FOLLOWUP_DROPPED_INIT_B
+                        ));
+                    }
                 }
                 if let Some(ident) = fj.get("identKeys").and_then(|x| x.as_array()) {
                     let names: Vec<String> = ident

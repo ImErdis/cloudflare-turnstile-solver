@@ -158,8 +158,45 @@
       "numericVmEntries": true,
       "extraIdentFromVm": true,
       "initIdentCount": 47,
-      "copiedCount": 47,
-      "note": "Follow-up plaintext is the mutated init object plus numeric VM keys plus extra ident keys. Names/kinds from headed Chrome Debugger on f4's first argument — do not fill values or POST. extraIdent is filled when chrome_oracle harvests a follow-up shape."
+      "copiedCount": 46,
+      "droppedInit": ["MaOkK2"],
+      "numericKeyCount": 39,
+      "numericKeyMin": 1,
+      "numericKeyMax": 39,
+      "extraIdentCount": 14,
+      "extraIdent": [
+        "SMrTl9", "OQbM0", "xBCsP4", "UjLjP6", "YfDjo7", "Iqrc9", "OZgbm6", "pFyv1", "SfUI1",
+        "sqKXG6", "HUDi4", "DTBF3", "mQiic7", "gNcr3"
+      ],
+      "extraIdentKinds": {
+        "SMrTl9": "string",
+        "OQbM0": "undefined",
+        "xBCsP4": "array",
+        "UjLjP6": "function",
+        "YfDjo7": "undefined",
+        "Iqrc9": "undefined",
+        "OZgbm6": "function",
+        "pFyv1": "number",
+        "SfUI1": "array",
+        "sqKXG6": "string",
+        "HUDi4": "string",
+        "DTBF3": "string",
+        "mQiic7": "number",
+        "gNcr3": "number"
+      },
+      "jsonOmittedExtraIdent": ["OQbM0", "UjLjP6", "YfDjo7", "Iqrc9", "OZgbm6"],
+      "identKeys": [
+        "ThPv3", "SMrTl9", "zlGF5", "OpPY6", "IlxW5", "XxyI8", "HmVl5", "Hvdx8", "SpRN6", "xOSD5",
+        "Eugge3", "sYTa8", "uHTPv5", "ANNwt4", "XNzg0", "DmMyh8", "UqfC6", "SsIhw3", "UvCHC0", "QNwGo0",
+        "bxwC4", "mPCxG3", "rrYRv3", "ZVrB5", "oEyAb1", "SdHeo9", "uzri0", "WIuS3", "RjLr7", "FWhj7",
+        "wwGxq8", "samm5", "SiHjy8", "XsrRO3", "Qppo3", "jzZH4", "axZzC3", "ElYCL0", "gzpfB4", "yZZpI0",
+        "OQbM0", "xBCsP4", "UjLjP6", "Qkvw6", "wSEe6", "YfDjo7", "Iqrc9", "OZgbm6", "pFyv1", "SfUI1",
+        "sqKXG6", "HUDi4", "DTBF3", "mQiic7", "XNAR2", "jPUKG9", "BfDsa5", "NLBQh4", "gZuvw0", "gNcr3"
+      ],
+      "via": "f4",
+      "keyCount": 99,
+      "identCount": 60,
+      "note": "Last f4 snapshot (SolveGate invisible, 2026-08-21). 46 of 47 init keys (MaOkK2 dropped), numeric 1..39, 14 extra ident names. Early f4 was init+xBCsP4 with no numeric slots — picker prefers numeric. Kinds only; JSON.stringify would omit function/undefined extras. Do not fill values or POST."
     }
   }
 }

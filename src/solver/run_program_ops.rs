@@ -28,7 +28,7 @@ use crate::solver::run_program_vm::{
 use serde::Serialize;
 
 /// Remaining live gap after fetch, operands, `f4`, init-JSON shape, follow-up
-/// envelope, and late-`b` extra-xors: the follow-up JSON field set (key names).
+/// envelope, late-`b` extra-xors, and follow-up JSON key names: handler semantics.
 pub const NEXT_GAP: &str = crate::solver::fo_followup_json::NEXT_AFTER_FOLLOWUP_JSON;
 
 /// JS `x ^ 62.48` is `x ^ ToInt32(62.48)` = `x ^ 62`.
