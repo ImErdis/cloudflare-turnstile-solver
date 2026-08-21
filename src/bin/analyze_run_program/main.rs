@@ -15,9 +15,9 @@ use anyhow::{Context, Result, bail};
 use cf::reverse::encryption::decrypt_cloudflare_response;
 use cf::solver::run_program::unpack_packed_run_program;
 use cf::solver::run_program_ops::{
-    DN_OPCODE, DN_TAG_STRING, HANDLER_LAYOUT_B_LATE, LATE_DIRECT_HANDLER_COUNT, XF_TAG_STRING,
-    classify_pc_delta, classify_pc_delta_late, first_dn_tag_b, first_xf_tag_late,
-    operand_from_byte,
+    DN_OPCODE, DN_TAG_STRING, HANDLER_LAYOUT_B_LATE, LATE_DIRECT_HANDLER_COUNT,
+    PROPERTY_IMM_ROLES_B_LATE, XF_TAG_CASES, XF_TAG_STRING, classify_pc_delta,
+    classify_pc_delta_late, first_dn_tag_b, first_xf_tag_late, operand_from_byte,
 };
 use cf::solver::run_program_vm::{
     FETCH_BRANCH_B, FETCH_LIVE, naive_one_byte_fetches, opcode_def_in, params_for_magic,
@@ -269,6 +269,33 @@ fn verify_oracle_file(path: &PathBuf) -> Result<Value> {
                     errors.push(format!(
                         "laterSameDay.directHandlerCount should be {LATE_DIRECT_HANDLER_COUNT}"
                     ));
+                }
+            }
+            if let Some(xf) = late.get("xfTagCases") {
+                let cases = xf.get("cases").and_then(|x| x.as_array());
+                if cases.map(|c| c.len()) != Some(XF_TAG_CASES.len()) {
+                    errors.push("laterSameDay.xfTagCases.cases length mismatch".into());
+                } else if let Some(cases) = cases {
+                    for (c, row) in XF_TAG_CASES.iter().zip(cases) {
+                        if row.get("tag").and_then(|x| x.as_u64()) != Some(u64::from(c.tag))
+                            || row.get("kind").and_then(|x| x.as_str()) != Some(c.kind)
+                        {
+                            errors.push(format!("xfTagCases mismatch at {}", c.kind));
+                        }
+                    }
+                }
+                if xf.get("defaultKind").and_then(|x| x.as_str()) != Some("true") {
+                    errors.push("xfTagCases.defaultKind should be true".into());
+                }
+            }
+            if let Some(props) = late.get("propertyImmRoles").and_then(|x| x.as_array()) {
+                if props.len() != PROPERTY_IMM_ROLES_B_LATE.len() {
+                    errors.push("laterSameDay.propertyImmRoles length mismatch".into());
+                }
+                for (p, row) in PROPERTY_IMM_ROLES_B_LATE.iter().zip(props) {
+                    if row.get("assign").and_then(|x| x.as_str()) != Some(p.assign) {
+                        errors.push(format!("propertyImmRoles.{} assign mismatch", p.handler));
+                    }
                 }
             }
             if let Some(fu) = late.get("foFollowUp") {

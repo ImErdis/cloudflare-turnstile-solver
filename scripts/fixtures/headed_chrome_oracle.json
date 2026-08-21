@@ -97,7 +97,7 @@
       "X1": { "opcode": 45, "handler": "X1", "width": 2, "extras": [144], "family": "throw_register", "jsFloats": [144] },
       "X3": { "opcode": 104, "handler": "X3", "width": 2, "extras": [1], "family": "store_empty_object", "jsFloats": [1] },
       "X4": { "opcode": 12, "handler": "X4", "width": 2, "extras": [58], "family": "store_empty_array", "jsFloats": [58] },
-      "Xf": { "opcode": 222, "handler": "Xf", "width": "variable", "extras": [86, 112], "family": "tagged_load", "jsFloats": [86, 112], "note": "string tag 199. Do not execute." },
+      "Xf": { "opcode": 222, "handler": "Xf", "width": "variable", "extras": [86, 112], "family": "tagged_load", "jsFloats": [86, 112], "note": "tag cases in xfTagCases. Do not execute." },
       "Xg": { "opcode": 130, "handler": "Xg", "width": 3, "extras": [112, 19], "family": "register_store", "jsFloats": [112.87, 19] },
       "XP": { "opcode": 113, "handler": "XP", "width": "variable", "extras": [52, 132], "family": "leb_object_slot", "jsFloats": [52, 132] },
       "Xj": { "opcode": 201, "handler": "Xj", "width": "variable", "extras": [], "family": "leb_alloc_objects", "note": "LEB count has no extra xor. Do not execute." },
@@ -134,6 +134,39 @@
       "gZ": { "opcode": 183, "handler": "gZ", "width": 6, "extras": [208, 108, 168, 12, 192], "family": "dual_property_get", "jsFloats": [208.82, 108, 168, 12, 192] },
       "gl": { "opcode": 140, "handler": "gl", "width": "variable", "extras": [43, 69, 118], "family": "string_key_get", "jsFloats": [43, 69, 118] }
     },
+    "xfTagCases": {
+      "note": "Xf/222 tag switch from 56907 iframe HTML. Tag extra 86, dst extra 112. Default after the 109!== gate is true (XQ=!0), not a tag number. Do not execute.",
+      "tagXor": 86,
+      "dstXor": 112,
+      "intXor": 19,
+      "stringCharsetXor": 136,
+      "gateNot": 109,
+      "defaultKind": "true",
+      "cases": [
+        { "tag": 162, "kind": "int" },
+        { "tag": 86, "kind": "undefined" },
+        { "tag": 199, "kind": "string" },
+        { "tag": 36, "kind": "leb_int" },
+        { "tag": 58, "kind": "float" },
+        { "tag": 80, "kind": "null" },
+        { "tag": 165, "kind": "number_host" },
+        { "tag": 174, "kind": "number_host" },
+        { "tag": 202, "kind": "false" },
+        { "tag": 98, "kind": "packed_tuple" },
+        { "tag": 161, "kind": "bytes" },
+        { "tag": 117, "kind": "regexp" }
+      ]
+    },
+    "propertyImmRoles": [
+      { "opcode": 132, "handler": "gy", "family": "property_get", "roles": ["obj", "dst", "key"], "assign": "dst = obj[key]" },
+      { "opcode": 227, "handler": "gG", "family": "property_set", "roles": ["key", "obj", "src"], "assign": "obj[key] = src" },
+      { "opcode": 169, "handler": "ge", "family": "property_set", "roles": ["obj", "key_slot", "src", "key_imm"], "assign": "regs[key_slot]=key_imm; obj[key_imm]=src" },
+      { "opcode": 138, "handler": "gN", "family": "property_set", "roles": ["obj", "key", "dst", "src_imm"], "assign": "regs[dst]=src_imm; obj[regs[key]]=src_imm" },
+      { "opcode": 72, "handler": "gY", "family": "nested_property_get", "roles": ["k1", "k2", "dst", "obj"], "assign": "dst = obj[k1][k2]" },
+      { "opcode": 183, "handler": "gZ", "family": "dual_property_get", "roles": ["k_a", "dst_b", "obj", "k_b", "dst_a"], "assign": "dst_a = obj[k_b]; dst_b = obj[k_a]" },
+      { "opcode": 226, "handler": "gC", "family": "string_key_set", "roles": ["obj", "src"], "assign": "obj[leb_string] = src" },
+      { "opcode": 140, "handler": "gl", "family": "string_key_get", "roles": ["obj", "dst"], "assign": "dst = obj[leb_string]" }
+    ],
     "foUnchanged": {
       "postsPerChallenge": 2,
       "cfChlRa": "0",

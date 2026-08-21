@@ -108,6 +108,130 @@ pub const XF_TAG_FLOAT: u8 = 58;
 pub const XF_TAG_NULL: u8 = 80;
 pub const XF_TAG_FALSE: u8 = 202;
 pub const XF_TAG_BYTES: u8 = 161;
+/// Charset extra on tag-199 string and tag-161 bytes (`go[...^136]`).
+pub const XF_STRING_CHARSET_XOR: u8 = 136;
+/// Host `Number[...]` tags (obfuscated property names — not Infinity/NaN literals in source).
+pub const XF_TAG_NUMBER_A: u8 = 165;
+pub const XF_TAG_NUMBER_B: u8 = 174;
+/// Packed 4-tuple / frame-like array (js `Xw===98`).
+pub const XF_TAG_PACKED: u8 = 98;
+/// Two LEB strings then `RegExp(pattern, flags)` (js `Xw,117`).
+pub const XF_TAG_REGEXP: u8 = 117;
+/// `109!==Xw` gate around false/packed/bytes/regexp/true. Not its own store kind.
+pub const XF_TAG_GATE: u8 = 109;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct XfTagCase {
+    pub tag: u8,
+    pub kind: &'static str,
+    pub note: &'static str,
+}
+
+/// `Xf`/222 tag `switch` from the 56907 iframe. Tag byte extra `86`, dst extra `112`.
+/// Default after the `109!==` gate is `true` (`XQ=!0`) — not a tag number.
+/// Do not execute.
+pub const XF_TAG_CASES: &[XfTagCase] = &[
+    XfTagCase { tag: XF_TAG_INT, kind: "int", note: "value ^= 19 then store to regs[dst]" },
+    XfTagCase { tag: XF_TAG_UNDEF, kind: "undefined", note: "store void 0" },
+    XfTagCase { tag: XF_TAG_STRING, kind: "string", note: "LEB length; charset extra 136" },
+    XfTagCase { tag: XF_TAG_LEB, kind: "leb_int", note: "LEB integer payload" },
+    XfTagCase { tag: XF_TAG_FLOAT, kind: "float", note: "IEEE-like Math.pow(2, exp) bit walk" },
+    XfTagCase { tag: XF_TAG_NULL, kind: "null", note: "store null" },
+    XfTagCase { tag: XF_TAG_NUMBER_A, kind: "number_host", note: "Number[obfuscated prop]; not a JSON key" },
+    XfTagCase { tag: XF_TAG_NUMBER_B, kind: "number_host", note: "Number[other obfuscated prop]" },
+    XfTagCase { tag: XF_TAG_FALSE, kind: "false", note: "store !1; inside 109!== gate" },
+    XfTagCase { tag: XF_TAG_PACKED, kind: "packed_tuple", note: "u24-ish tuple plus extra 207.58 and this.m" },
+    XfTagCase { tag: XF_TAG_BYTES, kind: "bytes", note: "LEB length; charset extra 136" },
+    XfTagCase { tag: XF_TAG_REGEXP, kind: "regexp", note: "two LEB strings (charset 195, 229) then RegExp" },
+];
+
+pub fn xf_tag_kind(tag: u8) -> Option<&'static str> {
+    XF_TAG_CASES.iter().find(|c| c.tag == tag).map(|c| c.kind)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct PropertyImmRoles {
+    pub opcode: u8,
+    pub handler: &'static str,
+    pub family: &'static str,
+    pub roles: &'static [&'static str],
+    pub assign: &'static str,
+    pub note: &'static str,
+}
+
+/// Property get/set on the 56907 iframe. Immediates select **register slots**
+/// (`imm ^ this.h`) or a bytecode LEB string. Follow-up JSON ident names are
+/// not literals here — do not claim numeric `"1".."39"` writes.
+pub const PROPERTY_IMM_ROLES_B_LATE: &[PropertyImmRoles] = &[
+    PropertyImmRoles {
+        opcode: 132,
+        handler: "gy",
+        family: "property_get",
+        roles: &["obj", "dst", "key"],
+        assign: "dst = obj[key]",
+        note: "Xt[Xo]=Xt[XQ][Xt[XM]]; extras 99, 216, 38",
+    },
+    PropertyImmRoles {
+        opcode: 227,
+        handler: "gG",
+        family: "property_set",
+        roles: &["key", "obj", "src"],
+        assign: "obj[key] = src",
+        note: "Xt[Xo][Xt[XQ]]=Xt[XM]; extras 221, 41, 180",
+    },
+    PropertyImmRoles {
+        opcode: 169,
+        handler: "ge",
+        family: "property_set",
+        roles: &["obj", "key_slot", "src", "key_imm"],
+        assign: "regs[key_slot]=key_imm; obj[key_imm]=src",
+        note: "4th imm is the property name itself (decoded this.i), not a register; sibling of gN",
+    },
+    PropertyImmRoles {
+        opcode: 138,
+        handler: "gN",
+        family: "property_set",
+        roles: &["obj", "key", "dst", "src_imm"],
+        assign: "regs[dst]=src_imm; obj[regs[key]]=src_imm",
+        note: "4th imm is the value; key is a register. Sibling of ge (same extras 41,221,180,19)",
+    },
+    PropertyImmRoles {
+        opcode: 72,
+        handler: "gY",
+        family: "nested_property_get",
+        roles: &["k1", "k2", "dst", "obj"],
+        assign: "dst = obj[k1][k2]",
+        note: "Xt[XR]=Xt[XM][Xt[XQ]][Xt[Xo]]; extras 117, 221, 231, 177",
+    },
+    PropertyImmRoles {
+        opcode: 183,
+        handler: "gZ",
+        family: "dual_property_get",
+        roles: &["k_a", "dst_b", "obj", "k_b", "dst_a"],
+        assign: "dst_a = obj[k_b]; dst_b = obj[k_a]",
+        note: "two gets from the same object; extras 208, 108, 168, 12, 192",
+    },
+    PropertyImmRoles {
+        opcode: 226,
+        handler: "gC",
+        family: "string_key_set",
+        roles: &["obj", "src"],
+        assign: "obj[leb_string] = src",
+        note: "LEB string key charset extra 1; string is in packed bytecode, not this HTML",
+    },
+    PropertyImmRoles {
+        opcode: 140,
+        handler: "gl",
+        family: "string_key_get",
+        roles: &["obj", "dst"],
+        assign: "dst = obj[leb_string]",
+        note: "LEB string key charset extra 43 then extras 69, 118; string is in packed bytecode",
+    },
+];
+
+pub fn property_roles_for_late(opcode: u8) -> Option<&'static PropertyImmRoles> {
+    PROPERTY_IMM_ROLES_B_LATE.iter().find(|p| p.opcode == opcode)
+}
 
 /// Fixed-width handlers recovered from the headed-Chrome iframe (branch `b`).
 /// Operand extras are `ToInt32` of the floats in the handler source.
@@ -173,7 +297,7 @@ pub const HANDLER_LAYOUT_B_LATE: &[HandlerLayout] = &[
     h(X4_OPCODE, "X4", InstrWidth::Fixed(2), &[58], "store_empty_array",
         "1-imm store [] at (imm^h); early-b d7 analogue (js ^58). Later HTML: X5."),
     h(XF_OPCODE, "Xf", InstrWidth::Variable, &[XF_TAG_XOR, XF_DST_XOR], "tagged_load",
-        "tagged load: tag^86 dst^112, string tag 199. Later HTML calls this Xg."),
+        "tagged load: tag^86 dst^112; 162 int^19, 86 undef, 199 string, 36 LEB, 58 float, 80 null, 165/174 Number host, 202 false, 98 packed, 161 bytes, 117 regexp, else true. Later HTML: Xg."),
     h(XG_OPCODE, "Xg", InstrWidth::Fixed(3), &[112, 19], "register_store",
         "2-imm store (js 112.87, 19). Later HTML: XX."),
     h(113, "XP", InstrWidth::Variable, &[52, 132], "leb_object_slot",
@@ -229,21 +353,21 @@ pub const HANDLER_LAYOUT_B_LATE: &[HandlerLayout] = &[
     h(98, "XV", InstrWidth::Variable, &[51, 17, 141, 56], "named_call",
         "like XE via this.m[].o (js 51, 17.26, 141, 56.48/56.04)"),
     h(GG_OPCODE, "gG", InstrWidth::Fixed(4), &[221, 41, 180], "property_set",
-        "3-imm (js 221, 41, 180.99); obj[key] = src. Later HTML: ge."),
+        "3-imm obj[key]=src (roles key, obj, src; js 221, 41, 180.99). Later HTML: ge."),
     h(GE_OPCODE, "ge", InstrWidth::Fixed(5), &[41, 221, 180, 19], "property_set",
-        "4-imm property set dest[key]=src (js 41.43, 221, 180, 19). Later HTML: gN."),
+        "4-imm: key is decoded imm; obj[key_imm]=src (roles obj, key_slot, src, key_imm). Later HTML: gN."),
     h(138, "gN", InstrWidth::Fixed(5), &[41, 221, 180, 19], "property_set",
-        "4-imm property set obj[key]=src (js 41, 221, 180.64, 19); sibling of ge"),
+        "4-imm: src is decoded imm; obj[regs[key]]=src_imm (roles obj, key, dst, src_imm); sibling of ge"),
     h(226, "gC", InstrWidth::Variable, &[42, 182, 1], "string_key_set",
-        "2-imm (42, 182) then LEB string (charset ^1); obj[str]=src"),
+        "2-imm (42, 182) then LEB string (charset ^1); obj[str]=src. String is in packed bytecode."),
     h(132, "gy", InstrWidth::Fixed(4), &[99, 216, 38], "property_get",
-        "3-imm property get dst=obj[key] (js 99.04, 216.44, 38); early-b p analogue"),
+        "3-imm dst=obj[key] (roles obj, dst, key; js 99.04, 216.44, 38); early-b p analogue"),
     h(GY_OPCODE, "gY", InstrWidth::Fixed(5), &[117, 221, 231, 177], "nested_property_get",
-        "4-imm nested property get dst = obj[k1][k2] (js 177.81). Later HTML: gZ."),
+        "4-imm dst=obj[k1][k2] (roles k1, k2, dst, obj; js 177.81). Later HTML: gZ."),
     h(183, "gZ", InstrWidth::Fixed(6), &[208, 108, 168, 12, 192], "dual_property_get",
-        "5-imm (js 208.82, 108, 168, 12, 192); two gets from the same object"),
+        "5-imm two gets from the same object (roles k_a, dst_b, obj, k_b, dst_a)"),
     h(140, "gl", InstrWidth::Variable, &[43, 69, 118], "string_key_get",
-        "LEB string (charset ^43) then extras 69, 118; dst = obj[str]"),
+        "LEB string (charset ^43) then extras 69, 118; dst=obj[str]. String is in packed bytecode."),
 ];
 
 pub fn layout_for(opcode: u8) -> Option<&'static HandlerLayout> {
@@ -504,6 +628,79 @@ mod tests {
     }
 
     #[test]
+    fn xf_tag_cases_match_56907_html() {
+        assert_eq!(xf_tag_kind(XF_TAG_STRING), Some("string"));
+        assert_eq!(xf_tag_kind(XF_TAG_INT), Some("int"));
+        assert_eq!(xf_tag_kind(XF_TAG_UNDEF), Some("undefined"));
+        assert_eq!(xf_tag_kind(XF_TAG_REGEXP), Some("regexp"));
+        assert_eq!(xf_tag_kind(XF_TAG_PACKED), Some("packed_tuple"));
+        assert_eq!(xf_tag_kind(XF_TAG_GATE), None);
+        assert_eq!(js_xor_imm(136.0), XF_STRING_CHARSET_XOR);
+        let tags: Vec<u8> = XF_TAG_CASES.iter().map(|c| c.tag).collect();
+        assert_eq!(tags.len(), 12);
+        let path = std::path::Path::new("artifacts/re-out/chrome-oracle/iframe-1.html");
+        if !path.is_file() {
+            return;
+        }
+        let html = std::fs::read_to_string(path).unwrap();
+        for snip in [
+            "162===Xw",
+            "Xw===86",
+            "199===Xw",
+            "Xw===36",
+            "(Xw,58)",
+            "(Xw,80)",
+            "(Xw,165)",
+            "(Xw,174)",
+            "109!==Xw",
+            "(Xw,202)",
+            "Xw===98",
+            "(Xw,161)",
+            "(Xw,117)",
+            "RegExp,XQ,Xo",
+            "XQ=!0",
+            "^136]",
+        ] {
+            assert!(html.contains(snip), "Xf html missing {snip}");
+        }
+    }
+
+    #[test]
+    fn property_imm_roles_match_56907_html() {
+        assert_eq!(PROPERTY_IMM_ROLES_B_LATE.len(), 8);
+        let gy = property_roles_for_late(132).unwrap();
+        assert_eq!(gy.roles, &["obj", "dst", "key"]);
+        assert_eq!(gy.assign, "dst = obj[key]");
+        let ge = property_roles_for_late(169).unwrap();
+        assert_eq!(ge.roles, &["obj", "key_slot", "src", "key_imm"]);
+        let gn = property_roles_for_late(138).unwrap();
+        assert_eq!(gn.roles, &["obj", "key", "dst", "src_imm"]);
+        assert_ne!(ge.assign, gn.assign);
+        for p in PROPERTY_IMM_ROLES_B_LATE {
+            let h = layout_for_late(p.opcode).unwrap();
+            assert_eq!(h.handler, p.handler);
+            assert_eq!(h.family, p.family);
+        }
+        let path = std::path::Path::new("artifacts/re-out/chrome-oracle/iframe-1.html");
+        if !path.is_file() {
+            return;
+        }
+        let html = std::fs::read_to_string(path).unwrap();
+        for snip in [
+            "Xt[Xo]=Xt[XQ][Xt[XM]]}",
+            "Xt[Xo][Xt[XQ]]=Xt[XM]}",
+            "Xt[Xo]=Xs,Xt[XQ][Xs]=Xt[XM]}",
+            "Xt[XM]=Xs,Xt[XQ][Xt[Xo]]=Xs}",
+            "Xt[XR]=Xt[XM][Xt[XQ]][Xt[Xo]]}",
+            "Xt[XM]=Xt[XR][Xt[XS]],Xt[Xo]=Xt[XR][Xt[XQ]]}",
+            "A[Xu][Xw]=A[W]}",
+            "A[W]=A[XQ][Xw]}",
+        ] {
+            assert!(html.contains(snip), "property html missing {snip}");
+        }
+    }
+
+    #[test]
     fn late_b_handler_snippets_carry_documented_floats() {
         // Headed Chrome iframe (chrome-oracle, names gq/gG/X3/gY/Xf).
         const GQ: &str = "^123.64,XM=h[XM^W[bY(zZ.W)](Xs[Xw++],253)+256&255^148^Xt]";
@@ -596,6 +793,29 @@ mod tests {
         );
         assert_eq!(late["foFollowUp"]["notPackedProgram"], true);
         assert_eq!(late["foFollowUp"]["sameNWrapper"], true);
+        let tags = late["xfTagCases"]["cases"].as_array().expect("xfTagCases.cases");
+        assert_eq!(tags.len(), XF_TAG_CASES.len());
+        for (i, c) in XF_TAG_CASES.iter().enumerate() {
+            let row = &tags[i];
+            assert_eq!(row["tag"].as_u64(), Some(u64::from(c.tag)), "{}", c.kind);
+            assert_eq!(row["kind"].as_str(), Some(c.kind));
+        }
+        assert_eq!(late["xfTagCases"]["tagXor"].as_u64(), Some(u64::from(XF_TAG_XOR)));
+        assert_eq!(late["xfTagCases"]["dstXor"].as_u64(), Some(u64::from(XF_DST_XOR)));
+        assert_eq!(late["xfTagCases"]["defaultKind"].as_str(), Some("true"));
+        let props = late["propertyImmRoles"].as_array().expect("propertyImmRoles");
+        assert_eq!(props.len(), PROPERTY_IMM_ROLES_B_LATE.len());
+        for (p, row) in PROPERTY_IMM_ROLES_B_LATE.iter().zip(props) {
+            assert_eq!(row["opcode"].as_u64(), Some(u64::from(p.opcode)));
+            assert_eq!(row["assign"].as_str(), Some(p.assign));
+            let roles: Vec<&str> = row["roles"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|x| x.as_str().unwrap())
+                .collect();
+            assert_eq!(roles, p.roles);
+        }
     }
 
     #[test]

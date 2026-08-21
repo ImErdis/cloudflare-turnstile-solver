@@ -33,8 +33,9 @@ pub use solver::run_program::{
     RunProgramAnalysis, analyze_packed_run_program, unpack_packed_run_program,
 };
 pub use solver::run_program_ops::{
-    DN_TAG_STRING, HANDLER_LAYOUT_B, HANDLER_LAYOUT_B_LATE, XF_TAG_STRING, classify_pc_delta,
-    classify_pc_delta_late, first_dn_tag_b, first_xf_tag_late, operand_from_byte,
+    DN_TAG_STRING, HANDLER_LAYOUT_B, HANDLER_LAYOUT_B_LATE, PROPERTY_IMM_ROLES_B_LATE, XF_TAG_CASES,
+    XF_TAG_STRING, classify_pc_delta, classify_pc_delta_late, first_dn_tag_b, first_xf_tag_late,
+    operand_from_byte, xf_tag_kind,
 };
 pub use solver::run_program_vm::{
     FETCH_LIVE, INIT_KEY, INIT_PC, OPCODE_TABLE, decode_opcode, naive_one_byte_fetches, next_key,

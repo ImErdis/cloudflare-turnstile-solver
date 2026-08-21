@@ -112,10 +112,14 @@ number. Chrome-stable widths: `gq`/246 width 3 extras `123,148`; `gG`/227
 width 4 extras `221,41,180`; `X3`/104 width 2 extra `1`; `gY`/72 width 5
 extras `117,221,231,177`; `X4`/12 width 2 extra `58`; `Xz`/52 width 3 extra
 `132`; `Xg`/130 width 3 extras `112,19`; `ge`/169 width 5 extras `41,221,180,19`;
-`Xf`/222 variable tag `86` dst `112`. The rest are HTML family tags (jump,
-cond jump, LEB/`this.m[].o`, call/apply, `new`, property get/set, string-key
-get/set, register swap). Minified names rotate; opcode numbers, `ToInt32`
-extras, and family tags did not. A 1-byte walk still diverges immediately.
+`Xf`/222 variable tag `86` dst `112` (int 162/`^19`, undef 86, string 199,
+LEB 36, float 58, null 80, Number-host 165/174, false 202, packed 98, bytes
+161, regexp 117, else `true`; `109!==` gate). Property get/set imm roles are
+in `PROPERTY_IMM_ROLES_B_LATE` (register slots or bytecode LEB strings — not
+follow-up JSON ident literals). The rest are HTML family tags (jump, cond
+jump, LEB/`this.m[].o`, call/apply, `new`, register swap). Minified names
+rotate; opcode numbers, `ToInt32` extras, and family tags did not. A 1-byte
+walk still diverges immediately.
 Do **not** execute these handlers as a solver. Chrome PC-delta inject must
 match the **current** key-update spelling (`36163)+38392&255` or
 `mix*mix,56907`) and harvest `{pc,op}` **while the OOPIF lives** (iframes close
