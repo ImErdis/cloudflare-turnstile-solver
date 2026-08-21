@@ -83,5 +83,5 @@ fn decrypt_fo(ray: &str, data: &str) -> Result<String> {
         3 => format!("{compact}="),
         _ => compact,
     };
-    decrypt_cloudflare_response(ray, &padded).map_err(Into::into)
+    decrypt_cloudflare_response(ray, &padded)
 }

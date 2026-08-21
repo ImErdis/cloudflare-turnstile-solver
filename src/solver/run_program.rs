@@ -4,8 +4,9 @@ use base64::Engine;
 use serde::Serialize;
 
 /// Base64 prefix of every captured `runProgram(...)` argument (iframe inline and
-/// ray-decrypted `/fo/` bodies). It is the standard-base64 encoding of
-/// [`RUN_PROGRAM_MAGIC_BYTES`].
+/// ray-decrypted `/fo/` bodies). The first 16 characters encode
+/// [`RUN_PROGRAM_MAGIC_BYTES`][0..12]; the 17th–18th characters encode byte 13
+/// (`0x78`) plus the high nibble of byte 14 (captures use `0x9x` → `J`).
 pub const PACKED_RUN_PROGRAM_PREFIX: &str = "ryrCJzUnLCItNTiVeJ";
 
 /// First 13 decoded bytes shared by those packed programs.
@@ -201,16 +202,26 @@ mod tests {
 
     #[test]
     fn magic_bytes_encode_to_known_prefix() {
-        let encoded = base64::prelude::BASE64_STANDARD.encode(RUN_PROGRAM_MAGIC_BYTES);
+        // 18 prefix chars encode 13 bytes plus the high nibble of byte 14.
+        // Captures use 0x9x there (`J`); zero padding would yield `A`.
+        let mut raw = RUN_PROGRAM_MAGIC_BYTES.to_vec();
+        raw.push(0x90);
+        let encoded = base64::prelude::BASE64_STANDARD.encode(&raw);
         assert!(
             encoded.starts_with(PACKED_RUN_PROGRAM_PREFIX),
             "encoded {encoded} prefix {PACKED_RUN_PROGRAM_PREFIX}"
+        );
+        let twelve = base64::prelude::BASE64_STANDARD.encode(&RUN_PROGRAM_MAGIC_BYTES[..12]);
+        assert_eq!(
+            &PACKED_RUN_PROGRAM_PREFIX[..16],
+            twelve.trim_end_matches('=')
         );
     }
 
     #[test]
     fn unpacks_synthetic_magic_payload() {
         let mut raw = RUN_PROGRAM_MAGIC_BYTES.to_vec();
+        raw.push(0x90);
         raw.extend_from_slice(&[0u8; 64]);
         let packed = base64::prelude::BASE64_STANDARD.encode(&raw);
         assert!(packed.starts_with(PACKED_RUN_PROGRAM_PREFIX));
