@@ -19,6 +19,7 @@
  *   CHROME_PATH          default /usr/bin/google-chrome-stable
  *   ORACLE_WAIT_MS       default 22000
  *   ORACLE_HEADLESS      set to 1 to force headless (not the intended mode)
+ *   ORACLE_SITE_ISOLATION set to 1 to keep OOPIF isolation (hooks will miss the iframe)
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -31,6 +32,23 @@ const outDir = positional[1] || path.join("artifacts", "re-out", "chrome-oracle"
 const chrome = process.env.CHROME_PATH || "/usr/bin/google-chrome-stable";
 const waitMs = Number(process.env.ORACLE_WAIT_MS || 22_000);
 const headed = process.env.ORACLE_HEADLESS !== "1";
+const isolateIframes = process.env.ORACLE_SITE_ISOLATION === "1";
+
+const CHROME_ARGS = [
+  "--no-sandbox",
+  "--disable-setuid-sandbox",
+  "--disable-dev-shm-usage",
+  "--window-size=1920,1080",
+  "--use-gl=angle",
+  "--use-angle=swiftshader",
+  "--autoplay-policy=no-user-gesture-required",
+];
+if (!isolateIframes) {
+  CHROME_ARGS.push(
+    "--disable-site-isolation-trials",
+    "--disable-features=IsolateOrigins,site-per-process",
+  );
+}
 
 if (!selfTest) {
   fs.mkdirSync(outDir, { recursive: true });
@@ -87,7 +105,7 @@ const PREAMBLE = `(() => {
     JSON.stringify = function (v) {
       try {
         const s = __cfShape(v, "stringify");
-        if (s && globalThis.__cfFo.length < 8) globalThis.__cfFo.push(s);
+        if (s && globalThis.__cfFo.length < 12) globalThis.__cfFo.push(s);
       } catch {}
       return js.apply(this, arguments);
     };
@@ -132,29 +150,80 @@ const PREAMBLE = `(() => {
     globalThis.__cfHookErr = String(e);
   }
   try {
+    const st = setTimeout;
+    setTimeout = function (fn, ms) {
+      try {
+        if (ms === 100) {
+          for (let i = 2; i < arguments.length; i++) {
+            const s = __cfShape(arguments[i], "setTimeout");
+            if (s && globalThis.__cfFo.length < 12) globalThis.__cfFo.push(s);
+          }
+        }
+      } catch {}
+      return st.apply(this, arguments);
+    };
+  } catch (e) {
+    globalThis.__cfHookErr = (globalThis.__cfHookErr || "") + String(e);
+  }
+  try {
+    function wrapRP(v) {
+      if (typeof v !== "function" || v.__cfRPWrapped) return v;
+      const wrapped = function (packed, helper) {
+        try {
+          globalThis.__cfRP.push({
+            packedType: typeof packed,
+            packedLen: packed && packed.length,
+            packedPrefix: String(packed || "").slice(0, 20),
+          });
+        } catch {}
+        const ret = v.apply(this, arguments);
+        if (typeof ret === "function") {
+          return function (initObj, sendFn) {
+            try {
+              const s0 = __cfShape(initObj, "rpReturn");
+              if (s0 && globalThis.__cfFo.length < 12) globalThis.__cfFo.push(s0);
+              let last = s0 && s0.keyCount;
+              const start = Date.now();
+              const poll = setInterval(function () {
+                try {
+                  const s = __cfShape(initObj, "rpMutate");
+                  if (s && s.keyCount !== last && (s.numericKeyCount > 0 || s.keyCount > (last || 0))) {
+                    last = s.keyCount;
+                    if (globalThis.__cfFo.length < 12) globalThis.__cfFo.push(s);
+                  }
+                  if (Date.now() - start > 12000) clearInterval(poll);
+                } catch (e) {
+                  clearInterval(poll);
+                }
+              }, 25);
+            } catch {}
+            return ret.apply(this, arguments);
+          };
+        }
+        return ret;
+      };
+      wrapped.__cfRPWrapped = true;
+      return wrapped;
+    }
     let rp;
     Object.defineProperty(globalThis, "runProgram", {
       configurable: true,
       enumerable: true,
       set(v) {
-        rp =
-          typeof v === "function"
-            ? function (packed, helper) {
-                try {
-                  globalThis.__cfRP.push({
-                    packedType: typeof packed,
-                    packedLen: packed && packed.length,
-                    packedPrefix: String(packed || "").slice(0, 20),
-                  });
-                } catch {}
-                return v.apply(this, arguments);
-              }
-            : v;
+        rp = wrapRP(v);
       },
       get() {
         return rp;
       },
     });
+    setInterval(function () {
+      try {
+        const cur = globalThis.runProgram;
+        if (typeof cur === "function" && !cur.__cfRPWrapped) {
+          globalThis.runProgram = wrapRP(cur);
+        }
+      } catch {}
+    }, 20);
   } catch (e) {
     globalThis.__cfHookErr = (globalThis.__cfHookErr || "") + String(e);
   }
@@ -898,7 +967,10 @@ function selfTestInject() {
       sendBp.name === "Q" &&
       cssCls &&
       cssCls.kind === "other" &&
-      cssPicked == null,
+      cssPicked == null &&
+      CHROME_ARGS.includes("--disable-site-isolation-trials") &&
+      PREAMBLE.includes("rpMutate") &&
+      PREAMBLE.includes("setTimeout"),
     happyOld: { replacements: a.replacements, injected: a.injected },
     happyLive: { replacements: b.replacements, injected: b.injected },
     catchLive: { replacements: c.replacements, injected: c.injected },
@@ -1166,7 +1238,7 @@ async function attachSession(session, targetInfo, waitingForDebugger) {
           hit.some((id) => compressorBreakpoints.has(id)) ||
           fname === "f4" ||
           fname === "wZ";
-        if (compressorHit && frame && liveFo.length < 8) {
+        if (compressorHit && frame && liveFo.length < 12) {
           try {
             const got = await session.send("Debugger.evaluateOnCallFrame", {
               callFrameId: frame.callFrameId,
@@ -1246,15 +1318,7 @@ const browser = await puppeteer.launch({
   headless: headed ? false : "new",
   dumpio: false,
   defaultViewport: { width: 1920, height: 1080 },
-  args: [
-    "--no-sandbox",
-    "--disable-setuid-sandbox",
-    "--disable-dev-shm-usage",
-    "--window-size=1920,1080",
-    "--use-gl=angle",
-    "--use-angle=swiftshader",
-    "--autoplay-policy=no-user-gesture-required",
-  ],
+  args: CHROME_ARGS,
 });
 
 const page = await browser.newPage();
@@ -1307,14 +1371,14 @@ async function harvestSessions(tag) {
           ops: (globalThis.__cfOp||[]).slice(0,400),
           xhr: globalThis.__cfXhr||[],
           runProgramCalls: globalThis.__cfRP||[],
-          fo: (globalThis.__cfFo||[]).slice(0,8)
+          fo: (globalThis.__cfFo||[]).slice(0,12)
         })`,
         returnByValue: true,
       });
       const v = result?.value;
       if (v?.fo?.length) {
         for (const s of v.fo) {
-          if (liveFo.length < 8) liveFo.push(s);
+          if (liveFo.length < 12) liveFo.push(s);
         }
       }
       if (v?.ops?.length) {
@@ -1368,7 +1432,7 @@ for (const { session, label, type } of cdpSessions) {
         ops: (globalThis.__cfOp||[]).slice(0,400),
         xhr: globalThis.__cfXhr||[],
         runProgramCalls: globalThis.__cfRP||[],
-        fo: (globalThis.__cfFo||[]).slice(0,8),
+        fo: (globalThis.__cfFo||[]).slice(0,12),
         hookErr: globalThis.__cfHookErr||null
       })`,
       returnByValue: true,
@@ -1422,7 +1486,7 @@ const ops = normalizeBreakpointOps([
 const reads = frameDumps.flatMap((f) => f.reads || []);
 const xhr = frameDumps.flatMap((f) => f.xhr || []);
 for (const s of frameDumps.flatMap((f) => f.fo || [])) {
-  if (s && s.keyCount >= 20 && liveFo.length < 8) liveFo.push(s);
+  if (s && s.keyCount >= 20 && liveFo.length < 12) liveFo.push(s);
 }
 const foShapes = [];
 const seenFo = new Set();
