@@ -1,11 +1,8 @@
 use crate::reverse::encryption::decrypt_cloudflare_response;
 use crate::solver::protocol::looks_like_javascript;
+use crate::solver::run_program::{PACKED_RUN_PROGRAM_PREFIX, analyze_packed_run_program};
 use anyhow::Context;
 use serde::Serialize;
-
-/// Prefix shared by the iframe's inline `runProgram(...)` argument and a
-/// `decrypt_cloudflare_response(ray, /fo/ body)` of the captured blob.
-pub const PACKED_RUN_PROGRAM_PREFIX: &str = "ryrCJzUnLCItNTiVeJ";
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct FoBlobAnalysis {
@@ -18,14 +15,21 @@ pub struct FoBlobAnalysis {
     pub looks_like_javascript: bool,
     pub looks_like_packed_run_program: bool,
     pub json_error_d_len: Option<usize>,
+    pub bytecode_len: usize,
+    pub run_program_gap: Option<String>,
 }
 
 impl FoBlobAnalysis {
     pub fn summary(&self) -> String {
         if self.looks_like_packed_run_program {
             format!(
-                "/fo/ body decrypts with c_ray to a packed runProgram blob ({} bytes, prefix {:?}); not the orchestrate VM this crate disassembles",
-                self.decrypt_bytes, self.decrypt_prefix
+                "/fo/ body decrypts with c_ray to packed runProgram ({} chars -> {} bytecode bytes, prefix {:?}); next: {}",
+                self.decrypt_bytes,
+                self.bytecode_len,
+                self.decrypt_prefix,
+                self.run_program_gap
+                    .as_deref()
+                    .unwrap_or("runProgram_opcode_map")
             )
         } else if self.looks_like_json_error {
             format!(
@@ -89,6 +93,10 @@ pub fn analyze_fo_body(c_ray: &str, body: &str) -> FoBlobAnalysis {
             .as_ref()
             .map(|s| is_packed_run_program(s))
             .unwrap_or(false);
+    let rp = decrypted
+        .as_ref()
+        .filter(|_| looks_like_packed_run_program)
+        .map(|s| analyze_packed_run_program(s));
 
     FoBlobAnalysis {
         input_bytes: body.len(),
@@ -100,6 +108,8 @@ pub fn analyze_fo_body(c_ray: &str, body: &str) -> FoBlobAnalysis {
         looks_like_javascript: looks_js,
         looks_like_packed_run_program,
         json_error_d_len,
+        bytecode_len: rp.as_ref().map(|r| r.bytecode_len).unwrap_or(0),
+        run_program_gap: rp.as_ref().map(|r| r.next_gap.to_string()),
     }
 }
 

@@ -9,6 +9,7 @@ pub mod fo_blob;
 pub mod keys;
 mod performance;
 pub mod protocol;
+pub mod run_program;
 pub mod task;
 mod task_client;
 mod timezone;

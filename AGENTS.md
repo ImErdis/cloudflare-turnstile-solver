@@ -30,6 +30,7 @@ may not fully work end-to-end against live Cloudflare.
 - Lint: `cargo clippy --locked --all-targets`  (currently emits warnings only, no errors)
 - Test: `cargo test --locked`
 - Probe live iframe protocol (no fingerprint): `cargo run --locked --bin probe_iframe`
+- Unpack a captured packed `runProgram` blob (no network): `cargo run --locked --bin analyze_run_program`
 - Run the solver against the SolveGate demo: `cargo run --locked --bin solve_test`
 
 ### Live Turnstile protocol (as of 2026-08)
@@ -54,14 +55,20 @@ randomized `_cf_chl_opt` fields — not the VM this crate disassembles (no `"lan
 The iframe bootstrap then **XHR POSTs** `/fo/{session}/{ray}/{ch}` with headers `cf-chl` /
 `cf-chl-ra` and a compressed init body (`wZ(...)`). A GET or empty POST is expected to 400
 with JSON `{"d":"..."}`. A successful POST body is standard base64; `decrypt_cloudflare_response(ray, body)`
-yields a packed `runProgram` blob (prefix `ryrCJzUnLCItNTiVeJ...`), not JS. The Worker blob
-`eval`s that under a trustedTypes policy (`GAPH2`).
+yields a packed `runProgram` blob (prefix `ryrCJzUnLCItNTiVeJ...`), not JS. That packed
+string is **standard base64** of bytecode whose first 13 bytes are a stable magic
+(`af2ac22735272c222d35389578`). The iframe unpacks it with `atob` + `charCodeAt`
+(`function C`) and interprets it in `runProgram` (rolling XOR, not this crate's
+orchestrate disassembler). Body entropy is ~7.5 bits/byte (not zlib/gzip, not JS).
+`analyze_run_program` unpacks that framing only.
 
 `probe_iframe` / `solve_test` should get iframe HTTP 200 + parsed options, then an honest
 failure: orchestrate is not the VM, live `/fo/` without the init body 400s, and a captured
-successful `/fo/` decrypts to packed `runProgram`. `/cmg/1` 404s (images moved to
+successful `/fo/` unpacks to high-entropy bytecode. `/cmg/1` 404s (images moved to
 `/ci/{ray}/...`) and is skipped so the client reaches that break. Do **not** reconstruct the
-init payload or implement `runProgram` as a working solver.
+init payload or implement the `runProgram` opcode map as a working solver.
+
+Static unpack (captures only): `cargo run --locked --bin analyze_run_program -- --ray <c_ray> <fo-body>`
 
 Default demo: `https://solvegate.io/demo/invisible` (sitekey `0x4AAAAAAER49t0sMxTcief0`).
 
