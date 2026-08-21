@@ -66,6 +66,12 @@
         "note": "first byte of 71GxwDch… magic; key 44 ^ (0xef wrapping_sub 253) = 222 (Xf)"
       }
     ],
+    "chromeBreakpointFirst": {
+      "op": 222,
+      "mix": 266,
+      "key": 44,
+      "note": "headed Chrome Debugger pause at 56907; mix 266 = 44+222. Next mix 419 = 197+222."
+    },
     "foUnchanged": {
       "postsPerChallenge": 2,
       "cfChlRa": "0",

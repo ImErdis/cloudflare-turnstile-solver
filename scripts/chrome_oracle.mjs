@@ -277,6 +277,42 @@ function pcDeltas(ops) {
   return rows;
 }
 
+/** Breakpoint locals rotate; opcode is the 0–255 varying number, mix is often >255. */
+function normalizeBreakpointOps(rows) {
+  const bp = rows.filter((r) => r.via === "breakpoint");
+  const keys = new Set();
+  for (const r of bp) {
+    for (const k of Object.keys(r)) {
+      if (k === "via" || k === "op" || k === "mix" || k === "key" || k === "pc" || k === "gLen" || k === "keySlot") {
+        continue;
+      }
+      keys.add(k);
+    }
+  }
+  let opKey;
+  let mixKey;
+  for (const k of keys) {
+    const vals = bp.map((r) => r[k]).filter((v) => typeof v === "number");
+    const uniq = new Set(vals);
+    if (uniq.size <= 3 || vals.length < 4) continue;
+    const max = Math.max(...vals);
+    if (max <= 255 && opKey == null) opKey = k;
+    else if (max > 255 && mixKey == null) mixKey = k;
+  }
+  return rows.map((r) => {
+    if (r.via !== "breakpoint") return r;
+    const op = r.op != null ? r.op : opKey != null ? r[opKey] & 255 : undefined;
+    const mix = r.mix != null ? r.mix : mixKey != null ? r[mixKey] : undefined;
+    const key =
+      r.key != null
+        ? r.key
+        : typeof op === "number" && typeof mix === "number"
+          ? (mix - op) & 255
+          : undefined;
+    return { via: "breakpoint", pc: r.pc, op, mix, key };
+  });
+}
+
 function widthHistogram(deltas) {
   const m = {};
   for (const row of deltas) {
@@ -581,8 +617,12 @@ async function attachSession(session, targetInfo, waitingForDebugger) {
           try {
             const got = await session.send("Debugger.evaluateOnCallFrame", {
               callFrameId: frame.callFrameId,
-              expression:
-                "({op:typeof A==='number'?A&255:undefined,mix:typeof D==='number'?D:undefined,pc:(typeof sP==='object'&&sP&&typeof sU==='number')?sP[sU]:undefined})",
+              expression: `(() => {
+                const g = this && this.g;
+                const pc = g && typeof this.j === 'number' ? g[this.j] : undefined;
+                const keySlot = g && typeof this.i === 'number' ? g[this.i] : undefined;
+                return { pc, keySlot, gLen: g && g.length };
+              })()`,
               returnByValue: true,
             });
             const v = got.result?.value;
@@ -778,7 +818,10 @@ await browser.close();
 
 const foNet = network.filter((n) => /\/fo\//.test(n.url || ""));
 const firstFo = foNet[0] || null;
-const ops = [...frameDumps.flatMap((f) => f.ops || []), ...liveOps];
+const ops = normalizeBreakpointOps([
+  ...frameDumps.flatMap((f) => f.ops || []),
+  ...liveOps,
+]);
 const reads = frameDumps.flatMap((f) => f.reads || []);
 const xhr = frameDumps.flatMap((f) => f.xhr || []);
 
