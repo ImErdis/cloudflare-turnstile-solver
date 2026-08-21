@@ -32,7 +32,18 @@ may not fully work end-to-end against live Cloudflare.
 - Run the app: `cargo run --locked --bin solve_test`
 
 ### Running the `solve_test` binary
-- `TurnstileSolver::new()` reads a private fingerprint dataset from `./workspace/cloudflare_test.json`
-  (relative to the current dir). That file is gitignored (`/workspace` in `.gitignore`, i.e. the
-  `workspace/` subdirectory) and is **not** included in the repo, so the binary panics with
-  `NotFound` until that dataset is supplied. Building, linting, and testing do not need it.
+- `TurnstileSolver::new()` reads `./workspace/cloudflare_test.json` (relative to the repo root).
+  The original author's dump was never published. A collected fingerprint that matches the
+  `Fingerprint` serde schema lives at that path. A collector is in
+  `scripts/collect_fingerprint.mjs`.
+- Regenerate it with Google Chrome + puppeteer-core:
+  `cd scripts && npm install && node collect_fingerprint.mjs`
+- The collector records real navigator/WebGL/Intl/audio surfaces from this VM's Chrome. It does
+  **not** reproduce Cloudflare Turnstile's private VM hashes. The hashes are SHA-256 of local
+  surfaces so the JSON deserializes; they will not match a live Turnstile script.
+- `cargo run --locked --bin solve_test` loads that file, builds an HTTP client, and requests
+  Cloudflare's widget iframe. As of 2026-08 the request returns **HTTP 404**: the hardcoded
+  iframe path (`/cdn-cgi/challenge-platform/h/b/turnstile/if/ov2/av0/rcv/...`) is stale. Current
+  `api.js` uses `turnstile/f/av0/rch` and version `g/aae2b9a1c261` instead of branch `b` /
+  `8359bcf47b68`. The README already states the reverse is out of date. Updating the protocol
+  is application reverse-engineering, not environment setup.
