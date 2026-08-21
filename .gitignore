@@ -2,3 +2,6 @@
 /target
 /.idea
 /.vscode
+/artifacts
+/tools/js-re/node_modules
+/scripts/node_modules
