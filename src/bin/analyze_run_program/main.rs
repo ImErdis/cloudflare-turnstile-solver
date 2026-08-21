@@ -15,8 +15,8 @@ use anyhow::{Context, Result, bail};
 use cf::reverse::encryption::decrypt_cloudflare_response;
 use cf::solver::run_program::unpack_packed_run_program;
 use cf::solver::run_program_ops::{
-    DN_OPCODE, DN_TAG_STRING, XF_TAG_STRING, classify_pc_delta, first_dn_tag_b, first_xf_tag_late,
-    operand_from_byte,
+    DN_OPCODE, DN_TAG_STRING, HANDLER_LAYOUT_B_LATE, XF_TAG_STRING, classify_pc_delta,
+    classify_pc_delta_late, first_dn_tag_b, first_xf_tag_late, operand_from_byte,
 };
 use cf::solver::run_program_vm::{
     FETCH_BRANCH_B, FETCH_LIVE, naive_one_byte_fetches, opcode_def_in, params_for_magic,
@@ -24,6 +24,9 @@ use cf::solver::run_program_vm::{
 };
 use cf::solver::fo_body::{
     CHARSET_BRANCH_B, body_chars_in_charset, charset_is_well_formed, classify_fo_body_len,
+};
+use cf::solver::fo_followup::{
+    LIVE_FO_FOLLOWUP, classify_fo_response_len, FoResponseLenBand,
 };
 use cf::solver::fo_init_json::{
     INIT_JSON_KEY_COUNT, INIT_JSON_KEYS_B, LIVE_FO_INIT_JSON, keys_match_snapshot,
@@ -212,6 +215,71 @@ fn verify_oracle_file(path: &PathBuf) -> Result<Value> {
                 errors.push("laterSameDay firstXfTag should be 199 (string)".into());
             }
             let _ = first_xf_tag_late(&[0xef, 0x51]);
+            if let Some(widths) = late.get("chromeStableWidths") {
+                let checks = [
+                    ("gq_246", 246u8, 3i32),
+                    ("gG_227", 227, 4),
+                    ("X3_104", 104, 2),
+                    ("gY_72", 72, 5),
+                ];
+                for (key, op, width) in checks {
+                    if widths.get(key).and_then(|x| x.as_i64()) != Some(i64::from(width)) {
+                        errors.push(format!("laterSameDay.chromeStableWidths.{key} should be {width}"));
+                    }
+                    let row = classify_pc_delta_late(op, width);
+                    if row.matches_fixed != Some(true) {
+                        errors.push(format!("late opcode {op} width {width} does not match layout"));
+                    }
+                }
+            }
+            if let Some(extras) = late.get("operandExtras") {
+                for h in HANDLER_LAYOUT_B_LATE {
+                    let row = extras.get(h.handler);
+                    let got = row
+                        .and_then(|r| r.get("extras"))
+                        .and_then(|x| x.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|x| x.as_u64().map(|n| n as u8))
+                                .collect::<Vec<_>>()
+                        });
+                    if got.as_deref() != Some(h.extra_xors) {
+                        errors.push(format!(
+                            "laterSameDay.operandExtras.{} extras mismatch",
+                            h.handler
+                        ));
+                    }
+                }
+            }
+            if let Some(fu) = late.get("foFollowUp") {
+                if fu.get("plaintextKind").and_then(|x| x.as_str())
+                    != Some("compressed_blob_after_runProgram")
+                {
+                    errors.push("foFollowUp.plaintextKind should be compressed_blob_after_runProgram".into());
+                }
+                if fu.get("notPackedProgram") != Some(&Value::Bool(true)) {
+                    errors.push("foFollowUp.notPackedProgram should be true".into());
+                }
+                if fu.get("sameNWrapper") != Some(&Value::Bool(true)) {
+                    errors.push("foFollowUp.sameNWrapper should be true".into());
+                }
+                if let Some(lens) = fu.get("chromeLens").and_then(|x| x.as_array()) {
+                    for (i, n) in lens.iter().enumerate() {
+                        let len = n.as_u64().unwrap_or(0) as usize;
+                        if classify_fo_body_len(len) != cf::solver::fo_body::FoBodyLenBand::FollowUp {
+                            errors.push(format!("foFollowUp.chromeLens[{i}]={len} not follow-up band"));
+                        }
+                    }
+                }
+                if let Some(lens) = fu.get("chromeRespLens").and_then(|x| x.as_array()) {
+                    for (i, n) in lens.iter().enumerate() {
+                        let len = n.as_u64().unwrap_or(0) as usize;
+                        if classify_fo_response_len(len) != FoResponseLenBand::FollowUpAck {
+                            errors.push(format!("foFollowUp.chromeRespLens[{i}]={len} not ack band"));
+                        }
+                    }
+                }
+            }
         } else {
             errors.push("laterSameDay fetch constants did not match FETCH_BRANCH_B_LATE".into());
         }
@@ -333,6 +401,7 @@ fn verify_oracle_file(path: &PathBuf) -> Result<Value> {
         "header_compare": compare_chrome_and_crate_fo_post(),
         "fo_wrapper": LIVE_FO_WRAPPER,
         "fo_init_json": LIVE_FO_INIT_JSON,
+        "fo_followup": LIVE_FO_FOLLOWUP,
         "fo_prefix_ok": fo_prefix_ok,
         "fo_init_keys_ok": fo_init_keys_ok,
         "first": fetches.first(),

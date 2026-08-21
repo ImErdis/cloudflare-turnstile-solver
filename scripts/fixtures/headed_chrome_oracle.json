@@ -39,7 +39,7 @@
       "note": "first byte of TX5omy48… magic under live fetch; Chrome HTML has case 8"
     }
   ],
-  "note": "XHR setRequestHeader only cf-chl + cf-chl-ra. Content-Type is Chrome's default for xhr.send(string). Operands use post-fetch key: imm = next_key ^ wrapping_sub(byte, 37) ^ extra. First dN tag is 179 (string). Fetch constants and switch IDs rotate mid-day; laterSameDay is the 56907 quadratic snapshot. /fo/ wrapper is live f4 (historical wZ). Re-run scripts/chrome_oracle.mjs.",
+  "note": "XHR setRequestHeader only cf-chl + cf-chl-ra. Content-Type is Chrome's default for xhr.send(string). Operands use post-fetch key: imm = next_key ^ wrapping_sub(byte, 37) ^ extra. First dN tag is 179 (string). Fetch constants and switch IDs rotate mid-day; laterSameDay is the 56907 quadratic snapshot. /fo/ wrapper is live f4 (historical wZ). Follow-up envelope is the same f4/N; plaintext kind is compressed_blob_after_runProgram. Re-run scripts/chrome_oracle.mjs.",
   "laterSameDay": {
     "source": "headed Chrome oracle, same SolveGate demo, later 2026-08-21",
     "packedPrefix": "71GxwDchICYfNxik",
@@ -80,6 +80,14 @@
       "gY_72": 5,
       "Xf_222": "variable tagged load"
     },
+    "operandExtras": {
+      "note": "ToInt32 extra-xors from handler HTML. Minified names rotate (later capture: gx/ge/X4/gZ/Xg); opcode numbers and extras did not. Do not execute these handlers as a solver.",
+      "gq": { "opcode": 246, "handler": "gq", "width": 3, "extras": [123, 148], "jsFloats": [123.64, 148] },
+      "gG": { "opcode": 227, "handler": "gG", "width": 4, "extras": [221, 41, 180], "jsFloats": [221, 41, 180.99] },
+      "X3": { "opcode": 104, "handler": "X3", "width": 2, "extras": [1], "jsFloats": [1] },
+      "gY": { "opcode": 72, "handler": "gY", "width": 5, "extras": [117, 221, 231, 177], "jsFloats": [117, 221, 231, 177] },
+      "Xf": { "opcode": 222, "handler": "Xf", "width": "variable", "extras": [86, 112], "stringTag": 199 }
+    },
     "foUnchanged": {
       "postsPerChallenge": 2,
       "cfChlRa": "0",
@@ -105,7 +113,7 @@
       "initLens": [3724, 4172, 4183, 3735],
       "followUpLens": [86882, 86636, 88108],
       "pairSharesPrefix": true,
-      "note": "N is once per iframe so paired POSTs share the RSA prefix. Wrapper mapped; init JSON shape is in foInitJson — do not fill or POST it."
+      "note": "N is once per iframe so paired POSTs share the RSA prefix. Wrapper mapped; init JSON shape is in foInitJson; follow-up envelope is in foFollowUp — do not fill or POST."
     },
     "foInitJson": {
       "keyCount": 47,
@@ -122,6 +130,20 @@
       ],
       "sharedWithChlOpt": ["DmMyh8", "Eugge3", "SdHeo9", "UqfC6", "bxwC4", "uzri0", "xOSD5", "zlGF5"],
       "note": "Keys follow the iframe JS build (stable on same-day b). Do not fill values or POST."
+    },
+    "foFollowUp": {
+      "compressorLiveName": "f4",
+      "sendHelper": "fz",
+      "sameNWrapper": true,
+      "sameUrlAndPrefix": true,
+      "plaintextKind": "compressed_blob_after_runProgram",
+      "notPackedProgram": true,
+      "sentAfterRunProgram": true,
+      "cfChlRa": "0",
+      "chromeLens": [86882, 86636, 88108],
+      "chromeRespLens": [2400],
+      "initRespLens": [822840, 822956, 845928, 846392],
+      "note": "Second POST uses the same f4/N wrapper (shared 24-char RSA prefix). Plaintext is a large compressed blob after runProgram returns a function invoked as fn(initObj, send). Response is ~2.4k, not another packed program. Do not reconstruct or POST."
     }
   }
 }

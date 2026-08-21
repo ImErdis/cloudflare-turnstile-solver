@@ -100,17 +100,24 @@ imm = next_key ^ ((byte - bias) & 0xff) ^ extra_xor
 ```
 
 Fixed-width handlers on early `b` (d6/d7/d4 width 2, dQ/d1/d3 width 3, p/F
-width 4) are in `src/solver/run_program_ops.rs`. A 1-byte walk still diverges
-immediately. Chrome PC-delta inject must match the **current** key-update
-spelling (`36163)+38392&255` or `mix*mix,56907`) and harvest `{pc,op}` **while
-the OOPIF lives** (iframes close before end-of-run `frame.evaluate`).
+width 4) are in `src/solver/run_program_ops.rs`. Late-`b` Chrome-stable widths
+and extra-xors (`HANDLER_LAYOUT_B_LATE`): `gq`/246 width 3 extras `123,148`;
+`gG`/227 width 4 extras `221,41,180`; `X3`/104 width 2 extra `1`; `gY`/72
+width 5 extras `117,221,231,177`; `Xf`/222 variable tag `86` dst `112`.
+Minified names rotate on later same-day HTML (`gx`/`ge`/`X4`/`gZ`/`Xg`);
+opcode numbers and `ToInt32` extras did not. A 1-byte walk still diverges
+immediately. Do **not** execute these handlers as a solver. Chrome PC-delta
+inject must match the **current** key-update spelling (`36163)+38392&255` or
+`mix*mix,56907`) and harvest `{pc,op}` **while the OOPIF lives** (iframes close
+before end-of-run `frame.evaluate`).
 
 Headed Chrome Debugger pause at `56907` sees opcode `222` and mix `266`
 (`44+222`); the next mix is `419` (`197+222`). `Fetch.fulfillRequest` rewrite
 is ignored by the OOPIF; the breakpoint on the executed script is the oracle.
 Minified local names rotate; the oracle classifies the varying 0–255 local as
 opcode. Pause is after `pc+=1`, so the first observed pc is 1; deltas are still
-instruction widths (`Xf` variable, `gq`/246 width 3, `gG`/227 width 4).
+instruction widths (`Xf` variable, `gq`/246 width 3, `gG`/227 width 4,
+`X3`/104 width 2, `gY`/72 width 5).
 
 Headed Chrome oracle: `cd scripts && npm install && DISPLAY=:1 node chrome_oracle.mjs`.
 Chrome POSTs twice to the same `/fo/` URL (init ~4k → packed program; follow-up
@@ -145,7 +152,15 @@ to a temp, then `setTimeout(send, 100, url, obj)`. One numeric field is
 overwritten with `Date.now() - start` immediately before `send(f4(obj))`. The
 orchestrate `PayloadKeyExtractor` looks for an object **literal** as the 4th
 `setTimeout` argument and misses this. Do **not** fill values or POST that JSON.
-Next gap is the ~90k follow-up `/fo/` body after `runProgram`.
+The second `/fo/` POST (~86–88k) uses the **same** `f4`/`N` wrapper (shared
+24-char RSA prefix, same URL, `cf-chl-ra: 0`). `fz` does `send(f4(plaintext))`
+for both POSTs. After the init response (~822–846k packed `runProgram`),
+`runProgram` return value — if a function — is invoked as `fn(initObj, fz)`.
+That path emits the follow-up. The follow-up **response** is ~2.4k (not another
+packed program). Plaintext kind is a large compressed blob (~65k LZ/XTEA after
+the 129-byte RSA/pad header), not a packed `runProgram` string. Mapped in
+`src/solver/fo_followup.rs`. Do **not** reconstruct fields or POST that body.
+Next gap is the follow-up JSON field set (`fo_followup_json`).
 
 `probe_iframe` / `solve_test` should get iframe HTTP 200 + parsed options, then an honest
 failure: orchestrate is not the VM, live `/fo/` without a valid init body 400s. `/cmg/1` 404s

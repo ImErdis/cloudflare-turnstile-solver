@@ -16,6 +16,9 @@ pub use solver::fo_headers::{CHROME_FO_POST, CRATE_FO_POST, compare_chrome_and_c
 pub use solver::fo_init_json::{
     INIT_JSON_KEY_COUNT, INIT_JSON_KEYS_B, LIVE_FO_INIT_JSON, extract_init_json_keys,
 };
+pub use solver::fo_followup::{
+    LIVE_FO_FOLLOWUP, classify_fo_response_len, NEXT_AFTER_FOLLOWUP_SHAPE,
+};
 pub use solver::protocol::{
     DEMO_HREF, DEMO_SITE_KEY, PUBLIC_API_JS, extract_fo_session, parse_turnstile_api_js_url,
     turnstile_iframe_url,
@@ -26,8 +29,8 @@ pub use solver::run_program::{
     RunProgramAnalysis, analyze_packed_run_program, unpack_packed_run_program,
 };
 pub use solver::run_program_ops::{
-    DN_TAG_STRING, HANDLER_LAYOUT_B, XF_TAG_STRING, classify_pc_delta, first_dn_tag_b,
-    first_xf_tag_late, operand_from_byte,
+    DN_TAG_STRING, HANDLER_LAYOUT_B, HANDLER_LAYOUT_B_LATE, XF_TAG_STRING, classify_pc_delta,
+    classify_pc_delta_late, first_dn_tag_b, first_xf_tag_late, operand_from_byte,
 };
 pub use solver::run_program_vm::{
     FETCH_LIVE, INIT_KEY, INIT_PC, OPCODE_TABLE, decode_opcode, naive_one_byte_fetches, next_key,

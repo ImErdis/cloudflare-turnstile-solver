@@ -12,16 +12,22 @@
 //! slots are then usually `imm ^ this.h`. Headed Chrome logs PC deltas: a stable
 //! small delta is the instruction width; large or negative deltas are jumps.
 //!
+//! Late-`b` (`56907`) extra-xors for the Chrome-stable widths (`gq`/246,
+//! `gG`/227, `X3`/104, `gY`/72) plus already-mapped `Xf`/222 live in
+//! [`HANDLER_LAYOUT_B_LATE`]. Minified names rotate on later same-day HTML
+//! (`gx`/`ge`/`X4`/`gZ`/`Xg`); opcode numbers and `ToInt32` extras did not.
+//!
 //! This module does **not** execute handlers or produce a token.
 
 use crate::solver::run_program_vm::{
-    FETCH_BRANCH_B, FETCH_BRANCH_B_LATE, FetchParams, OPCODE_TABLE_B, decode_opcode, opcode_def_in,
-    step_fetch,
+    FETCH_BRANCH_B, FETCH_BRANCH_B_LATE, FetchParams, OPCODE_TABLE_B, OPCODE_TABLE_B_LATE,
+    OpcodeDef, decode_opcode, opcode_def_in, step_fetch,
 };
 use serde::Serialize;
 
-/// Remaining live gap after fetch, operands, `f4` wrapper, and init-JSON shape.
-pub const NEXT_GAP: &str = crate::solver::fo_init_json::NEXT_AFTER_SHAPE;
+/// Remaining live gap after fetch, operands, `f4`, init-JSON shape, follow-up
+/// envelope, and late-`b` extra-xors: the follow-up JSON field set.
+pub const NEXT_GAP: &str = crate::solver::fo_followup::NEXT_AFTER_FOLLOWUP_SHAPE;
 
 /// JS `x ^ 62.48` is `x ^ ToInt32(62.48)` = `x ^ 62`.
 pub fn js_xor_imm(float_const: f64) -> u8 {
@@ -177,8 +183,60 @@ pub const HANDLER_LAYOUT_B: &[HandlerLayout] = &[
     },
 ];
 
+/// Late-`b` (`56907`) handlers whose Chrome PC deltas are stable widths.
+///
+/// Operand extras are `ToInt32` of the floats next to bytecode bumps in the
+/// headed-Chrome iframe (`chrome-oracle` / `chrome-oracle-bp` used these
+/// names; `chrome-oracle-norm` renamed the functions).
+pub const GQ_OPCODE: u8 = 246;
+pub const GG_OPCODE: u8 = 227;
+pub const X3_OPCODE: u8 = 104;
+pub const GY_OPCODE: u8 = 72;
+
+pub const HANDLER_LAYOUT_B_LATE: &[HandlerLayout] = &[
+    HandlerLayout {
+        opcode: XF_OPCODE,
+        handler: "Xf",
+        width: InstrWidth::Variable,
+        extra_xors: &[XF_TAG_XOR, XF_DST_XOR],
+        note: "tagged load: tag^86 dst^112, string tag 199. Later HTML calls this Xg.",
+    },
+    HandlerLayout {
+        opcode: GQ_OPCODE,
+        handler: "gq",
+        width: InstrWidth::Fixed(3),
+        extra_xors: &[123, 148],
+        note: "2-imm (js 123.64/123.07, 148); dst slot then register load. Later HTML: gx.",
+    },
+    HandlerLayout {
+        opcode: GG_OPCODE,
+        handler: "gG",
+        width: InstrWidth::Fixed(4),
+        extra_xors: &[221, 41, 180],
+        note: "3-imm (js 221, 41, 180.99); obj[key] = src. Later HTML: ge.",
+    },
+    HandlerLayout {
+        opcode: X3_OPCODE,
+        handler: "X3",
+        width: InstrWidth::Fixed(2),
+        extra_xors: &[1],
+        note: "1-imm store {} at (imm^h); early-b d6 analogue. Later HTML: X4.",
+    },
+    HandlerLayout {
+        opcode: GY_OPCODE,
+        handler: "gY",
+        width: InstrWidth::Fixed(5),
+        extra_xors: &[117, 221, 231, 177],
+        note: "4-imm nested property get dst = obj[k1][k2] (js 177.81). Later HTML: gZ.",
+    },
+];
+
 pub fn layout_for(opcode: u8) -> Option<&'static HandlerLayout> {
     HANDLER_LAYOUT_B.iter().find(|h| h.opcode == opcode)
+}
+
+pub fn layout_for_late(opcode: u8) -> Option<&'static HandlerLayout> {
+    HANDLER_LAYOUT_B_LATE.iter().find(|h| h.opcode == opcode)
 }
 
 /// First `dN` tag in a branch-`b` packed program (opcode 8 at pc 0).
@@ -223,11 +281,18 @@ pub struct WidthObservation {
 
 /// Compare Chrome PC deltas to statically recovered fixed widths.
 /// Negative / huge deltas are jumps, not encoding widths.
-pub fn classify_pc_delta(opcode: u8, width: i32) -> WidthObservation {
-    let handler = opcode_def_in(OPCODE_TABLE_B, opcode).map(|d| d.handler);
-    let matches_fixed = layout_for(opcode).and_then(|h| match h.width {
-        InstrWidth::Fixed(n) => Some(width == i32::from(n)),
-        InstrWidth::Variable => None,
+pub fn classify_pc_delta_in(
+    opcode: u8,
+    width: i32,
+    table: &[OpcodeDef],
+    layouts: &[HandlerLayout],
+) -> WidthObservation {
+    let handler = opcode_def_in(table, opcode).map(|d| d.handler);
+    let matches_fixed = layouts.iter().find(|h| h.opcode == opcode).and_then(|h| {
+        match h.width {
+            InstrWidth::Fixed(n) => Some(width == i32::from(n)),
+            InstrWidth::Variable => None,
+        }
     });
     WidthObservation {
         opcode,
@@ -235,6 +300,14 @@ pub fn classify_pc_delta(opcode: u8, width: i32) -> WidthObservation {
         width,
         matches_fixed,
     }
+}
+
+pub fn classify_pc_delta(opcode: u8, width: i32) -> WidthObservation {
+    classify_pc_delta_in(opcode, width, OPCODE_TABLE_B, HANDLER_LAYOUT_B)
+}
+
+pub fn classify_pc_delta_late(opcode: u8, width: i32) -> WidthObservation {
+    classify_pc_delta_in(opcode, width, OPCODE_TABLE_B_LATE, HANDLER_LAYOUT_B_LATE)
 }
 
 #[cfg(test)]
@@ -250,6 +323,12 @@ mod tests {
         assert_eq!(js_xor_imm(29.71), 29);
         assert_eq!(js_xor_imm(107.76), 107);
         assert_eq!(js_xor_imm(14.31), 14);
+        assert_eq!(js_xor_imm(123.64), 123);
+        assert_eq!(js_xor_imm(123.07), 123);
+        assert_eq!(js_xor_imm(180.99), 180);
+        assert_eq!(js_xor_imm(177.81), 177);
+        assert_eq!(js_xor_imm(112.68), 112);
+        assert_eq!(js_xor_imm(182.31), 182);
     }
 
     #[test]
@@ -321,6 +400,107 @@ mod tests {
         assert_eq!(layout_for(9).unwrap().width, InstrWidth::Fixed(4));
         assert_eq!(layout_for(8).unwrap().width, InstrWidth::Variable);
         assert_eq!(layout_for(222).unwrap().width, InstrWidth::Variable);
+    }
+
+    #[test]
+    fn late_b_layouts_match_chrome_stable_widths() {
+        for h in HANDLER_LAYOUT_B_LATE {
+            assert_eq!(
+                opcode_def_in(OPCODE_TABLE_B_LATE, h.opcode).map(|d| d.handler),
+                Some(h.handler),
+                "opcode {} handler {}",
+                h.opcode,
+                h.handler
+            );
+        }
+        let gq = layout_for_late(GQ_OPCODE).unwrap();
+        assert_eq!(gq.width, InstrWidth::Fixed(3));
+        assert_eq!(gq.extra_xors, &[123, 148]);
+        let gg = layout_for_late(GG_OPCODE).unwrap();
+        assert_eq!(gg.width, InstrWidth::Fixed(4));
+        assert_eq!(gg.extra_xors, &[221, 41, 180]);
+        let x3 = layout_for_late(X3_OPCODE).unwrap();
+        assert_eq!(x3.width, InstrWidth::Fixed(2));
+        assert_eq!(x3.extra_xors, &[1]);
+        let gy = layout_for_late(GY_OPCODE).unwrap();
+        assert_eq!(gy.width, InstrWidth::Fixed(5));
+        assert_eq!(gy.extra_xors, &[117, 221, 231, 177]);
+        let xf = layout_for_late(XF_OPCODE).unwrap();
+        assert_eq!(xf.width, InstrWidth::Variable);
+        assert_eq!(xf.extra_xors, &[XF_TAG_XOR, XF_DST_XOR]);
+
+        let hit = classify_pc_delta_late(246, 3);
+        assert_eq!(hit.handler, Some("gq"));
+        assert_eq!(hit.matches_fixed, Some(true));
+        let miss = classify_pc_delta_late(246, 9);
+        assert_eq!(miss.matches_fixed, Some(false));
+        let var = classify_pc_delta_late(222, 11);
+        assert_eq!(var.handler, Some("Xf"));
+        assert_eq!(var.matches_fixed, None);
+        assert_eq!(classify_pc_delta_late(227, 4).matches_fixed, Some(true));
+        assert_eq!(classify_pc_delta_late(104, 2).matches_fixed, Some(true));
+        assert_eq!(classify_pc_delta_late(72, 5).matches_fixed, Some(true));
+    }
+
+    #[test]
+    fn late_b_handler_snippets_carry_documented_floats() {
+        // Headed Chrome iframe (chrome-oracle, names gq/gG/X3/gY/Xf).
+        const GQ: &str = "^123.64,XM=h[XM^W[bY(zZ.W)](Xs[Xw++],253)+256&255^148^Xt]";
+        const GG: &str = "221),XM),Xo=W[bR(zh.Xw)](W[bR(zh.Xu)](Xs,W[bR(zh.W)](W[bR(zh.XQ)](W[bR(zh.Xo)](Xm[Xu++],253),256),255)),41)^XM,XM^=W[bR(zh.XR)](Xs,W[bR(zh.W)](W[bR(zh.XM)](W[bR(zh.XS)](Xm[Xu++],253),256),255))^180.99";
+        const X3: &str = "h[this.i]^3+h[this.l][Xs++]&255.51,1),h[XM]=Xs,h[W[bq(vV.A)](Xm,Xt)]={}";
+        const GY: &str = "^117^XM,Xo=Xs^W[bu(jO.n)](W[bu(jO.h)](Xm[Xu++],253)+256,255)^221^XM,XR=W[bu(jO.A)](Xs,W[bu(jO.W)](3+Xm[Xu++],255))^231^XM,XM^=Xs^3+Xm[Xu++]&255^177";
+        const XF: &str = "n[d2(T8.a)](Xt^n[d2(T8.n)](n[d2(T8.d)](XM[Xm++],253),256)&255,86),Xu=n[d2(T8.A)](Xt^n[d2(T8.W)](n[d2(T8.h)](XM[Xm++]-253,256),255),112),162===Xw";
+        assert_eq!(js_xor_imm(123.64), 123);
+        assert!(GQ.contains("^148^"));
+        assert!(GG.contains(",41)") && GG.contains("^180.99"));
+        assert!(X3.contains(",1)") && X3.contains("={}") );
+        assert!(GY.contains("^117^") && GY.contains("^221^") && GY.contains("^231^") && GY.contains("^177"));
+        assert!(XF.contains(",86)") && XF.contains(",112)"));
+        let path = std::path::Path::new("artifacts/re-out/chrome-oracle/iframe-1.html");
+        if path.is_file() {
+            let html = std::fs::read_to_string(path).unwrap();
+            for snip in [GQ, GG, X3, GY, XF] {
+                assert!(html.contains(snip), "iframe missing snippet {snip}");
+            }
+        }
+    }
+
+    #[test]
+    fn oracle_fixture_late_extras_match_layout() {
+        let path = std::path::Path::new("scripts/fixtures/headed_chrome_oracle.json");
+        if !path.is_file() {
+            return;
+        }
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let late = &v["laterSameDay"];
+        let widths = &late["chromeStableWidths"];
+        assert_eq!(widths["gq_246"].as_u64(), Some(3));
+        assert_eq!(widths["gG_227"].as_u64(), Some(4));
+        assert_eq!(widths["X3_104"].as_u64(), Some(2));
+        assert_eq!(widths["gY_72"].as_u64(), Some(5));
+        let extras = &late["operandExtras"];
+        for h in HANDLER_LAYOUT_B_LATE {
+            let row = extras.get(h.handler).unwrap_or_else(|| panic!("{}", h.handler));
+            assert_eq!(row["opcode"].as_u64(), Some(u64::from(h.opcode)));
+            if let InstrWidth::Fixed(w) = h.width {
+                assert_eq!(row["width"].as_u64(), Some(u64::from(w)));
+                let got = classify_pc_delta_late(h.opcode, i32::from(w));
+                assert_eq!(got.matches_fixed, Some(true));
+            }
+            let arr = row["extras"].as_array().unwrap();
+            let got: Vec<u8> = arr
+                .iter()
+                .map(|x| x.as_u64().unwrap() as u8)
+                .collect();
+            assert_eq!(got, h.extra_xors, "{}", h.handler);
+        }
+        assert_eq!(
+            late["foFollowUp"]["plaintextKind"].as_str(),
+            Some("compressed_blob_after_runProgram")
+        );
+        assert_eq!(late["foFollowUp"]["notPackedProgram"], true);
+        assert_eq!(late["foFollowUp"]["sameNWrapper"], true);
     }
 
     #[test]

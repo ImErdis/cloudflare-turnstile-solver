@@ -16,13 +16,14 @@
 //! literal to a temp (`Xm` / `xL` / `Xt`) and passes the **identifier**, so that
 //! visitor does not see the keys.
 //!
+//! Follow-up envelope after `runProgram` is [`crate::solver::fo_followup`].
 //! This module does **not** fill values, serialize a live body, or POST.
 
 use serde::Serialize;
 use std::collections::BTreeSet;
 
-/// Remaining live gap after init-JSON **shape**: the ~90k follow-up `/fo/` POST.
-pub const NEXT_AFTER_SHAPE: &str = "fo_followup_body";
+/// Remaining after init-JSON **shape** (follow-up envelope is mapped separately).
+pub const NEXT_AFTER_SHAPE: &str = crate::solver::fo_followup::NEXT_AFTER_FOLLOWUP_SHAPE;
 
 pub const INIT_JSON_KEY_COUNT: usize = 47;
 pub const SET_TIMEOUT_DELAY_MS: u32 = 100;

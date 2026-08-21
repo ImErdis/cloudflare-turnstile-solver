@@ -370,6 +370,12 @@ function classifyBodyLen(len) {
   return "other";
 }
 
+function classifyFoResponseLen(len) {
+  if (len >= 700000 && len <= 950000) return "packedRunProgram";
+  if (len >= 1500 && len <= 4000) return "followUpAck";
+  return "other";
+}
+
 function foBodyShape(foNet, xhr, iframeHtml) {
   const charset = extractCompressorCharset(iframeHtml || "");
   const rows = [];
@@ -493,6 +499,47 @@ function foPostPairs(foNet) {
     }));
 }
 
+function foFollowUpShape(foNet, xhr) {
+  const pairs = foPostPairs(foNet || []);
+  const rows = [];
+  for (const p of pairs) {
+    const init = (p.posts || []).find((x) => classifyBodyLen(x.bodyLen) === "init");
+    const fu = (p.posts || []).find((x) => classifyBodyLen(x.bodyLen) === "followUp");
+    if (!init || !fu) continue;
+    const xhrInit = (xhr || []).find(
+      (x) => x.bodyLen === init.bodyLen && x.bodyPrefix === init.bodyPrefix,
+    );
+    const xhrFu = (xhr || []).find(
+      (x) => x.bodyLen === fu.bodyLen && x.bodyPrefix === fu.bodyPrefix,
+    );
+    rows.push({
+      initLen: init.bodyLen,
+      followUpLen: fu.bodyLen,
+      samePrefix: p.samePrefix,
+      cfChlRa: fu.cfChlRa || "0",
+      initRespLen: xhrInit?.respLen || null,
+      initRespBand: xhrInit?.respLen
+        ? classifyFoResponseLen(xhrInit.respLen)
+        : null,
+      followUpRespLen: xhrFu?.respLen || null,
+      followUpRespBand: xhrFu?.respLen
+        ? classifyFoResponseLen(xhrFu.respLen)
+        : null,
+    });
+  }
+  return {
+    compressorLiveName: "f4",
+    sendHelper: "fz",
+    sameNWrapper: true,
+    plaintextKind: "compressed_blob_after_runProgram",
+    notPackedProgram: true,
+    sentAfterRunProgram: true,
+    pairCount: rows.length,
+    note: "shape only; same f4/N wrapper; do not reconstruct or POST the plaintext",
+    rows,
+  };
+}
+
 function selfTestInject() {
   const happyOld =
     "if(E=hy[hH],E!==E)return hy[hw];switch(hy[hH]=E+1,E=hy[hY]^G[A1(I2.L)](hj[E],37)+256&255,hy[hY]=G[A1(I2.hC)](hy[hY]+E,36163)+38392&255.07,E){case 8:dN(this);break;}";
@@ -556,6 +603,8 @@ function selfTestInject() {
       stdReject &&
       classifyBodyLen(3735) === "init" &&
       classifyBodyLen(86882) === "followUp" &&
+      classifyFoResponseLen(845928) === "packedRunProgram" &&
+      classifyFoResponseLen(2400) === "followUpAck" &&
       initGot &&
       initGot.keyCount === 47,
     happyOld: { replacements: a.replacements, injected: a.injected },
@@ -1007,6 +1056,7 @@ try {
   iframeHtml = "";
 }
 const bodyShape = foBodyShape(foNet, xhr, iframeHtml);
+const followUpShape = foFollowUpShape(foNet, xhr);
 const initJson = extractInitJsonKeys(iframeHtml);
 const summary = {
   url,
@@ -1025,6 +1075,7 @@ const summary = {
   })),
   foPostPairs: foPostPairs(foNet),
   foBodyShape: bodyShape,
+  foFollowUp: followUpShape,
   foInitJson: initJson
     ? {
         keyCount: initJson.keyCount,
@@ -1091,6 +1142,12 @@ console.log(
         prefixesInCharset: bodyShape.prefixesInCharset,
         charsetMatchesBranchB: bodyShape.charsetMatchesBranchB,
         rows: bodyShape.rows,
+      },
+      foFollowUp: {
+        pairCount: followUpShape.pairCount,
+        plaintextKind: followUpShape.plaintextKind,
+        notPackedProgram: followUpShape.notPackedProgram,
+        rows: followUpShape.rows,
       },
       foInitJson: initJson
         ? { keyCount: initJson.keyCount, hasJsonStringify: initJson.hasJsonStringify }
