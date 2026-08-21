@@ -78,15 +78,23 @@
       "gG_227": 4,
       "X3_104": 2,
       "gY_72": 5,
+      "X4_12": 2,
+      "Xz_52": 3,
+      "Xg_130": 3,
+      "ge_169": 5,
       "Xf_222": "variable tagged load"
     },
     "operandExtras": {
-      "note": "ToInt32 extra-xors from handler HTML. Minified names rotate (later capture: gx/ge/X4/gZ/Xg); opcode numbers and extras did not. Do not execute these handlers as a solver.",
+      "note": "ToInt32 extra-xors from handler HTML. Minified names rotate (later capture: gx/ge/X4/gZ/Xg and X5/Xv/XX/gN); opcode numbers and extras did not. Do not execute these handlers as a solver.",
       "gq": { "opcode": 246, "handler": "gq", "width": 3, "extras": [123, 148], "jsFloats": [123.64, 148] },
       "gG": { "opcode": 227, "handler": "gG", "width": 4, "extras": [221, 41, 180], "jsFloats": [221, 41, 180.99] },
       "X3": { "opcode": 104, "handler": "X3", "width": 2, "extras": [1], "jsFloats": [1] },
       "gY": { "opcode": 72, "handler": "gY", "width": 5, "extras": [117, 221, 231, 177], "jsFloats": [117, 221, 231, 177] },
-      "Xf": { "opcode": 222, "handler": "Xf", "width": "variable", "extras": [86, 112], "stringTag": 199 }
+      "Xf": { "opcode": 222, "handler": "Xf", "width": "variable", "extras": [86, 112], "stringTag": 199 },
+      "X4": { "opcode": 12, "handler": "X4", "width": 2, "extras": [58], "jsFloats": [58] },
+      "Xz": { "opcode": 52, "handler": "Xz", "width": 3, "extras": [132], "jsFloats": [132.63], "note": "LEB then slot; Chrome histogram all width 3" },
+      "Xg": { "opcode": 130, "handler": "Xg", "width": 3, "extras": [112, 19], "jsFloats": [112.87, 19] },
+      "ge": { "opcode": 169, "handler": "ge", "width": 5, "extras": [41, 221, 180, 19], "jsFloats": [41.43, 221, 180, 19] }
     },
     "foUnchanged": {
       "postsPerChallenge": 2,
@@ -144,6 +152,14 @@
       "chromeRespLens": [2400],
       "initRespLens": [822840, 822956, 845928, 846392],
       "note": "Second POST uses the same f4/N wrapper (shared 24-char RSA prefix). Plaintext is a large compressed blob after runProgram returns a function invoked as fn(initObj, send). Response is ~2.4k, not another packed program. Do not reconstruct or POST."
+    },
+    "foFollowUpJson": {
+      "copiedFromInit": true,
+      "numericVmEntries": true,
+      "extraIdentFromVm": true,
+      "initIdentCount": 47,
+      "copiedCount": 47,
+      "note": "Follow-up plaintext is the mutated init object plus numeric VM keys plus extra ident keys. Names/kinds from headed Chrome Debugger on f4's first argument — do not fill values or POST. extraIdent is filled when chrome_oracle harvests a follow-up shape."
     }
   }
 }

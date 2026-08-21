@@ -131,7 +131,7 @@ pub fn compare_chrome_and_crate_fo_post() -> FoHeaderCompare {
     FoHeaderCompare {
         all_match,
         fields,
-        note: "crate matches Chrome XHR header names and priority u=1, i; Chrome POSTs twice to the same /fo/ URL (init ~4k then follow-up ~90k, same body prefix); wrapper is f4, init JSON shape is 47 keys, follow-up envelope is a compressed blob after runProgram; remaining gap is fo_followup_json",
+        note: "crate matches Chrome XHR header names and priority u=1, i; Chrome POSTs twice to the same /fo/ URL (init ~4k then follow-up ~90k, same body prefix); wrapper is f4, init JSON shape is 47 keys, follow-up envelope is a compressed blob after runProgram; follow-up JSON is the mutated init object plus numeric VM entries plus extra ident keys (names only); remaining gap is fo_followup_json extra ident names from a live f4 harvest",
     }
 }
 

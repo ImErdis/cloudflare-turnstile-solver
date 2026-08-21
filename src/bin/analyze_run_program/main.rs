@@ -221,6 +221,10 @@ fn verify_oracle_file(path: &PathBuf) -> Result<Value> {
                     ("gG_227", 227, 4),
                     ("X3_104", 104, 2),
                     ("gY_72", 72, 5),
+                    ("X4_12", 12, 2),
+                    ("Xz_52", 52, 3),
+                    ("Xg_130", 130, 3),
+                    ("ge_169", 169, 5),
                 ];
                 for (key, op, width) in checks {
                     if widths.get(key).and_then(|x| x.as_i64()) != Some(i64::from(width)) {
@@ -277,6 +281,35 @@ fn verify_oracle_file(path: &PathBuf) -> Result<Value> {
                         if classify_fo_response_len(len) != FoResponseLenBand::FollowUpAck {
                             errors.push(format!("foFollowUp.chromeRespLens[{i}]={len} not ack band"));
                         }
+                    }
+                }
+            }
+            if let Some(fj) = late.get("foFollowUpJson") {
+                if fj.get("copiedFromInit") != Some(&Value::Bool(true)) {
+                    errors.push("foFollowUpJson.copiedFromInit should be true".into());
+                }
+                if fj.get("numericVmEntries") != Some(&Value::Bool(true)) {
+                    errors.push("foFollowUpJson.numericVmEntries should be true".into());
+                }
+                if let Some(n) = fj.get("copiedCount").and_then(|x| x.as_u64())
+                    && n != INIT_JSON_KEY_COUNT as u64
+                {
+                    errors.push(format!("foFollowUpJson.copiedCount={n} expected {INIT_JSON_KEY_COUNT}"));
+                }
+                if let Some(ident) = fj.get("identKeys").and_then(|x| x.as_array()) {
+                    let names: Vec<String> = ident
+                        .iter()
+                        .filter_map(|x| x.as_str().map(str::to_string))
+                        .collect();
+                    let numeric = fj.get("numericKeyCount").and_then(|x| x.as_u64()).unwrap_or(0) as usize;
+                    if names.len() >= 40
+                        && cf::solver::fo_followup_json::classify_fo_plaintext(
+                            &names,
+                            numeric,
+                            INIT_JSON_KEYS_B,
+                        ) != cf::solver::fo_followup_json::FoPlaintextKind::FollowUp
+                    {
+                        errors.push("foFollowUpJson.identKeys did not classify as follow-up".into());
                     }
                 }
             }
@@ -402,6 +435,7 @@ fn verify_oracle_file(path: &PathBuf) -> Result<Value> {
         "fo_wrapper": LIVE_FO_WRAPPER,
         "fo_init_json": LIVE_FO_INIT_JSON,
         "fo_followup": LIVE_FO_FOLLOWUP,
+        "fo_followup_json": cf::solver::fo_followup_json::LIVE_FO_FOLLOWUP_JSON,
         "fo_prefix_ok": fo_prefix_ok,
         "fo_init_keys_ok": fo_init_keys_ok,
         "first": fetches.first(),

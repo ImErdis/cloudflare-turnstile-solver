@@ -153,14 +153,18 @@ overwritten with `Date.now() - start` immediately before `send(f4(obj))`. The
 orchestrate `PayloadKeyExtractor` looks for an object **literal** as the 4th
 `setTimeout` argument and misses this. Do **not** fill values or POST that JSON.
 The second `/fo/` POST (~86–88k) uses the **same** `f4`/`N` wrapper (shared
-24-char RSA prefix, same URL, `cf-chl-ra: 0`). `fz` does `send(f4(plaintext))`
-for both POSTs. After the init response (~822–846k packed `runProgram`),
-`runProgram` return value — if a function — is invoked as `fn(initObj, fz)`.
-That path emits the follow-up. The follow-up **response** is ~2.4k (not another
-packed program). Plaintext kind is a large compressed blob (~65k LZ/XTEA after
-the 129-byte RSA/pad header), not a packed `runProgram` string. Mapped in
-`src/solver/fo_followup.rs`. Do **not** reconstruct fields or POST that body.
-Next gap is the follow-up JSON field set (`fo_followup_json`).
+24-char RSA prefix, same URL, `cf-chl-ra: 0`). The send helper does
+`send(f4(plaintext))` for both POSTs (minified name rotates: `fz` / `fj`).
+After the init response (~822–846k packed `runProgram`), `runProgram` return
+value — if a function — is invoked as `fn(initObj, sendHelper)`. That path
+emits the follow-up. The follow-up **response** is ~2.4k (not another packed
+program). Envelope: `src/solver/fo_followup.rs`. Field-set **kind**: the
+mutated init object plus numeric `"1".."N"` VM entries plus extra ident keys
+the VM adds (`src/solver/fo_followup_json.rs`). Key **names** come from headed
+Chrome Debugger on `f4`'s first argument (kinds/lengths only — do not dump
+values). Extra ident **names** still need that harvest. Do **not** fill or POST
+that JSON. Next gap is still `fo_followup_json` until extra ident names are
+snapshotted; do not run handlers as a solver.
 
 `probe_iframe` / `solve_test` should get iframe HTTP 200 + parsed options, then an honest
 failure: orchestrate is not the VM, live `/fo/` without a valid init body 400s. `/cmg/1` 404s

@@ -27,9 +27,9 @@ use crate::solver::fo_body::{
 };
 use serde::Serialize;
 
-/// Remaining live gap after the follow-up **envelope**: the JSON field set.
-/// Do not fill those values or POST them.
-pub const NEXT_AFTER_FOLLOWUP_SHAPE: &str = "fo_followup_json";
+/// Remaining live gap after the follow-up **envelope**: the JSON field set
+/// (copied vs computed keys). See [`crate::solver::fo_followup_json`].
+pub const NEXT_AFTER_FOLLOWUP_SHAPE: &str = crate::solver::fo_followup_json::NEXT_AFTER_FOLLOWUP_JSON;
 
 /// XHR send helper on the 56907 iframe (`case 8: send(f4(n))`).
 pub const SEND_HELPER_LIVE_NAME: &str = "fz";

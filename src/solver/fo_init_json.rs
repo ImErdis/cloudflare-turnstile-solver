@@ -17,6 +17,8 @@
 //! visitor does not see the keys.
 //!
 //! Follow-up envelope after `runProgram` is [`crate::solver::fo_followup`].
+//! Follow-up JSON field-set kind (copied / numeric / extra ident) is
+//! [`crate::solver::fo_followup_json`].
 //! This module does **not** fill values, serialize a live body, or POST.
 
 use serde::Serialize;

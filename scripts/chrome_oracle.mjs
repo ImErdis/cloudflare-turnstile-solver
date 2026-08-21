@@ -6,9 +6,10 @@
  * the interpreter's opcode fetch (`* 36163 + 38392` live linear /
  * `mix*mix*56907+7914*mix+22357` later same-day / `* 19663 + 36376`
  * historical) inside the OOPIF iframe. Logs `{pc, op, key, byte}` so instruction
- * widths are PC deltas — not a 1-byte walk. Does **not** reconstruct a live
- * `/fo/` body (f4 / historical wZ), dump full POST bodies, fill init JSON, execute handlers as a
- * solver, or harvest a token.
+ * widths are PC deltas — not a 1-byte walk. Debugger on `f4` / `wZ` records the
+ * plaintext object's **key names and value kinds** (string lengths, not contents).
+ * Does **not** reconstruct a live `/fo/` body, dump full POST bodies, fill JSON
+ * values, execute handlers as a solver, or harvest a token.
  *
  * Usage:
  *   DISPLAY=:1 node scripts/chrome_oracle.mjs [url] [out-dir]
@@ -41,6 +42,55 @@ const PREAMBLE = `(() => {
   globalThis.__cfOp = globalThis.__cfOp || [];
   globalThis.__cfXhr = globalThis.__cfXhr || [];
   globalThis.__cfRP = globalThis.__cfRP || [];
+  globalThis.__cfFo = globalThis.__cfFo || [];
+  function __cfKind(v) {
+    if (v === null) return "null";
+    if (Array.isArray(v)) return "array:" + v.length;
+    const t = typeof v;
+    if (t === "string") return "string:" + v.length;
+    if (t === "object") return "object:" + Object.keys(v).length;
+    return t;
+  }
+  function __cfShape(obj, via) {
+    if (!obj || typeof obj !== "object" || Array.isArray(obj)) return null;
+    const keys = Object.keys(obj);
+    if (keys.length < 20) return null;
+    const ident = [];
+    const numeric = [];
+    const kinds = {};
+    let nMin = null;
+    let nMax = null;
+    for (const k of keys) {
+      kinds[k] = __cfKind(obj[k]);
+      if (/^\\d+$/.test(k)) {
+        numeric.push(k);
+        const n = Number(k);
+        if (nMin === null || n < nMin) nMin = n;
+        if (nMax === null || n > nMax) nMax = n;
+      } else ident.push(k);
+    }
+    return {
+      via,
+      keyCount: keys.length,
+      identKeys: ident,
+      numericKeyCount: numeric.length,
+      numericKeyMin: nMin,
+      numericKeyMax: nMax,
+      kinds,
+    };
+  }
+  try {
+    const js = JSON.stringify;
+    JSON.stringify = function (v) {
+      try {
+        const s = __cfShape(v, "stringify");
+        if (s && globalThis.__cfFo.length < 8) globalThis.__cfFo.push(s);
+      } catch {}
+      return js.apply(this, arguments);
+    };
+  } catch (e) {
+    globalThis.__cfHookErr = String(e);
+  }
   try {
     const proto = XMLHttpRequest.prototype;
     const open = proto.open;
@@ -472,6 +522,122 @@ function extractInitJsonKeys(html) {
   }
 }
 
+/** Key names + kinds only. `init` if the ident set is the first POST; `followUp` if VM numeric/extra keys appear. */
+function classifyFoPlaintext(shape, initKeys) {
+  if (!shape || !Array.isArray(shape.identKeys)) return null;
+  const initSet = new Set(initKeys || []);
+  const ident = shape.identKeys;
+  const copied = ident.filter((k) => initSet.has(k));
+  const extraIdent = ident.filter((k) => !initSet.has(k));
+  let kind = "other";
+  if ((shape.numericKeyCount || 0) > 0) kind = "followUp";
+  else if (copied.length >= 40 && extraIdent.length === 0) kind = "init";
+  else if (copied.length >= 40) kind = "followUp";
+  else if (ident.length >= 40 && extraIdent.length === 0 && initSet.size === 0) {
+    kind = "init";
+  }
+  return {
+    kind,
+    via: shape.via || null,
+    keyCount: shape.keyCount,
+    identCount: ident.length,
+    numericKeyCount: shape.numericKeyCount || 0,
+    numericKeyMin: shape.numericKeyMin ?? null,
+    numericKeyMax: shape.numericKeyMax ?? null,
+    copiedCount: copied.length,
+    extraIdent,
+    extraIdentCount: extraIdent.length,
+  };
+}
+
+function pickFollowUpShape(shapes, initKeys) {
+  const rows = (shapes || [])
+    .map((s) => ({ shape: s, cls: classifyFoPlaintext(s, initKeys) }))
+    .filter((r) => r.cls);
+  const follow = rows.filter((r) => r.cls.kind === "followUp");
+  const pool = follow.length ? follow : rows;
+  if (!pool.length) return null;
+  pool.sort((a, b) => (b.shape.keyCount || 0) - (a.shape.keyCount || 0));
+  const best = pool[0];
+  return { ...best.cls, identKeys: best.shape.identKeys };
+}
+
+function sourceLineCol(scriptSource, idx) {
+  const pre = scriptSource.slice(0, idx);
+  const lineNumber = (pre.match(/\n/g) || []).length;
+  const nl = pre.lastIndexOf("\n");
+  const columnNumber = nl < 0 ? pre.length : pre.length - nl - 1;
+  return { lineNumber, columnNumber };
+}
+
+function compressorBreakpointAt(scriptSource) {
+  for (const pat of [
+    "function f4(",
+    "function wZ(",
+    "f4=function(",
+    "wZ=function(",
+  ]) {
+    const idx = scriptSource.indexOf(pat);
+    if (idx < 0) continue;
+    const brace = scriptSource.indexOf("{", idx);
+    if (brace < 0) continue;
+    return { ...sourceLineCol(scriptSource, brace), pat, idx };
+  }
+  return null;
+}
+
+const FO_SHAPE_EXPR = `(() => {
+  function kind(v) {
+    if (v === null) return "null";
+    if (Array.isArray(v)) return "array:" + v.length;
+    const t = typeof v;
+    if (t === "string") return "string:" + v.length;
+    if (t === "object") return "object:" + Object.keys(v).length;
+    return t;
+  }
+  function shape(obj, via) {
+    if (!obj || typeof obj !== "object" || Array.isArray(obj)) return null;
+    const keys = Object.keys(obj);
+    if (keys.length < 20) return null;
+    const ident = [];
+    const numeric = [];
+    const kinds = {};
+    let nMin = null;
+    let nMax = null;
+    for (const k of keys) {
+      kinds[k] = kind(obj[k]);
+      if (/^\\d+$/.test(k)) {
+        numeric.push(k);
+        const n = Number(k);
+        if (nMin === null || n < nMin) nMin = n;
+        if (nMax === null || n > nMax) nMax = n;
+      } else ident.push(k);
+    }
+    return {
+      via,
+      keyCount: keys.length,
+      identKeys: ident,
+      numericKeyCount: numeric.length,
+      numericKeyMin: nMin,
+      numericKeyMax: nMax,
+      kinds,
+    };
+  }
+  try {
+    if (typeof arguments !== "undefined" && arguments.length) {
+      const s = shape(arguments[0], "f4");
+      if (s) return s;
+    }
+  } catch (e) {}
+  try {
+    if (typeof a !== "undefined") {
+      const s = shape(a, "f4");
+      if (s) return s;
+    }
+  } catch (e) {}
+  return null;
+})()`;
+
 function foPostPairs(foNet) {
   const byUrl = new Map();
   for (const n of foNet) {
@@ -572,6 +738,27 @@ function selfTestInject() {
     .join(",");
   const initHtml = `Xm={${fakeObj}};setTimeout(fz,100,d,Xm)`;
   const initGot = extractInitJsonKeys(initHtml);
+  const fakeInitKeys = fakeKeys;
+  const fakeInitShape = {
+    via: "stringify",
+    keyCount: 47,
+    identKeys: fakeInitKeys,
+    numericKeyCount: 0,
+  };
+  const fakeFoShape = {
+    via: "f4",
+    keyCount: 47 + 12 + 3,
+    identKeys: [...fakeInitKeys, "extraA", "extraB", "extraC"],
+    numericKeyCount: 12,
+    numericKeyMin: 1,
+    numericKeyMax: 12,
+  };
+  const initCls = classifyFoPlaintext(fakeInitShape, fakeInitKeys);
+  const foCls = classifyFoPlaintext(fakeFoShape, fakeInitKeys);
+  const picked = pickFollowUpShape([fakeInitShape, fakeFoShape], fakeInitKeys);
+  const bp = compressorBreakpointAt(
+    "void 0;function f4(a,Et,nT,n,d){return Et={a:1},a}",
+  );
   return {
     ok:
       a.injected &&
@@ -606,7 +793,17 @@ function selfTestInject() {
       classifyFoResponseLen(845928) === "packedRunProgram" &&
       classifyFoResponseLen(2400) === "followUpAck" &&
       initGot &&
-      initGot.keyCount === 47,
+      initGot.keyCount === 47 &&
+      initCls &&
+      initCls.kind === "init" &&
+      foCls &&
+      foCls.kind === "followUp" &&
+      foCls.copiedCount === 47 &&
+      foCls.extraIdentCount === 3 &&
+      picked &&
+      picked.kind === "followUp" &&
+      bp &&
+      bp.pat === "function f4(",
     happyOld: { replacements: a.replacements, injected: a.injected },
     happyLive: { replacements: b.replacements, injected: b.injected },
     catchLive: { replacements: c.replacements, injected: c.injected },
@@ -615,6 +812,13 @@ function selfTestInject() {
     happyMulSq: { replacements: f.replacements, injected: f.injected },
     charset: { extracted, prefixOk, stdReject },
     initJson: initGot && { keyCount: initGot.keyCount },
+    foPlaintext: {
+      initKind: initCls && initCls.kind,
+      followUpKind: foCls && foCls.kind,
+      copiedCount: foCls && foCls.copiedCount,
+      extraIdentCount: foCls && foCls.extraIdentCount,
+      compressorBp: bp && bp.pat,
+    },
   };
 }
 
@@ -643,6 +847,9 @@ const network = [];
 const pending = new Map();
 const cdpSessions = [];
 const liveOps = [];
+const liveFo = [];
+const compressorBreakpoints = new Set();
+const compressorScripts = new Set();
 const scriptNotes = [];
 let iframeRewrites = 0;
 
@@ -798,23 +1005,42 @@ async function attachSession(session, targetInfo, waitingForDebugger) {
         const idxQ = scriptSource.indexOf("56907");
         const idx = scriptSource.indexOf("36163");
         const idxG = scriptSource.indexOf("19663");
-        if (idxQ < 0 && idx < 0 && idxG < 0) return;
+        const hasFetch = idxQ >= 0 || idx >= 0 || idxG >= 0;
+        const compressor = compressorBreakpointAt(scriptSource);
+        if (!hasFetch && !compressor) return;
         const hasInject = scriptSource.includes("__cfOp.push");
-        note("scriptFetchConst", {
-          url: (s.url || "").slice(0, 140),
-          len: scriptSource.length,
-          hasInject,
-          idx: idxQ >= 0 ? idxQ : idx >= 0 ? idx : idxG,
-          marker: idxQ >= 0 ? "56907" : idx >= 0 ? "36163" : "19663",
-        });
-        const at = idxQ >= 0 ? idxQ : idx >= 0 ? idx : idxG;
-        const pre = scriptSource.slice(0, at);
-        const lineNumber = (pre.match(/\n/g) || []).length;
-        const nl = pre.lastIndexOf("\n");
-        const columnNumber = nl < 0 ? pre.length : pre.length - nl - 1;
-        if (!hasInject) {
-          await session.send("Debugger.setBreakpoint", {
-            location: { scriptId: s.scriptId, lineNumber, columnNumber },
+        if (hasFetch) {
+          note("scriptFetchConst", {
+            url: (s.url || "").slice(0, 140),
+            len: scriptSource.length,
+            hasInject,
+            idx: idxQ >= 0 ? idxQ : idx >= 0 ? idx : idxG,
+            marker: idxQ >= 0 ? "56907" : idx >= 0 ? "36163" : "19663",
+          });
+          const at = idxQ >= 0 ? idxQ : idx >= 0 ? idx : idxG;
+          const { lineNumber, columnNumber } = sourceLineCol(scriptSource, at);
+          if (!hasInject) {
+            await session.send("Debugger.setBreakpoint", {
+              location: { scriptId: s.scriptId, lineNumber, columnNumber },
+            });
+          }
+        }
+        if (compressor && !compressorScripts.has(s.scriptId)) {
+          compressorScripts.add(s.scriptId);
+          const bp = await session.send("Debugger.setBreakpoint", {
+            location: {
+              scriptId: s.scriptId,
+              lineNumber: compressor.lineNumber,
+              columnNumber: compressor.columnNumber,
+            },
+          });
+          if (bp?.breakpointId) compressorBreakpoints.add(bp.breakpointId);
+          note("compressorBp", {
+            url: (s.url || "").slice(0, 140),
+            pat: compressor.pat,
+            lineNumber: compressor.lineNumber,
+            columnNumber: compressor.columnNumber,
+            breakpointId: bp?.breakpointId || null,
           });
         }
       } catch (e) {
@@ -824,6 +1050,34 @@ async function attachSession(session, targetInfo, waitingForDebugger) {
     session.on("Debugger.paused", async (evt) => {
       try {
         const frame = evt.callFrames?.[0];
+        const fname = frame?.functionName || "";
+        const hit = evt.hitBreakpoints || [];
+        const compressorHit =
+          hit.some((id) => compressorBreakpoints.has(id)) ||
+          fname === "f4" ||
+          fname === "wZ";
+        if (compressorHit && frame && liveFo.length < 8) {
+          try {
+            const got = await session.send("Debugger.evaluateOnCallFrame", {
+              callFrameId: frame.callFrameId,
+              expression: FO_SHAPE_EXPR,
+              returnByValue: true,
+            });
+            const v = got.result?.value;
+            if (v && v.keyCount >= 20) {
+              liveFo.push(v);
+              note("foShape", {
+                via: v.via,
+                keyCount: v.keyCount,
+                identCount: (v.identKeys || []).length,
+                numericKeyCount: v.numericKeyCount,
+              });
+            }
+          } catch (e) {
+            note("foShapeErr", { error: String(e).slice(0, 160) });
+          }
+          return;
+        }
         if (frame && liveOps.length < 400) {
           const row = { via: "breakpoint" };
           try {
@@ -929,11 +1183,17 @@ async function harvestSessions(tag) {
           opCount: (globalThis.__cfOp||[]).length,
           ops: (globalThis.__cfOp||[]).slice(0,400),
           xhr: globalThis.__cfXhr||[],
-          runProgramCalls: globalThis.__cfRP||[]
+          runProgramCalls: globalThis.__cfRP||[],
+          fo: (globalThis.__cfFo||[]).slice(0,8)
         })`,
         returnByValue: true,
       });
       const v = result?.value;
+      if (v?.fo?.length) {
+        for (const s of v.fo) {
+          if (liveFo.length < 8) liveFo.push(s);
+        }
+      }
       if (v?.ops?.length) {
         for (const o of v.ops) {
           if (liveOps.length < 400) liveOps.push(o);
@@ -966,6 +1226,7 @@ for (const frame of page.frames()) {
       reads: (globalThis.__cfReads || []).slice(0, 96),
       xhr: globalThis.__cfXhr || [],
       runProgramCalls: globalThis.__cfRP || [],
+      fo: (globalThis.__cfFo || []).slice(0, 8),
       hookErr: globalThis.__cfHookErr || null,
     }));
     frameDumps.push(dump);
@@ -984,6 +1245,7 @@ for (const { session, label, type } of cdpSessions) {
         ops: (globalThis.__cfOp||[]).slice(0,400),
         xhr: globalThis.__cfXhr||[],
         runProgramCalls: globalThis.__cfRP||[],
+        fo: (globalThis.__cfFo||[]).slice(0,8),
         hookErr: globalThis.__cfHookErr||null
       })`,
       returnByValue: true,
@@ -1036,6 +1298,17 @@ const ops = normalizeBreakpointOps([
 ]);
 const reads = frameDumps.flatMap((f) => f.reads || []);
 const xhr = frameDumps.flatMap((f) => f.xhr || []);
+for (const s of frameDumps.flatMap((f) => f.fo || [])) {
+  if (s && s.keyCount >= 20 && liveFo.length < 8) liveFo.push(s);
+}
+const foShapes = [];
+const seenFo = new Set();
+for (const s of liveFo) {
+  const key = `${s.via || ""}:${s.keyCount}:${(s.identKeys || []).slice(0, 8).join(",")}:${s.numericKeyCount || 0}`;
+  if (seenFo.has(key)) continue;
+  seenFo.add(key);
+  foShapes.push(s);
+}
 
 function headerBag(rec) {
   const extra = rec?.extraHeaders || {};
@@ -1058,6 +1331,10 @@ try {
 const bodyShape = foBodyShape(foNet, xhr, iframeHtml);
 const followUpShape = foFollowUpShape(foNet, xhr);
 const initJson = extractInitJsonKeys(iframeHtml);
+const followUpJson = pickFollowUpShape(foShapes, initJson?.keys || []);
+const foPlaintextRows = foShapes.map((s) =>
+  classifyFoPlaintext(s, initJson?.keys || []),
+);
 const summary = {
   url,
   headed,
@@ -1085,6 +1362,33 @@ const summary = {
         note: "key names only; do not dump values or POST",
       }
     : null,
+  foFollowUpJson: followUpJson
+    ? {
+        kind: followUpJson.kind,
+        via: followUpJson.via,
+        keyCount: followUpJson.keyCount,
+        identCount: followUpJson.identCount,
+        numericKeyCount: followUpJson.numericKeyCount,
+        numericKeyMin: followUpJson.numericKeyMin,
+        numericKeyMax: followUpJson.numericKeyMax,
+        copiedCount: followUpJson.copiedCount,
+        extraIdentCount: followUpJson.extraIdentCount,
+        extraIdent: followUpJson.extraIdent,
+        identKeys: followUpJson.identKeys,
+        note: "key names and value kinds only; do not dump values or POST",
+      }
+    : null,
+  foPlaintextShapes: foShapes.map((s) => ({
+    via: s.via,
+    keyCount: s.keyCount,
+    identCount: (s.identKeys || []).length,
+    numericKeyCount: s.numericKeyCount,
+    numericKeyMin: s.numericKeyMin ?? null,
+    numericKeyMax: s.numericKeyMax ?? null,
+    identKeys: s.identKeys,
+    kinds: s.kinds,
+  })),
+  foPlaintextClassify: foPlaintextRows,
   xhrHook: xhr,
   opcodeFetches: ops.slice(0, 128),
   pcDeltas: deltas.slice(0, 96),
@@ -1151,6 +1455,16 @@ console.log(
       },
       foInitJson: initJson
         ? { keyCount: initJson.keyCount, hasJsonStringify: initJson.hasJsonStringify }
+        : null,
+      foFollowUpJson: followUpJson
+        ? {
+            kind: followUpJson.kind,
+            keyCount: followUpJson.keyCount,
+            copiedCount: followUpJson.copiedCount,
+            extraIdentCount: followUpJson.extraIdentCount,
+            numericKeyCount: followUpJson.numericKeyCount,
+            extraIdent: followUpJson.extraIdent,
+          }
         : null,
       headerCompare: summary.headerCompare,
       firstFo: foNet[0]

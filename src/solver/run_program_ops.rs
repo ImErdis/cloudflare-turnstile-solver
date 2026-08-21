@@ -13,9 +13,11 @@
 //! small delta is the instruction width; large or negative deltas are jumps.
 //!
 //! Late-`b` (`56907`) extra-xors for the Chrome-stable widths (`gq`/246,
-//! `gG`/227, `X3`/104, `gY`/72) plus already-mapped `Xf`/222 live in
-//! [`HANDLER_LAYOUT_B_LATE`]. Minified names rotate on later same-day HTML
-//! (`gx`/`ge`/`X4`/`gZ`/`Xg`); opcode numbers and `ToInt32` extras did not.
+//! `gG`/227, `X3`/104, `gY`/72, `X4`/12, `Xz`/52, `Xg`/130, `ge`/169) plus
+//! already-mapped `Xf`/222 live in [`HANDLER_LAYOUT_B_LATE`]. Minified names
+//! rotate on later same-day HTML (`gx`/`ge`/`X4`/`gZ`/`Xg` for the first five;
+//! `X5`/`Xv`/`XX`/`gN` for the four added here); opcode numbers and `ToInt32`
+//! extras did not.
 //!
 //! This module does **not** execute handlers or produce a token.
 
@@ -26,8 +28,8 @@ use crate::solver::run_program_vm::{
 use serde::Serialize;
 
 /// Remaining live gap after fetch, operands, `f4`, init-JSON shape, follow-up
-/// envelope, and late-`b` extra-xors: the follow-up JSON field set.
-pub const NEXT_GAP: &str = crate::solver::fo_followup::NEXT_AFTER_FOLLOWUP_SHAPE;
+/// envelope, and late-`b` extra-xors: the follow-up JSON field set (key names).
+pub const NEXT_GAP: &str = crate::solver::fo_followup_json::NEXT_AFTER_FOLLOWUP_JSON;
 
 /// JS `x ^ 62.48` is `x ^ ToInt32(62.48)` = `x ^ 62`.
 pub fn js_xor_imm(float_const: f64) -> u8 {
@@ -192,6 +194,12 @@ pub const GQ_OPCODE: u8 = 246;
 pub const GG_OPCODE: u8 = 227;
 pub const X3_OPCODE: u8 = 104;
 pub const GY_OPCODE: u8 = 72;
+/// Late-`b` `store []` (`d7` analogue). Later HTML calls this `X5`; later HTML's `X4` is opcode 104.
+pub const X4_OPCODE: u8 = 12;
+pub const XZ_OPCODE: u8 = 52;
+pub const XG_OPCODE: u8 = 130;
+/// 4-imm property set. Later HTML calls this `gN`; later HTML's `ge` is opcode 227.
+pub const GE_OPCODE: u8 = 169;
 
 pub const HANDLER_LAYOUT_B_LATE: &[HandlerLayout] = &[
     HandlerLayout {
@@ -228,6 +236,34 @@ pub const HANDLER_LAYOUT_B_LATE: &[HandlerLayout] = &[
         width: InstrWidth::Fixed(5),
         extra_xors: &[117, 221, 231, 177],
         note: "4-imm nested property get dst = obj[k1][k2] (js 177.81). Later HTML: gZ.",
+    },
+    HandlerLayout {
+        opcode: X4_OPCODE,
+        handler: "X4",
+        width: InstrWidth::Fixed(2),
+        extra_xors: &[58],
+        note: "1-imm store [] at (imm^h); early-b d7 analogue (js ^58). Later HTML: X5.",
+    },
+    HandlerLayout {
+        opcode: XZ_OPCODE,
+        handler: "Xz",
+        width: InstrWidth::Fixed(3),
+        extra_xors: &[132],
+        note: "LEB then slot^132.63; Xm[XQ]['o']=reg. Chrome histogram was all width 3 (1-byte LEB). Later HTML: Xv.",
+    },
+    HandlerLayout {
+        opcode: XG_OPCODE,
+        handler: "Xg",
+        width: InstrWidth::Fixed(3),
+        extra_xors: &[112, 19],
+        note: "2-imm store (js 112.87, 19). Later HTML: XX.",
+    },
+    HandlerLayout {
+        opcode: GE_OPCODE,
+        handler: "ge",
+        width: InstrWidth::Fixed(5),
+        extra_xors: &[41, 221, 180, 19],
+        note: "4-imm property set dest[key]=src (js 41.43, 221, 180, 19). Later HTML: gN.",
     },
 ];
 
@@ -329,6 +365,9 @@ mod tests {
         assert_eq!(js_xor_imm(177.81), 177);
         assert_eq!(js_xor_imm(112.68), 112);
         assert_eq!(js_xor_imm(182.31), 182);
+        assert_eq!(js_xor_imm(112.87), 112);
+        assert_eq!(js_xor_imm(41.43), 41);
+        assert_eq!(js_xor_imm(132.63), 132);
     }
 
     #[test]
@@ -428,6 +467,18 @@ mod tests {
         let xf = layout_for_late(XF_OPCODE).unwrap();
         assert_eq!(xf.width, InstrWidth::Variable);
         assert_eq!(xf.extra_xors, &[XF_TAG_XOR, XF_DST_XOR]);
+        let x4 = layout_for_late(X4_OPCODE).unwrap();
+        assert_eq!(x4.width, InstrWidth::Fixed(2));
+        assert_eq!(x4.extra_xors, &[58]);
+        let xz = layout_for_late(XZ_OPCODE).unwrap();
+        assert_eq!(xz.width, InstrWidth::Fixed(3));
+        assert_eq!(xz.extra_xors, &[132]);
+        let xg = layout_for_late(XG_OPCODE).unwrap();
+        assert_eq!(xg.width, InstrWidth::Fixed(3));
+        assert_eq!(xg.extra_xors, &[112, 19]);
+        let ge = layout_for_late(GE_OPCODE).unwrap();
+        assert_eq!(ge.width, InstrWidth::Fixed(5));
+        assert_eq!(ge.extra_xors, &[41, 221, 180, 19]);
 
         let hit = classify_pc_delta_late(246, 3);
         assert_eq!(hit.handler, Some("gq"));
@@ -440,6 +491,10 @@ mod tests {
         assert_eq!(classify_pc_delta_late(227, 4).matches_fixed, Some(true));
         assert_eq!(classify_pc_delta_late(104, 2).matches_fixed, Some(true));
         assert_eq!(classify_pc_delta_late(72, 5).matches_fixed, Some(true));
+        assert_eq!(classify_pc_delta_late(12, 2).matches_fixed, Some(true));
+        assert_eq!(classify_pc_delta_late(52, 3).matches_fixed, Some(true));
+        assert_eq!(classify_pc_delta_late(130, 3).matches_fixed, Some(true));
+        assert_eq!(classify_pc_delta_late(169, 5).matches_fixed, Some(true));
     }
 
     #[test]
@@ -450,16 +505,28 @@ mod tests {
         const X3: &str = "h[this.i]^3+h[this.l][Xs++]&255.51,1),h[XM]=Xs,h[W[bq(vV.A)](Xm,Xt)]={}";
         const GY: &str = "^117^XM,Xo=Xs^W[bu(jO.n)](W[bu(jO.h)](Xm[Xu++],253)+256,255)^221^XM,XR=W[bu(jO.A)](Xs,W[bu(jO.W)](3+Xm[Xu++],255))^231^XM,XM^=Xs^3+Xm[Xu++]&255^177";
         const XF: &str = "n[d2(T8.a)](Xt^n[d2(T8.n)](n[d2(T8.d)](XM[Xm++],253),256)&255,86),Xu=n[d2(T8.A)](Xt^n[d2(T8.W)](n[d2(T8.h)](XM[Xm++]-253,256),255),112),162===Xw";
+        const X4: &str = "n[this.i]^3+n[this.l][h++]&255^58,n[W]=h,n[A^Xt]=[]";
+        const XZ: &str = "^132.63,A[Xs]=Xw,Xm[XQ][`o`]=A[Xt^W]";
+        const XG: &str = "^112.87,XM^=W[d3(Ta.d)](W[d3(Ta.W)](Xs[Xw++]-253,256),255)^19,h[Xm]=Xw,h[Xu^Xt]=XM";
+        const GE: &str = "^41.43,XM),Xo=W[bS(zv.Xm)](Xs^W[bS(zv.Xw)](W[bS(zv.h)](W[bS(zv.Xu)](Xm[Xu++],253),256),255),221)^XM,XM^=W[bS(zv.Xt)](W[bS(zv.XQ)](Xs,W[bS(zv.n)](3+Xm[Xu++],255)),180),Xs^=W[bS(zv.Xo)](W[bS(zv.XR)](W[bS(zv.XS)](W[bS(zv.Xu)](Xm[Xu++],253),256),255),19)";
         assert_eq!(js_xor_imm(123.64), 123);
         assert!(GQ.contains("^148^"));
         assert!(GG.contains(",41)") && GG.contains("^180.99"));
         assert!(X3.contains(",1)") && X3.contains("={}") );
         assert!(GY.contains("^117^") && GY.contains("^221^") && GY.contains("^231^") && GY.contains("^177"));
         assert!(XF.contains(",86)") && XF.contains(",112)"));
+        assert_eq!(js_xor_imm(58.0), 58);
+        assert!(X4.contains("^58") && X4.contains("=[]"));
+        assert_eq!(js_xor_imm(132.63), 132);
+        assert!(XZ.contains("^132.63") && XZ.contains("[`o`]"));
+        assert_eq!(js_xor_imm(112.87), 112);
+        assert!(XG.contains("^112.87") && XG.contains("^19"));
+        assert_eq!(js_xor_imm(41.43), 41);
+        assert!(GE.contains("^41.43") && GE.contains(",221)") && GE.contains(",180)") && GE.contains(",19)"));
         let path = std::path::Path::new("artifacts/re-out/chrome-oracle/iframe-1.html");
         if path.is_file() {
             let html = std::fs::read_to_string(path).unwrap();
-            for snip in [GQ, GG, X3, GY, XF] {
+            for snip in [GQ, GG, X3, GY, XF, X4, XZ, XG, GE] {
                 assert!(html.contains(snip), "iframe missing snippet {snip}");
             }
         }
