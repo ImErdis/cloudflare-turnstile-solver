@@ -1,0 +1,41 @@
+{
+  "source": "headed Chrome oracle, SolveGate invisible, 2026-08-21",
+  "href": "https://solvegate.io/demo/invisible",
+  "branch": "b",
+  "fetch": {
+    "init_pc": 0,
+    "init_key": 32,
+    "byte_bias": 37,
+    "key_mul": 36163,
+    "key_add": 38392,
+    "entry": "new dy(packed)[method](0,32,[])"
+  },
+  "packedPrefix": "TX5omy48NT82Lp1u",
+  "magicHex": "4d7e689b2e3c353f362e9d6e79",
+  "firstMappedOpcode": 8,
+  "firstMappedHandler": "dN",
+  "foPostsPerChallenge": 2,
+  "fo": {
+    "method": "POST",
+    "contentType": "text/plain;charset=UTF-8",
+    "cfChl": "present",
+    "cfChlRa": "0",
+    "accept": "*/*",
+    "origin": "https://challenges.cloudflare.com",
+    "secFetchSite": "same-origin",
+    "secFetchMode": "cors",
+    "secFetchDest": "empty",
+    "priority": "u=1, i",
+    "secFetchStorageAccess": "active"
+  },
+  "fetches": [
+    {
+      "pc": 0,
+      "key": 32,
+      "byte": 77,
+      "op": 8,
+      "note": "first byte of TX5omy48… magic under live fetch; Chrome HTML has case 8"
+    }
+  ],
+  "note": "XHR setRequestHeader only cf-chl + cf-chl-ra. Content-Type is Chrome's default for xhr.send(string). Fetch constants and switch IDs rotate; re-run scripts/chrome_oracle.mjs."
+}

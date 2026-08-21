@@ -224,7 +224,7 @@ async fn run() -> Result<Value> {
     let next_failure = if !iframe_ok {
         "iframe"
     } else if fo_packed {
-        "runProgram_interpreter"
+        "runProgram_handlers"
     } else if fo_json_error {
         "packed_run_program"
     } else {

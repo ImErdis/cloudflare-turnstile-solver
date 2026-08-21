@@ -31,6 +31,8 @@ may not fully work end-to-end against live Cloudflare.
 - Test: `cargo test --locked`
 - Probe live iframe protocol (no fingerprint): `cargo run --locked --bin probe_iframe`
 - Unpack a captured packed `runProgram` blob (no network): `cargo run --locked --bin analyze_run_program`
+- Naive opcode-fetch walk: `cargo run --locked --bin analyze_run_program -- --decode 16 <packed>`
+- Headed Chrome oracle: `cd scripts && npm install && DISPLAY=:1 node chrome_oracle.mjs`
 - Run the solver against the SolveGate demo: `cargo run --locked --bin solve_test`
 
 ### Live Turnstile protocol (as of 2026-08)
@@ -53,22 +55,38 @@ There is still an `/orchestrate/chl_api/v1` URL, but the body is bootstrap JS th
 randomized `_cf_chl_opt` fields — not the VM this crate disassembles (no `"lang":"` payload).
 
 The iframe bootstrap then **XHR POSTs** `/fo/{session}/{ray}/{ch}` with headers `cf-chl` /
-`cf-chl-ra` and a compressed init body (`wZ(...)`). A GET or empty POST is expected to 400
-with JSON `{"d":"..."}`. A successful POST body is standard base64; `decrypt_cloudflare_response(ray, body)`
-yields a packed `runProgram` blob (prefix `ryrCJzUnLCItNTiVeJ...`), not JS. That packed
-string is **standard base64** of bytecode whose first 13 bytes are a stable magic
-(`af2ac22735272c222d35389578`). The iframe unpacks it with `atob` + `charCodeAt`
-(`function C`) and interprets it in `runProgram` (rolling XOR, not this crate's
-orchestrate disassembler). Body entropy is ~7.5 bits/byte (not zlib/gzip, not JS).
-`analyze_run_program` unpacks that framing only.
+`cf-chl-ra` (retry counter, `0` on the first attempt) and a compressed init body (`wZ(...)`).
+A GET or empty POST is expected to 400 with JSON `{"d":"..."}`. A successful POST body is
+standard base64; `decrypt_cloudflare_response(ray, body)` yields a packed `runProgram` blob
+(prefix `ryrCJzUnLCItNTiVeJ...`), not JS. That packed string is **standard base64** of
+bytecode whose first 13 bytes are a stable magic (`af2ac22735272c222d35389578`). The iframe
+unpacks it with `atob` + `charCodeAt` (`function C`) and interprets it in `runProgram`.
+
+Opcode fetch (headed Chrome oracle; **constants rotate per iframe build**):
+
+```
+opcode = key ^ ((byte - bias) & 0xff)
+key    = ((key + opcode) * mul + add) & 0xff
+```
+
+Live (branch `b`, 2026-08-21): `bias=37`, `mul=36163`, `add=38392`, entry `(0, 32, [])`,
+packed prefix `TX5omy48NT82Lp1ueY`. Captured branch `g`: `bias=62`, `mul=19663`,
+`add=36376`, entry `(0, 100, [])`, prefix `ryrCJzUnLCItNTiVeJ`. Both have 69 switch
+cases with different IDs. Mapped handlers then read immediates with other biases;
+a 1-byte walk diverges immediately. See `src/solver/run_program_vm.rs`.
+
+Headed Chrome oracle: `cd scripts && npm install && DISPLAY=:1 node chrome_oracle.mjs`.
+It logs `/fo/` extraInfo headers. Chrome POSTs twice to the same `/fo/` URL;
+`Content-Type: text/plain;charset=UTF-8` is XHR's default; `cf-chl-ra` is `0` on
+the first attempt. Crate POST header *names* match; `probe_fo_blob` uses `priority:
+u=2` vs Chrome `u=1, i`. Live `/fo/` still 400s without `wZ(...)`.
 
 `probe_iframe` / `solve_test` should get iframe HTTP 200 + parsed options, then an honest
-failure: orchestrate is not the VM, live `/fo/` without the init body 400s, and a captured
-successful `/fo/` unpacks to high-entropy bytecode. `/cmg/1` 404s (images moved to
-`/ci/{ray}/...`) and is skipped so the client reaches that break. Do **not** reconstruct the
-init payload or implement the `runProgram` opcode map as a working solver.
+failure: orchestrate is not the VM, live `/fo/` without the init body 400s. `/cmg/1` 404s
+(images moved to `/ci/{ray}/...`) and is skipped. Do **not** reconstruct `wZ(...)` or run
+the opcode handlers as a solver.
 
-Static unpack (captures only): `cargo run --locked --bin analyze_run_program -- --ray <c_ray> <fo-body>`
+Static unpack + naive fetch: `cargo run --locked --bin analyze_run_program -- --decode 16 --ray <c_ray> <fo-body>`
 
 Default demo: `https://solvegate.io/demo/invisible` (sitekey `0x4AAAAAAER49t0sMxTcief0`).
 
