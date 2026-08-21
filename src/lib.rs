@@ -18,6 +18,9 @@ pub use solver::run_program::{
     RUN_PROGRAM_MAGIC_BYTES_B, RunProgramAnalysis, analyze_packed_run_program,
     unpack_packed_run_program,
 };
+pub use solver::run_program_ops::{
+    DN_TAG_STRING, HANDLER_LAYOUT_B, classify_pc_delta, first_dn_tag_b, operand_from_byte,
+};
 pub use solver::run_program_vm::{
     FETCH_LIVE, INIT_KEY, INIT_PC, OPCODE_TABLE, decode_opcode, naive_one_byte_fetches, next_key,
     opcode_def, opcode_def_in, verify_oracle_tuple,

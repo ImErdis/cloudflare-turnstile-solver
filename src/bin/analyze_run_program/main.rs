@@ -14,6 +14,9 @@
 use anyhow::{Context, Result, bail};
 use cf::reverse::encryption::decrypt_cloudflare_response;
 use cf::solver::run_program::{RUN_PROGRAM_MAGIC_BYTES_B, unpack_packed_run_program};
+use cf::solver::run_program_ops::{
+    DN_OPCODE, DN_TAG_STRING, classify_pc_delta, first_dn_tag_b, operand_from_byte,
+};
 use cf::solver::run_program_vm::{
     FETCH_BRANCH_B, FETCH_BRANCH_G, FETCH_LIVE, OPCODE_TABLE_B, OPCODE_TABLE_G,
     naive_one_byte_fetches, opcode_def_in, verify_oracle_tuple,
@@ -160,11 +163,54 @@ fn verify_oracle_file(path: &PathBuf) -> Result<Value> {
         if let Err(e) = verify_oracle_tuple(FETCH_LIVE, pc, key, byte, op) {
             errors.push(format!("fetch {i}: {e}"));
         }
+        if byte != 0 || key != 0 {
+            // Operand path: post-fetch key is `next_key`, not the fetch key.
+            let _ = operand_from_byte(FETCH_LIVE, key, byte, 0);
+        }
+    }
+    let deltas = v
+        .get("pcDeltas")
+        .or_else(|| v.get("pc_deltas"))
+        .and_then(|x| x.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let mut width_rows = Vec::new();
+    for d in &deltas {
+        let op = d
+            .get("op")
+            .or_else(|| d.get("opcode"))
+            .and_then(|x| x.as_u64())
+            .unwrap_or(0) as u8;
+        let width = d.get("width").and_then(|x| x.as_i64()).unwrap_or(0) as i32;
+        width_rows.push(classify_pc_delta(op, width));
+    }
+    let first_tag = v
+        .get("firstDnTag")
+        .or_else(|| v.get("first_dn_tag"))
+        .and_then(|x| x.as_u64())
+        .map(|n| n as u8);
+    if let Some(tag) = first_tag {
+        if tag != DN_TAG_STRING {
+            errors.push(format!(
+                "first dN tag {tag}, expected string tag {DN_TAG_STRING} for TX5omy48 magic"
+            ));
+        }
+    }
+    let first_op = fetches
+        .first()
+        .and_then(|f| f.get("op").or_else(|| f.get("opcode")))
+        .and_then(|x| x.as_u64())
+        .map(|n| n as u8);
+    if first_op == Some(DN_OPCODE) || first_tag.is_some() {
+        let _ = first_dn_tag_b(&[0x4d, 0x7e]);
     }
     Ok(json!({
         "ok": errors.is_empty(),
         "path": path.display().to_string(),
         "fetch_count": fetches.len(),
+        "pc_delta_count": deltas.len(),
+        "widths": width_rows,
+        "first_dn_tag": first_tag,
         "errors": errors,
         "header_compare": compare_chrome_and_crate_fo_post(),
         "first": fetches.first(),

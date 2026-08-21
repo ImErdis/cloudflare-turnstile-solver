@@ -277,7 +277,7 @@ async fn sample_fo(
         .header("Sec-Fetch-Mode", "cors")
         .header("Sec-Fetch-Dest", "empty")
         .header("Referer", iframe_url)
-        .header("Priority", "u=2");
+        .header("Priority", "u=1, i");
     if method == "POST" {
         req = req
             .header("Content-Type", "text/plain;charset=UTF-8")

@@ -14,6 +14,8 @@
   "magicHex": "4d7e689b2e3c353f362e9d6e79",
   "firstMappedOpcode": 8,
   "firstMappedHandler": "dN",
+  "firstDnTag": 179,
+  "firstDnTagName": "string",
   "foPostsPerChallenge": 2,
   "fo": {
     "method": "POST",
@@ -37,5 +39,5 @@
       "note": "first byte of TX5omy48… magic under live fetch; Chrome HTML has case 8"
     }
   ],
-  "note": "XHR setRequestHeader only cf-chl + cf-chl-ra. Content-Type is Chrome's default for xhr.send(string). Fetch constants and switch IDs rotate; re-run scripts/chrome_oracle.mjs."
+  "note": "XHR setRequestHeader only cf-chl + cf-chl-ra. Content-Type is Chrome's default for xhr.send(string). Operands use post-fetch key: imm = next_key ^ wrapping_sub(byte, 37) ^ extra. First dN tag is 179 (string). Fetch constants and switch IDs rotate; re-run scripts/chrome_oracle.mjs."
 }

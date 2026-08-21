@@ -11,6 +11,7 @@ pub mod keys;
 mod performance;
 pub mod protocol;
 pub mod run_program;
+pub mod run_program_ops;
 pub mod run_program_vm;
 pub mod task;
 mod task_client;

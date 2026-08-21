@@ -72,14 +72,26 @@ key    = ((key + opcode) * mul + add) & 0xff
 Live (branch `b`, 2026-08-21): `bias=37`, `mul=36163`, `add=38392`, entry `(0, 32, [])`,
 packed prefix `TX5omy48NT82Lp1ueY`. Captured branch `g`: `bias=62`, `mul=19663`,
 `add=36376`, entry `(0, 100, [])`, prefix `ryrCJzUnLCItNTiVeJ`. Both have 69 switch
-cases with different IDs. Mapped handlers then read immediates with other biases;
-a 1-byte walk diverges immediately. See `src/solver/run_program_vm.rs`.
+cases with different IDs.
+
+Operand immediates use the **post-fetch** key (no mul/add):
+
+```
+imm = next_key ^ ((byte - bias) & 0xff) ^ extra_xor
+```
+
+First live opcode is `dN` (8), a tagged load. Magic `TX5omy48…` decodes tag **179**
+(string). Extra-xors are JS `ToInt32` of floats (`154.33` → 154). Fixed-width
+handlers (d6/d7/d4 width 2, dQ/d1/d3 width 3, p/F width 4) are in
+`src/solver/run_program_ops.rs`. Chrome PC deltas confirm widths; jumps show
+large/negative deltas. A 1-byte walk still diverges immediately.
 
 Headed Chrome oracle: `cd scripts && npm install && DISPLAY=:1 node chrome_oracle.mjs`.
-It logs `/fo/` extraInfo headers. Chrome POSTs twice to the same `/fo/` URL;
+It logs `/fo/` extraInfo headers and `{pc,op,key,byte}` fetches. Chrome POSTs
+twice to the same `/fo/` URL (init ~4k → packed program; follow-up ~90k);
 `Content-Type: text/plain;charset=UTF-8` is XHR's default; `cf-chl-ra` is `0` on
-the first attempt. Crate POST header *names* match; `probe_fo_blob` uses `priority:
-u=2` vs Chrome `u=1, i`. Live `/fo/` still 400s without `wZ(...)`.
+the first attempt; `priority: u=1, i`. Crate POST header names and probe
+priority match. Live `/fo/` still 400s without `wZ(...)`.
 
 `probe_iframe` / `solve_test` should get iframe HTTP 200 + parsed options, then an honest
 failure: orchestrate is not the VM, live `/fo/` without the init body 400s. `/cmg/1` 404s

@@ -3,28 +3,35 @@
  * Headed Chrome oracle for live Turnstile `/fo/` + `runProgram`.
  *
  * Captures real request headers (CDP Network extraInfo) and injects a log at
- * the interpreter's opcode fetch (`* 19663 + 36376`) inside the OOPIF iframe.
- * Does **not** reconstruct wZ, dump full POST bodies, or harvest a token.
+ * the interpreter's opcode fetch (`* 36163 + 38392` live / `* 19663 + 36376`
+ * historical) inside the OOPIF iframe. Logs `{pc, op, key, byte}` so instruction
+ * widths are PC deltas — not a 1-byte walk. Does **not** reconstruct wZ, dump
+ * full POST bodies, execute handlers as a solver, or harvest a token.
  *
  * Usage:
  *   DISPLAY=:1 node scripts/chrome_oracle.mjs [url] [out-dir]
+ *   node scripts/chrome_oracle.mjs --self-test
  *
  * Env:
  *   CHROME_PATH          default /usr/bin/google-chrome-stable
- *   ORACLE_WAIT_MS       default 20000
+ *   ORACLE_WAIT_MS       default 22000
  *   ORACLE_HEADLESS      set to 1 to force headless (not the intended mode)
  */
 import fs from "node:fs";
 import path from "node:path";
 import puppeteer from "puppeteer-core";
 
-const url = process.argv[2] || "https://solvegate.io/demo/invisible";
-const outDir = process.argv[3] || path.join("artifacts", "re-out", "chrome-oracle");
+const selfTest = process.argv.includes("--self-test");
+const positional = process.argv.slice(2).filter((a) => a !== "--self-test");
+const url = positional[0] || "https://solvegate.io/demo/invisible";
+const outDir = positional[1] || path.join("artifacts", "re-out", "chrome-oracle");
 const chrome = process.env.CHROME_PATH || "/usr/bin/google-chrome-stable";
-const waitMs = Number(process.env.ORACLE_WAIT_MS || 20_000);
+const waitMs = Number(process.env.ORACLE_WAIT_MS || 22_000);
 const headed = process.env.ORACLE_HEADLESS !== "1";
 
-fs.mkdirSync(outDir, { recursive: true });
+if (!selfTest) {
+  fs.mkdirSync(outDir, { recursive: true });
+}
 
 const PREAMBLE = `(() => {
   if (window.__cfOracleHook) return;
@@ -98,46 +105,167 @@ const PREAMBLE = `(() => {
   }
 })();`;
 
+function fetchSnippet(html) {
+  for (const marker of ["36163)+38392", "19663)+36376", "36163", "19663"]) {
+    const idx = html.indexOf(marker);
+    if (idx >= 0) {
+      return html.slice(Math.max(0, idx - 280), idx + 220);
+    }
+  }
+  return null;
+}
+
+/**
+ * Instrument both fetch loops (happy path `,37)+256&255` and try/catch
+ * `219+byte&255`) so Chrome records `{pc, op, key, byte}` at each opcode.
+ * PC deltas are instruction widths except when a handler jumps.
+ */
 function injectOpcodeLog(html) {
   if (!html) {
     return { html, injected: false, replacements: 0, snippet: null };
   }
-  const idx19663 = html.indexOf("19663");
-  const idx36163 = html.indexOf("36163");
-  const idx = idx19663 >= 0 ? idx19663 : idx36163;
-  const snippet = idx >= 0 ? html.slice(Math.max(0, idx - 280), idx + 220) : null;
+  const snippet = fetchSnippet(html);
   let n = 0;
   let out = html;
+
   out = out.replace(
-    /([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)\[([A-Za-z_$][\w$]*)\]\^[\s\S]{0,180}?-62,256\),255\),(\2\[\3\]=)/g,
-    (full, opVar, stateVar, keyI, assign) => {
+    /switch\((\w+)\[(\w+)\]=(\w+)\+1,/g,
+    (_full, st, slot, pc) => {
       n++;
-      const log = `(window.__cfOp=window.__cfOp||[]).length<160&&window.__cfOp.push({loop:1,op:${opVar}&255,key:${stateVar}[${keyI}]&255}),`;
-      return full.replace(assign, log + assign);
+      return `switch((window.__cfT={pc:${pc}}),${st}[${slot}]=${pc}+1,`;
     },
   );
+
   out = out.replace(
-    /([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)\[([A-Za-z_$][\w$]*)\]\^[\s\S]{0,80}?,37\)\+256&255,(\2\[\3\]=)/g,
-    (full, opVar, stateVar, keyI, assign) => {
+    /(\w+)=(\w+)\[(\w+)\]\^([\s\S]{0,80}?\((\w+)\[\1\],(?:37|62)\)\+256&255,)/g,
+    (_full, op, st, keySlot, rest, arr) => {
       n++;
-      const log = `(window.__cfOp=window.__cfOp||[]).length<160&&window.__cfOp.push({loop:1b,op:${opVar}&255,key:${stateVar}[${keyI}]&255}),`;
-      return full.replace(assign, log + assign);
+      return `${op}=(window.__cfT&&(window.__cfT.key=${st}[${keySlot}]&255,window.__cfT.byte=${arr}[${op}]&255),${st}[${keySlot}])^${rest}`;
     },
   );
+
   out = out.replace(
-    /([A-Za-z_$][\w$]*)=\w+\[[^\]]+\]\(([A-Za-z_$][\w$]*)\[([A-Za-z_$][\w$]*)\],[\s\S]{0,180}?-62,256[\s\S]{0,50}?\),(\2\[\3\]=)/g,
-    (full, opVar, stateVar, keyI, assign) => {
+    /(\w+)=(\w+\[[^\]]{0,48}\])\((\w+)\[(\w+)\],219\+(\w+)\[(\w+)\]&255\)/g,
+    (_full, op, callee, st, keySlot, arr, pc) => {
       n++;
-      const log = `(window.__cfOp=window.__cfOp||[]).length<160&&window.__cfOp.push({loop:2,op:${opVar}&255,key:${stateVar}[${keyI}]&255}),`;
-      return full.replace(assign, log + assign);
+      return `${op}=(window.__cfT&&(window.__cfT.key=${st}[${keySlot}]&255,window.__cfT.byte=${arr}[${pc}]&255),${callee}(${st}[${keySlot}],219+${arr}[${pc}]&255))`;
     },
   );
-  if (/<head[\s>]/i.test(out)) {
+
+  for (const [mul, add] of [
+    ["36163", "38392"],
+    ["19663", "36376"],
+  ]) {
+    const re = new RegExp(`${mul}\\)\\+${add}&255(?:\\.\\d+)?,(\\w+)\\)`, "g");
+    out = out.replace(re, (_full, opVar) => {
+      n++;
+      return (
+        `${mul})+${add}&255,` +
+        `(window.__cfT&&(window.__cfT.op=${opVar}&255),` +
+        `window.__cfOp=window.__cfOp||[],` +
+        `window.__cfOp.length<2500&&window.__cfOp.push({` +
+        `pc:window.__cfT&&window.__cfT.pc,` +
+        `op:${opVar}&255,` +
+        `key:window.__cfT&&window.__cfT.key,` +
+        `byte:window.__cfT&&window.__cfT.byte` +
+        `})),${opVar})`
+      );
+    });
+  }
+
+  const nonceScript = /<script([^>]*nonce="[^"]+"[^>]*)>/i;
+  if (nonceScript.test(out)) {
+    out = out.replace(nonceScript, `<script$1>${PREAMBLE}`);
+  } else if (/<head[\s>]/i.test(out)) {
     out = out.replace(/<head([^>]*)>/i, `<head$1><script>${PREAMBLE}</script>`);
   } else {
     out = `<script>${PREAMBLE}</script>` + out;
   }
   return { html: out, injected: n > 0, replacements: n, snippet };
+}
+
+function pcDeltas(ops) {
+  const rows = [];
+  for (let i = 1; i < ops.length; i++) {
+    const a = ops[i - 1];
+    const b = ops[i];
+    if (a?.pc == null || b?.pc == null) continue;
+    rows.push({
+      pc: a.pc,
+      op: a.op,
+      width: b.pc - a.pc,
+      key: a.key,
+      byte: a.byte,
+    });
+  }
+  return rows;
+}
+
+function widthHistogram(deltas) {
+  const m = {};
+  for (const row of deltas) {
+    if (row.op == null) continue;
+    const op = String(row.op);
+    const w = String(row.width);
+    m[op] = m[op] || {};
+    m[op][w] = (m[op][w] || 0) + 1;
+  }
+  return m;
+}
+
+function foPostPairs(foNet) {
+  const byUrl = new Map();
+  for (const n of foNet) {
+    const u = n.url || "";
+    if (!byUrl.has(u)) byUrl.set(u, []);
+    byUrl.get(u).push(n);
+  }
+  return [...byUrl.values()]
+    .filter((g) => g.length >= 2)
+    .map((g) => ({
+      urlTail: (g[0].url || "").split("/fo/")[1] || "",
+      posts: g.map((n) => {
+        const h = headerBag(n);
+        return {
+          status: n.status,
+          bodyLen: n.bodyLen,
+          bodyPrefix: n.bodyPrefix,
+          cfChl: h["cf-chl"] ? "present" : null,
+          cfChlRa: h["cf-chl-ra"] || null,
+          priority: h.priority || null,
+        };
+      }),
+      sameUrl: true,
+      samePrefix: g.every((n) => n.bodyPrefix === g[0].bodyPrefix),
+    }));
+}
+
+function selfTestInject() {
+  const happy =
+    "switch(hy[hH]=E+1,E=hy[hY]^G[A1(I2.L)](hj[E],37)+256&255,hy[hY]=G[A1(I2.hC)](hy[hY]+E,36163)+38392&255.07,E){case 8:dN(this);break;}";
+  const catchLoop =
+    "switch(hy[hH]=ht+1,hg=G[A1(I2.N)](hy[hY],219+hj[ht]&255),hy[hY]=G[A1(I2.Na)](hy[hY]+hg,36163)+38392&255.15,hg){case 8:dN(this);break;}";
+  const a = injectOpcodeLog(happy);
+  const b = injectOpcodeLog(catchLoop);
+  return {
+    ok:
+      a.injected &&
+      b.injected &&
+      a.html.includes("__cfOp.push") &&
+      b.html.includes("__cfOp.push") &&
+      a.html.includes("pc:E") &&
+      b.html.includes("pc:ht") &&
+      a.replacements >= 3 &&
+      b.replacements >= 2,
+    happy: { replacements: a.replacements, injected: a.injected },
+    catchLoop: { replacements: b.replacements, injected: b.injected },
+  };
+}
+
+if (selfTest) {
+  const r = selfTestInject();
+  console.log(JSON.stringify(r, null, 2));
+  process.exit(r.ok ? 0 : 1);
 }
 
 function interestingUrl(u) {
@@ -208,7 +336,9 @@ async function onFetchPaused(session, evt) {
         replacements,
         bytes: html.length,
         has19663: text.includes("19663"),
+        has36163: text.includes("36163"),
         has36376: text.includes("36376"),
+        has38392: text.includes("38392"),
         hasRunProgram: text.includes("runProgram"),
         snippet,
       });
@@ -341,7 +471,7 @@ for (const frame of page.frames()) {
                 const dump = await frame.evaluate(() => ({
       href: location.href,
       opCount: (window.__cfOp || []).length,
-      ops: (window.__cfOp || []).slice(0, 96),
+      ops: (window.__cfOp || []).slice(0, 400),
       reads: (window.__cfReads || []).slice(0, 96),
       xhr: window.__cfXhr || [],
       runProgramCalls: window.__cfRP || [],
@@ -389,6 +519,7 @@ function headerBag(rec) {
 }
 
 const foHeaders = firstFo ? headerBag(firstFo) : {};
+const deltas = pcDeltas(ops);
 const summary = {
   url,
   headed,
@@ -404,8 +535,11 @@ const summary = {
     bodyPrefix: n.bodyPrefix,
     headers: headerBag(n),
   })),
+  foPostPairs: foPostPairs(foNet),
   xhrHook: xhr,
-  opcodeFetches: ops.slice(0, 64),
+  opcodeFetches: ops.slice(0, 128),
+  pcDeltas: deltas.slice(0, 96),
+  widthHistogram: widthHistogram(deltas),
   bytecodeReads: reads.slice(0, 64),
   opcodeCount: ops.length,
   runProgramCalls: frameDumps.flatMap((f) => f.runProgramCalls || []),
@@ -419,6 +553,8 @@ const summary = {
     secFetchSite: foHeaders["sec-fetch-site"] || null,
     secFetchMode: foHeaders["sec-fetch-mode"] || null,
     secFetchDest: foHeaders["sec-fetch-dest"] || null,
+    secFetchStorageAccess: foHeaders["sec-fetch-storage-access"] || null,
+    priority: foHeaders.priority || null,
     referer: foHeaders["referer"] ? "present" : null,
   },
   firstOpcode: ops[0] || null,
@@ -441,7 +577,9 @@ console.log(
       opcodeCount: ops.length,
       readCount: reads.length,
       firstOpcode: ops[0] || null,
-      firstReads: reads.slice(0, 8),
+      firstWidths: deltas.slice(0, 12),
+      widthHistogram: summary.widthHistogram,
+      foPostPairs: summary.foPostPairs,
       headerCompare: summary.headerCompare,
       firstFo: foNet[0]
         ? {

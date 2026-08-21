@@ -330,7 +330,7 @@ impl TaskClient {
             .header("Sec-Fetch-Mode", "cors")
             .header("Sec-Fetch-Dest", "empty")
             .header("Referer", referer)
-            .header("Priority", "u=2");
+            .header("Priority", "u=1, i");
 
         if method == "POST" {
             req = req

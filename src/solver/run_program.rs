@@ -120,7 +120,7 @@ pub fn analyze_packed_run_program(packed: &str) -> RunProgramAnalysis {
     } else if !magic_ok {
         "bytecode_magic_mismatch"
     } else {
-        // Fetch formula + switch table are mapped; handlers / immediates are not.
+        // Fetch + operand layout are mapped; live /fo/ still needs the wZ body.
         crate::solver::run_program_vm::NEXT_GAP
     };
 

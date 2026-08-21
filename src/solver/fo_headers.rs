@@ -7,10 +7,11 @@
 //! first attempt).
 //!
 //! Chrome (2026-08-21) POSTs **twice** to the same `/fo/{session}/{ray}/{ch}`
-//! URL (small init ~4k → packed program; larger follow-up ~90k). `priority` is
-//! `u=1, i`; this crate's empty `probe_fo_blob` uses `u=2`. Custom header
-//! **names/values** otherwise match. The remaining live gap is the **body**
-//! (`wZ(...)`), not a missing `cf-chl` header.
+//! URL. First body ~4k (init) → ~846k packed `runProgram`; second body ~85–90k
+//! (follow-up) → ~2.4k. Both share `cf-chl` / `cf-chl-ra: 0` and the same
+//! compressed-body prefix. `priority` is `u=1, i`. Custom header names/values
+//! match this crate. The remaining live gap is the **body** (`wZ(...)`), not a
+//! missing `cf-chl` header.
 
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -29,6 +30,9 @@ pub struct FoPostShape {
     pub sec_fetch_mode: &'static str,
     pub sec_fetch_dest: &'static str,
     pub referer_is_iframe: bool,
+    pub priority: &'static str,
+    pub sec_fetch_storage_access: &'static str,
+    pub posts_per_challenge_url: u8,
     /// Iframe sets these via `setRequestHeader`. Content-Type is the XHR default.
     pub xhr_set_header_names: &'static [&'static str],
 }
@@ -45,10 +49,13 @@ pub const CHROME_FO_POST: FoPostShape = FoPostShape {
     sec_fetch_mode: "cors",
     sec_fetch_dest: "empty",
     referer_is_iframe: true,
+    priority: "u=1, i",
+    sec_fetch_storage_access: "active",
+    posts_per_challenge_url: 2,
     xhr_set_header_names: &["cf-chl", "cf-chl-ra"],
 };
 
-/// What `TaskClient::fo_request` / `post_init_payload` send today.
+/// What `TaskClient::fo_request` / `probe_fo_blob` send today.
 pub const CRATE_FO_POST: FoPostShape = FoPostShape {
     method: "POST",
     content_type: "text/plain;charset=UTF-8",
@@ -61,6 +68,9 @@ pub const CRATE_FO_POST: FoPostShape = FoPostShape {
     sec_fetch_mode: "cors",
     sec_fetch_dest: "empty",
     referer_is_iframe: true,
+    priority: "u=1, i",
+    sec_fetch_storage_access: "active",
+    posts_per_challenge_url: 2,
     xhr_set_header_names: &["cf-chl", "cf-chl-ra"],
 };
 
@@ -82,7 +92,7 @@ pub struct FoHeaderCompare {
 pub fn compare_chrome_and_crate_fo_post() -> FoHeaderCompare {
     let c = CHROME_FO_POST;
     let k = CRATE_FO_POST;
-    let pairs: [(&'static str, &str, &str); 9] = [
+    let pairs: [(&'static str, &str, &str); 11] = [
         ("method", c.method, k.method),
         ("content_type", c.content_type, k.content_type),
         ("cf_chl", c.cf_chl_header, k.cf_chl_header),
@@ -92,6 +102,12 @@ pub fn compare_chrome_and_crate_fo_post() -> FoHeaderCompare {
         ("origin_host", c.origin_host, k.origin_host),
         ("sec_fetch_site", c.sec_fetch_site, k.sec_fetch_site),
         ("sec_fetch_mode", c.sec_fetch_mode, k.sec_fetch_mode),
+        ("priority", c.priority, k.priority),
+        (
+            "sec_fetch_storage_access",
+            c.sec_fetch_storage_access,
+            k.sec_fetch_storage_access,
+        ),
     ];
     let mut fields: Vec<HeaderFieldDiff> = pairs
         .into_iter()
@@ -112,7 +128,7 @@ pub fn compare_chrome_and_crate_fo_post() -> FoHeaderCompare {
     FoHeaderCompare {
         all_match,
         fields,
-        note: "crate matches Chrome XHR header names; Chrome POSTs twice to the same /fo/ URL with priority u=1, i (probe uses u=2); live 400s without the wZ body",
+        note: "crate matches Chrome XHR header names and priority u=1, i; Chrome POSTs twice to the same /fo/ URL (init ~4k then follow-up ~90k, same body prefix); live 400s without the wZ body",
     }
 }
 
@@ -153,6 +169,15 @@ pub fn chrome_extra_headers_match_shape(
             "origin",
             get("origin").is_some_and(|v| v.contains(CHROME_FO_POST.origin_host)),
         ),
+        (
+            "priority",
+            get("priority").is_some_and(|v| v == CHROME_FO_POST.priority),
+        ),
+        (
+            "sec-fetch-storage-access",
+            get("sec-fetch-storage-access")
+                .is_some_and(|v| v == CHROME_FO_POST.sec_fetch_storage_access),
+        ),
     ]
 }
 
@@ -180,6 +205,8 @@ mod tests {
         h.insert("sec-fetch-mode".into(), "cors".into());
         h.insert("sec-fetch-dest".into(), "empty".into());
         h.insert("origin".into(), "https://challenges.cloudflare.com".into());
+        h.insert("priority".into(), "u=1, i".into());
+        h.insert("sec-fetch-storage-access".into(), "active".into());
         let rows = chrome_extra_headers_match_shape(&h);
         assert!(rows.iter().all(|(_, ok)| *ok), "{rows:?}");
     }

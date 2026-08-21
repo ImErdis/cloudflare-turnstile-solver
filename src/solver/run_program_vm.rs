@@ -15,9 +15,8 @@
 
 use serde::Serialize;
 
-/// Honest remaining work: handler bodies / per-operand encodings (and re-running
-/// the Chrome oracle when fetch constants rotate again).
-pub const NEXT_GAP: &str = "runProgram_handlers";
+/// Honest remaining work after fetch + operand layout: the compressed `/fo/` body.
+pub const NEXT_GAP: &str = crate::solver::run_program_ops::NEXT_GAP;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct FetchParams {
