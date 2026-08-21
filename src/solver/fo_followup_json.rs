@@ -4,8 +4,11 @@
 //! as `fn(initObj, sendHelper)`. That path mutates the init object in place,
 //! then the send helper does `send(f4(obj))` again (same `N` / URL / `cf-chl-ra: 0`).
 //!
-//! Key **names** (not values) come from headed Chrome Debugger on `f4`'s first
-//! argument (`scripts/chrome_oracle.mjs`), plus a `JSON.stringify` hook as backup.
+//! Key **names** (not values) come from headed Chrome Debugger on `f4`/`wZ` or
+//! the `setTimeout(send, 100, url, obj)` helper (`scripts/chrome_oracle.mjs`).
+//! A `JSON.stringify` hook is backup; `CSSStyleDeclaration` dumps (1000+ keys,
+//! `alignContent`, numeric `0..n`) are rejected. Extra ident **names** still
+//! need a successful iframe harvest.
 //! Classification against [`INIT_JSON_KEYS_B`](crate::solver::fo_init_json::INIT_JSON_KEYS_B):
 //!
 //! * **copied** — ident keys that already appeared on the init object

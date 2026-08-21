@@ -54,7 +54,10 @@ const PREAMBLE = `(() => {
   function __cfShape(obj, via) {
     if (!obj || typeof obj !== "object" || Array.isArray(obj)) return null;
     const keys = Object.keys(obj);
-    if (keys.length < 20) return null;
+    if (keys.length < 20 || keys.length > 250) return null;
+    if (keys.indexOf("alignContent") >= 0 && keys.indexOf("webkitAlignContent") >= 0) {
+      return null;
+    }
     const ident = [];
     const numeric = [];
     const kinds = {};
@@ -164,6 +167,7 @@ function fetchSnippet(html) {
     "19663)+36376",
     "36163",
     "19663",
+    "28814",
   ]) {
     const idx = html.indexOf(marker);
     if (idx >= 0) {
@@ -288,6 +292,16 @@ function injectOpcodeLog(html) {
       return logAfterKeyUpdate(`56907*(${mixVar}*${mixVar})${mid}+22357&255`, opVar);
     },
   );
+
+  // Linear rotation: ((key+op)*28814+40641)&255 (bias 17 / +239)
+  out = out.replace(/\*28814,40641\)&255(?:\.\d+)?,(\w+)\)/g, (_full, opVar) => {
+    n++;
+    return logAfterKeyUpdate(`*28814,40641)&255`, opVar);
+  });
+  out = out.replace(/\*28814\+40641&255(?:\.\d+)?,(\w+)\)/g, (_full, opVar) => {
+    n++;
+    return logAfterKeyUpdate(`*28814+40641&255`, opVar);
+  });
 
   const nonceScript = /<script([^>]*nonce="[^"]+"[^>]*)>/i;
   if (nonceScript.test(out)) {
@@ -523,17 +537,47 @@ function extractInitJsonKeys(html) {
 }
 
 /** Key names + kinds only. `init` if the ident set is the first POST; `followUp` if VM numeric/extra keys appear. */
+function looksLikeCssStyleShape(shape) {
+  const ident = shape?.identKeys || [];
+  if (ident.includes("alignContent") || ident.includes("webkitAlignContent")) {
+    return true;
+  }
+  if ((shape?.numericKeyCount || 0) >= 200) return true;
+  if ((shape?.keyCount || 0) > 250) return true;
+  return false;
+}
+
 function classifyFoPlaintext(shape, initKeys) {
   if (!shape || !Array.isArray(shape.identKeys)) return null;
+  if (looksLikeCssStyleShape(shape)) {
+    return {
+      kind: "other",
+      via: shape.via || null,
+      keyCount: shape.keyCount,
+      identCount: shape.identKeys.length,
+      numericKeyCount: shape.numericKeyCount || 0,
+      numericKeyMin: shape.numericKeyMin ?? null,
+      numericKeyMax: shape.numericKeyMax ?? null,
+      copiedCount: 0,
+      extraIdent: [],
+      extraIdentCount: 0,
+      rejected: "css-style",
+    };
+  }
   const initSet = new Set(initKeys || []);
   const ident = shape.identKeys;
   const copied = ident.filter((k) => initSet.has(k));
   const extraIdent = ident.filter((k) => !initSet.has(k));
   let kind = "other";
-  if ((shape.numericKeyCount || 0) > 0) kind = "followUp";
-  else if (copied.length >= 40 && extraIdent.length === 0) kind = "init";
-  else if (copied.length >= 40) kind = "followUp";
-  else if (ident.length >= 40 && extraIdent.length === 0 && initSet.size === 0) {
+  if (initSet.size && copied.length < 40) {
+    kind = "other";
+  } else if ((shape.numericKeyCount || 0) > 0 && copied.length >= 40) {
+    kind = "followUp";
+  } else if (copied.length >= 40 && extraIdent.length === 0) {
+    kind = "init";
+  } else if (copied.length >= 40) {
+    kind = "followUp";
+  } else if (ident.length >= 40 && extraIdent.length === 0 && initSet.size === 0) {
     kind = "init";
   }
   return {
@@ -553,12 +597,14 @@ function classifyFoPlaintext(shape, initKeys) {
 function pickFollowUpShape(shapes, initKeys) {
   const rows = (shapes || [])
     .map((s) => ({ shape: s, cls: classifyFoPlaintext(s, initKeys) }))
-    .filter((r) => r.cls);
-  const follow = rows.filter((r) => r.cls.kind === "followUp");
-  const pool = follow.length ? follow : rows;
-  if (!pool.length) return null;
-  pool.sort((a, b) => (b.shape.keyCount || 0) - (a.shape.keyCount || 0));
-  const best = pool[0];
+    .filter((r) => r.cls && r.cls.kind === "followUp");
+  if (!rows.length) return null;
+  rows.sort((a, b) => {
+    const copy = (b.cls.copiedCount || 0) - (a.cls.copiedCount || 0);
+    if (copy) return copy;
+    return (b.cls.numericKeyCount || 0) - (a.cls.numericKeyCount || 0);
+  });
+  const best = rows[0];
   return { ...best.cls, identKeys: best.shape.identKeys };
 }
 
@@ -586,6 +632,20 @@ function compressorBreakpointAt(scriptSource) {
   return null;
 }
 
+function sendHelperBreakpointAt(scriptSource) {
+  const m =
+    scriptSource.match(/setTimeout,(\w+),100/) ||
+    scriptSource.match(/setTimeout\((\w+),100/);
+  const name = m && m[1];
+  if (!name || name === "function") return null;
+  const pat = `function ${name}(`;
+  const idx = scriptSource.indexOf(pat);
+  if (idx < 0) return null;
+  const brace = scriptSource.indexOf("{", idx);
+  if (brace < 0) return null;
+  return { ...sourceLineCol(scriptSource, brace), pat, idx, name };
+}
+
 const FO_SHAPE_EXPR = `(() => {
   function kind(v) {
     if (v === null) return "null";
@@ -598,7 +658,10 @@ const FO_SHAPE_EXPR = `(() => {
   function shape(obj, via) {
     if (!obj || typeof obj !== "object" || Array.isArray(obj)) return null;
     const keys = Object.keys(obj);
-    if (keys.length < 20) return null;
+    if (keys.length < 20 || keys.length > 250) return null;
+    if (keys.indexOf("alignContent") >= 0 && keys.indexOf("webkitAlignContent") >= 0) {
+      return null;
+    }
     const ident = [];
     const numeric = [];
     const kinds = {};
@@ -624,9 +687,11 @@ const FO_SHAPE_EXPR = `(() => {
     };
   }
   try {
-    if (typeof arguments !== "undefined" && arguments.length) {
-      const s = shape(arguments[0], "f4");
-      if (s) return s;
+    if (typeof arguments !== "undefined") {
+      for (let i = 0; i < Math.min(arguments.length, 4); i++) {
+        const s = shape(arguments[i], "f4");
+        if (s) return s;
+      }
     }
   } catch (e) {}
   try {
@@ -719,12 +784,18 @@ function selfTestInject() {
     "if(XZ=Xw[XQ],XZ!==XZ)return Xw[XY];switch(Xw[XQ]=XZ+1,Xl=Xm[dH(ik.Xt)](Xw[Xo],Xm[dH(ik.aW)](Xm[dH(ik.ah)](XS[XZ],253),256)&255.37),XG=Xw[Xo]+Xl,Xw[Xo]=Xm[dH(ik.Xm)](Xm[dH(ik.aE)](Xm[dH(ik.aE)](XG,XG),56907)+7914*XG+22357,255),Xl){case 222:Xf(this);break;}";
   const happyMulSq =
     "if(A=sP[sU],sJ[AQ(ku.sg)](A,A))return sP[sW];switch(sP[sU]=sJ[AQ(ku.A)](A,1),A=sP[sv]^sJ[AQ(ku.D)](sJ[AQ(ku.sp)](sg[A],253),256)&255.1,D=sJ[AQ(ku.sn)](sP[sv],A),sP[sv]=sJ[AQ(ku.sJ)](56907*(D*D),sJ[AQ(ku.sG)](D,7914))+22357&255.37,A){case 222:Xf(this);break;}";
+  const happyLin28814 =
+    "if(X=BO[Bl],X!==X)return BO[Ba];switch(BO[Bl]=X+1,X=Bv[jP(x7.j)](BO[Bp],Bv[jP(x7.X)](239+Bb[X],255)),BO[Bp]=Bv[jP(x7.Bb)](Bv[jP(x7.e)](BO[Bp],X)*28814,40641)&255.89,X){case 165:Ib(this);break;}";
+  const catchLin28814 =
+    "if(BY=BO[Bl],BY!==BY)return BO[Ba];switch(BO[Bl]=BY+1,Bh=Bv[jP(x7.Zg)](BO[Bp],Bv[jP(x7.Bv)](Bb[BY],17)+256&255.72),BO[Bp]=Bv[jP(x7.Zr)](BO[Bp],Bh)*28814+40641&255,Bh){case 165:Ib(this);break;}";
   const a = injectOpcodeLog(happyOld);
   const b = injectOpcodeLog(happyLive);
   const c = injectOpcodeLog(catchLive);
   const d = injectOpcodeLog(happyQuad);
   const e = injectOpcodeLog(catchQuad);
   const f = injectOpcodeLog(happyMulSq);
+  const linHappy = injectOpcodeLog(happyLin28814);
+  const linCatch = injectOpcodeLog(catchLin28814);
   const charsetHtml = `i=\`${CHARSET_BRANCH_B}\`,D=BigInt`;
   const extracted = extractCompressorCharset(charsetHtml);
   const prefixOk = charsInCharset("+6O6m5UJ8$PH0eF1Vh+4QucV", CHARSET_BRANCH_B);
@@ -759,6 +830,19 @@ function selfTestInject() {
   const bp = compressorBreakpointAt(
     "void 0;function f4(a,Et,nT,n,d){return Et={a:1},a}",
   );
+  const sendBp = sendHelperBreakpointAt(
+    "Z(setTimeout,Q,100,j,V);function Q(Z,c,j){if(u6={Z:1},c)return c}",
+  );
+  const cssShape = {
+    via: "stringify",
+    keyCount: 1150,
+    identKeys: ["alignContent", "webkitAlignContent", "color"],
+    numericKeyCount: 456,
+    numericKeyMin: 0,
+    numericKeyMax: 455,
+  };
+  const cssCls = classifyFoPlaintext(cssShape, fakeInitKeys);
+  const cssPicked = pickFollowUpShape([cssShape, fakeInitShape], fakeInitKeys);
   return {
     ok:
       a.injected &&
@@ -785,6 +869,12 @@ function selfTestInject() {
       d.replacements >= 3 &&
       e.replacements >= 3 &&
       f.replacements >= 2 &&
+      linHappy.injected &&
+      linCatch.injected &&
+      linHappy.html.includes("__cfOp.push") &&
+      linCatch.html.includes("__cfOp.push") &&
+      linHappy.html.includes("pc:X") &&
+      linCatch.html.includes("pc:BY") &&
       extracted === CHARSET_BRANCH_B &&
       prefixOk &&
       stdReject &&
@@ -803,13 +893,22 @@ function selfTestInject() {
       picked &&
       picked.kind === "followUp" &&
       bp &&
-      bp.pat === "function f4(",
+      bp.pat === "function f4(" &&
+      sendBp &&
+      sendBp.name === "Q" &&
+      cssCls &&
+      cssCls.kind === "other" &&
+      cssPicked == null,
     happyOld: { replacements: a.replacements, injected: a.injected },
     happyLive: { replacements: b.replacements, injected: b.injected },
     catchLive: { replacements: c.replacements, injected: c.injected },
     happyQuad: { replacements: d.replacements, injected: d.injected },
     catchQuad: { replacements: e.replacements, injected: e.injected },
     happyMulSq: { replacements: f.replacements, injected: f.injected },
+    lin28814: {
+      happy: { replacements: linHappy.replacements, injected: linHappy.injected },
+      catch: { replacements: linCatch.replacements, injected: linCatch.injected },
+    },
     charset: { extracted, prefixOk, stdReject },
     initJson: initGot && { keyCount: initGot.keyCount },
     foPlaintext: {
@@ -818,6 +917,8 @@ function selfTestInject() {
       copiedCount: foCls && foCls.copiedCount,
       extraIdentCount: foCls && foCls.extraIdentCount,
       compressorBp: bp && bp.pat,
+      sendHelperBp: sendBp && sendBp.name,
+      cssRejected: cssCls && cssCls.kind,
     },
   };
 }
@@ -1005,19 +1106,24 @@ async function attachSession(session, targetInfo, waitingForDebugger) {
         const idxQ = scriptSource.indexOf("56907");
         const idx = scriptSource.indexOf("36163");
         const idxG = scriptSource.indexOf("19663");
-        const hasFetch = idxQ >= 0 || idx >= 0 || idxG >= 0;
+        const idxLin = scriptSource.indexOf("28814");
+        const hasFetch = idxQ >= 0 || idx >= 0 || idxG >= 0 || idxLin >= 0;
         const compressor = compressorBreakpointAt(scriptSource);
-        if (!hasFetch && !compressor) return;
+        const sendHelper = sendHelperBreakpointAt(scriptSource);
+        if (!hasFetch && !compressor && !sendHelper) return;
         const hasInject = scriptSource.includes("__cfOp.push");
         if (hasFetch) {
+          const marker =
+            idxQ >= 0 ? "56907" : idx >= 0 ? "36163" : idxG >= 0 ? "19663" : "28814";
+          const at =
+            idxQ >= 0 ? idxQ : idx >= 0 ? idx : idxG >= 0 ? idxG : idxLin;
           note("scriptFetchConst", {
             url: (s.url || "").slice(0, 140),
             len: scriptSource.length,
             hasInject,
-            idx: idxQ >= 0 ? idxQ : idx >= 0 ? idx : idxG,
-            marker: idxQ >= 0 ? "56907" : idx >= 0 ? "36163" : "19663",
+            idx: at,
+            marker,
           });
-          const at = idxQ >= 0 ? idxQ : idx >= 0 ? idx : idxG;
           const { lineNumber, columnNumber } = sourceLineCol(scriptSource, at);
           if (!hasInject) {
             await session.send("Debugger.setBreakpoint", {
@@ -1025,21 +1131,25 @@ async function attachSession(session, targetInfo, waitingForDebugger) {
             });
           }
         }
-        if (compressor && !compressorScripts.has(s.scriptId)) {
-          compressorScripts.add(s.scriptId);
+        for (const bpInfo of [compressor, sendHelper]) {
+          if (!bpInfo) continue;
+          const tag = `${s.scriptId}:${bpInfo.pat}`;
+          if (compressorScripts.has(tag)) continue;
+          compressorScripts.add(tag);
           const bp = await session.send("Debugger.setBreakpoint", {
             location: {
               scriptId: s.scriptId,
-              lineNumber: compressor.lineNumber,
-              columnNumber: compressor.columnNumber,
+              lineNumber: bpInfo.lineNumber,
+              columnNumber: bpInfo.columnNumber,
             },
           });
           if (bp?.breakpointId) compressorBreakpoints.add(bp.breakpointId);
-          note("compressorBp", {
+          note(bpInfo.name ? "sendHelperBp" : "compressorBp", {
             url: (s.url || "").slice(0, 140),
-            pat: compressor.pat,
-            lineNumber: compressor.lineNumber,
-            columnNumber: compressor.columnNumber,
+            pat: bpInfo.pat,
+            name: bpInfo.name || null,
+            lineNumber: bpInfo.lineNumber,
+            columnNumber: bpInfo.columnNumber,
             breakpointId: bp?.breakpointId || null,
           });
         }
@@ -1152,20 +1262,33 @@ await page.setViewport({ width: 1920, height: 1080 });
 const main = await page.createCDPSession();
 const connection = main.connection();
 
-await main.send("Target.setAutoAttach", {
-  autoAttach: true,
-  waitForDebuggerOnStart: true,
-  flatten: true,
-});
+try {
+  await main.send("Target.setAutoAttach", {
+    autoAttach: true,
+    waitForDebuggerOnStart: true,
+    flatten: true,
+    filter: [{ type: "page" }, { type: "iframe" }, { type: "worker" }],
+  });
+} catch {
+  await main.send("Target.setAutoAttach", {
+    autoAttach: true,
+    waitForDebuggerOnStart: true,
+    flatten: true,
+  });
+}
 
-main.on("Target.attachedToTarget", async (evt) => {
+function onAttachedToTarget(evt) {
   const child = connection.session(evt.sessionId);
   if (!child) {
     note("noChildSession", { sessionId: evt.sessionId, url: evt.targetInfo?.url });
     return;
   }
-  await attachSession(child, evt.targetInfo, evt.waitingForDebugger);
-});
+  attachSession(child, evt.targetInfo, evt.waitingForDebugger).catch((e) =>
+    note("attachChildErr", { error: String(e), url: evt.targetInfo?.url }),
+  );
+}
+main.on("Target.attachedToTarget", onAttachedToTarget);
+connection.on("Target.attachedToTarget", onAttachedToTarget);
 
 await attachSession(main, { type: "page", url: "about:blank" }, false);
 
