@@ -148,6 +148,17 @@ function injectOpcodeLog(html) {
       );
     },
   );
+  // Same NaN check via helper(pc, pc) instead of pc!==pc.
+  out = out.replace(
+    /if\((\w+)=(\w+)\[(\w+)\],(\w+\[[^\]]{0,80}\])\(\1,\1\)\)return \2\[(\w+)\];switch\(/g,
+    (_full, pc, st, slot, eq, ret) => {
+      n++;
+      return (
+        `if(${pc}=${st}[${slot}],${eq}(${pc},${pc}))return ${st}[${ret}];` +
+        `switch((globalThis.__cfT={pc:${pc}}),`
+      );
+    },
+  );
 
   out = out.replace(
     /(\w+)=(\w+)\[(\w+)\]\^([\s\S]{0,80}?\((\w+)\[\1\],(?:37|62)\)\+256&255,)/g,
@@ -216,6 +227,14 @@ function injectOpcodeLog(html) {
     (_full, mixVar, opVar) => {
       n++;
       return logAfterKeyUpdate(`56907)+7914*${mixVar}+22357,255`, opVar);
+    },
+  );
+  // Later spelling: 56907*(mix*mix) + (mix,7914) + 22357
+  out = out.replace(
+    /56907\*\((\w+)\*\1\)([\s\S]{0,120}?)\+22357&255(?:\.\d+)?,(\w+)\)/g,
+    (_full, mixVar, mid, opVar) => {
+      n++;
+      return logAfterKeyUpdate(`56907*(${mixVar}*${mixVar})${mid}+22357&255`, opVar);
     },
   );
 
@@ -308,11 +327,14 @@ function selfTestInject() {
     "if(Xt=Xw[XQ],Xt!==Xt)return Xw[XY];switch(Xw[XQ]=Xm[dH(ik.A)](Xt,1),Xt=Xw[Xo]^3+XS[Xt]&255.25,XM=Xw[Xo]+Xt,Xw[Xo]=Xm[dH(ik.XQ)](Xm[dH(ik.Xo)](XM*XM,56907),7914*XM)+22357&255,Xt){case 222:Xf(this);break;}";
   const catchQuad =
     "if(XZ=Xw[XQ],XZ!==XZ)return Xw[XY];switch(Xw[XQ]=XZ+1,Xl=Xm[dH(ik.Xt)](Xw[Xo],Xm[dH(ik.aW)](Xm[dH(ik.ah)](XS[XZ],253),256)&255.37),XG=Xw[Xo]+Xl,Xw[Xo]=Xm[dH(ik.Xm)](Xm[dH(ik.aE)](Xm[dH(ik.aE)](XG,XG),56907)+7914*XG+22357,255),Xl){case 222:Xf(this);break;}";
+  const happyMulSq =
+    "if(A=sP[sU],sJ[AQ(ku.sg)](A,A))return sP[sW];switch(sP[sU]=sJ[AQ(ku.A)](A,1),A=sP[sv]^sJ[AQ(ku.D)](sJ[AQ(ku.sp)](sg[A],253),256)&255.1,D=sJ[AQ(ku.sn)](sP[sv],A),sP[sv]=sJ[AQ(ku.sJ)](56907*(D*D),sJ[AQ(ku.sG)](D,7914))+22357&255.37,A){case 222:Xf(this);break;}";
   const a = injectOpcodeLog(happyOld);
   const b = injectOpcodeLog(happyLive);
   const c = injectOpcodeLog(catchLive);
   const d = injectOpcodeLog(happyQuad);
   const e = injectOpcodeLog(catchQuad);
+  const f = injectOpcodeLog(happyMulSq);
   return {
     ok:
       a.injected &&
@@ -320,26 +342,31 @@ function selfTestInject() {
       c.injected &&
       d.injected &&
       e.injected &&
+      f.injected &&
       a.html.includes("__cfOp.push") &&
       b.html.includes("__cfOp.push") &&
       c.html.includes("__cfOp.push") &&
       d.html.includes("__cfOp.push") &&
       e.html.includes("__cfOp.push") &&
+      f.html.includes("__cfOp.push") &&
       a.html.includes("pc:E") &&
       b.html.includes("pc:o") &&
       c.html.includes("pc:fJ") &&
       d.html.includes("pc:Xt") &&
       e.html.includes("pc:XZ") &&
+      f.html.includes("pc:A") &&
       a.replacements >= 2 &&
       b.replacements >= 2 &&
       c.replacements >= 2 &&
       d.replacements >= 3 &&
-      e.replacements >= 3,
+      e.replacements >= 3 &&
+      f.replacements >= 2,
     happyOld: { replacements: a.replacements, injected: a.injected },
     happyLive: { replacements: b.replacements, injected: b.injected },
     catchLive: { replacements: c.replacements, injected: c.injected },
     happyQuad: { replacements: d.replacements, injected: d.injected },
     catchQuad: { replacements: e.replacements, injected: e.injected },
+    happyMulSq: { replacements: f.replacements, injected: f.injected },
   };
 }
 
@@ -549,19 +576,36 @@ async function attachSession(session, targetInfo, waitingForDebugger) {
     session.on("Debugger.paused", async (evt) => {
       try {
         const frame = evt.callFrames?.[0];
-        if (frame && liveOps.length < 200) {
-          const local = frame.scopeChain?.find((sc) => sc.type === "local");
+        if (frame && liveOps.length < 400) {
           const row = { via: "breakpoint" };
-          if (local?.object?.objectId) {
-            const got = await session.send("Runtime.getProperties", {
-              objectId: local.object.objectId,
-              ownProperties: true,
+          try {
+            const got = await session.send("Debugger.evaluateOnCallFrame", {
+              callFrameId: frame.callFrameId,
+              expression:
+                "({op:typeof A==='number'?A&255:undefined,mix:typeof D==='number'?D:undefined,pc:(typeof sP==='object'&&sP&&typeof sU==='number')?sP[sU]:undefined})",
+              returnByValue: true,
             });
-            for (const p of got.result || []) {
-              if (p.value?.type === "number" && typeof p.value.value === "number") {
-                row[p.name] = p.value.value;
+            const v = got.result?.value;
+            if (v && typeof v === "object") Object.assign(row, v);
+          } catch {}
+          if (row.op == null) {
+            const local = frame.scopeChain?.find((sc) => sc.type === "local");
+            if (local?.object?.objectId) {
+              const got = await session.send("Runtime.getProperties", {
+                objectId: local.object.objectId,
+                ownProperties: true,
+              });
+              for (const p of got.result || []) {
+                if (p.value?.type === "number" && typeof p.value.value === "number") {
+                  row[p.name] = p.value.value;
+                }
               }
+              if (typeof row.A === "number") row.op = row.A & 255;
+              if (typeof row.D === "number") row.mix = row.D;
             }
+          }
+          if (typeof row.op === "number" && typeof row.mix === "number") {
+            row.key = (row.mix - row.op) & 255;
           }
           liveOps.push(row);
         }

@@ -17,6 +17,7 @@
 //! mix    = key + opcode
 //! key    = (mix*mix*56907 + 7914*mix + 22357) & 0xff
 //! ```
+//! Live HTML may spell the quadratic as `56907*(mix*mix)` or `f(mix*mix, 56907)`.
 //!
 //! Catch copies use `byte-253+256` or `219+byte` — same wrapping subtract.
 //! Mapped handlers then read immediates with **different** extra-xors.
