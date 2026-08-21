@@ -278,22 +278,32 @@ function extractFetchQuadratic(html) {
 /** Linear `((key+op)*mul+add)&255`. Same honesty rule as the quadratic extractor. */
 function extractFetchLinear(html) {
   if (!html) return null;
-  const idx = html.search(/\*\d{4,5},\d{4,5}\)&255|\+\w+,\d{4,5}\),\d{4,5}\)&255/);
+  const idx = html.search(
+    /\*\d{4,5},\d{4,5}\)&255|\d{4,5}\)\+\d{4,5}&255|\+\w+,\d{4,5}\),\d{4,5}\)&255/,
+  );
   const window = idx >= 0 ? html.slice(Math.max(0, idx - 280), idx + 360) : html;
   const mulAdd = window.match(/\*(\d{4,5}),(\d{4,5})\)&255(?:\.\d+)?,(\w+)\)\{case (\d+):/);
+  const plus = window.match(/(\d{4,5})\)\+(\d{4,5})&255(?:\.\d+)?,(\w+)\)\{case (\d+):/);
   const addMix = window.match(
     /\(\w+\+\w+,(\d{4,5})\),(\d{4,5})\)&255(?:\.\d+)?,(\w+)\)\{case (\d+):/,
   );
-  const biasAdd = window.match(/\[(\w+)\],(\d{2,3})\)\+256&255/);
+  const biasAdd = window.match(/\[(\w+)\],(\d{2,3})\)\+256/);
   const biasSub = window.match(/\[(\w+)\]-(\d{2,3}),256/);
-  if (!mulAdd && !addMix) return null;
+  if (!mulAdd && !plus && !addMix) return null;
+  const keyMul = mulAdd ? Number(mulAdd[1]) : plus ? Number(plus[1]) : Number(addMix[1]);
+  const keyAdd = mulAdd ? Number(mulAdd[2]) : plus ? Number(plus[2]) : Number(addMix[2]);
+  const firstSwitchCase = mulAdd
+    ? Number(mulAdd[4])
+    : plus
+      ? Number(plus[4])
+      : Number(addMix[4]);
   return {
     kind: "linear",
-    keyMul: mulAdd ? Number(mulAdd[1]) : Number(addMix[1]),
-    keyAdd: mulAdd ? Number(mulAdd[2]) : Number(addMix[2]),
+    keyMul,
+    keyAdd,
     byteBias: biasAdd ? Number(biasAdd[2]) : biasSub ? Number(biasSub[2]) : null,
-    firstSwitchCase: mulAdd ? Number(mulAdd[4]) : Number(addMix[4]),
-    spelling: mulAdd ? "*mul,add)&255" : "(mix,mul),add)&255",
+    firstSwitchCase,
+    spelling: mulAdd ? "*mul,add)&255" : plus ? "mul)+add&255" : "(mix,mul),add)&255",
     note: "HTML formula only; init_key needs opcode tuples. Not FETCH_LIVE.",
   };
 }
@@ -445,10 +455,10 @@ function injectOpcodeLog(html) {
     },
   );
   out = out.replace(
-    /\*(\d{4,5})\+(\d{4,5})&255(?:\.\d+)?,(\w+)\)/g,
+    /(\d{4,5})\)\+(\d{4,5})&255(?:\.\d+)?,(\w+)\)/g,
     (_full, mul, add, opVar) => {
       n++;
-      return logAfterKeyUpdate(`*${mul}+${add}&255`, opVar);
+      return logAfterKeyUpdate(`${mul})+${add}&255`, opVar);
     },
   );
   out = out.replace(
@@ -1018,6 +1028,8 @@ function selfTestInject() {
     "if(D=Qg[QO],D!==D)return Qg[QV];switch(Qg[QO]=Qs[m1(pj.QZ)](D,1),D=Qs[m1(pj.QN)](Qg[QZ],Qs[m1(pj.i)](Qy[D],113)+256&255),Qg[QZ]=Qs[m1(pj.QZ)](Qs[m1(pj.QZ)](Qg[QZ],D)*31579,59205)&255,D){case 104:Yb[m1(pj.Qy)](this);break;}";
   const catchLin31579 =
     "if(QK=Qg[QO],QK!==QK)return Qg[QV];switch(Qg[QO]=Qs[m1(pj.QZ)](QK,1),Qv=Qs[m1(pj.Qx)](Qg[QZ],Qs[m1(pj.jW)](Qs[m1(pj.m)](Qy[QK]-113,256),255)),Qg[QZ]=Qs[m1(pj.jd)](Qs[m1(pj.QU)](Qg[QZ]+Qv,31579),59205)&255.46,Qv){case 104:Yb[m1(pj.Qo)](this);break;}";
+  const happyLin31579Plus =
+    "if(D=Qg[QO],D!==D)return Qg[QV];switch(Qg[QO]=Qs[m0(pO.m)](D,1),D=Qg[QZ]^Qs[m0(pO.a)](Qs[m0(pO.QO)](Qy[D],113)+256,255),Qg[QZ]=Qs[m0(pO.D)](Qs[m0(pO.I)](Qg[QZ],D),31579)+59205&255.37,D){case 104:Yb[m0(pO.QZ)](this);break;}";
   const a = injectOpcodeLog(happyOld);
   const b = injectOpcodeLog(happyLive);
   const c = injectOpcodeLog(catchLive);
@@ -1031,6 +1043,8 @@ function selfTestInject() {
   const lin31579H = injectOpcodeLog(happyLin31579);
   const lin31579C = injectOpcodeLog(catchLin31579);
   const lin31579F = extractFetchLinear(happyLin31579);
+  const lin31579Plus = injectOpcodeLog(happyLin31579Plus);
+  const lin31579PlusF = extractFetchLinear(happyLin31579Plus);
   const eveFormula = extractFetchQuadratic(happyEve8904);
   let liveEveOk = true;
   let liveEve = null;
@@ -1183,6 +1197,11 @@ function selfTestInject() {
       lin31579F.keyAdd === 59205 &&
       lin31579F.byteBias === 113 &&
       lin31579F.firstSwitchCase === 104 &&
+      lin31579Plus.html.includes("__cfOp.push") &&
+      lin31579PlusF &&
+      lin31579PlusF.keyMul === 31579 &&
+      lin31579PlusF.keyAdd === 59205 &&
+      lin31579PlusF.spelling === "mul)+add&255" &&
       liveEveOk &&
       liveLinOk &&
       extracted === CHARSET_BRANCH_B &&

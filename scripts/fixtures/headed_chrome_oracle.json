@@ -197,6 +197,16 @@
       "keyCount": 99,
       "identCount": 60,
       "note": "Last f4 snapshot (SolveGate invisible, 2026-08-21). 46 of 47 init keys (MaOkK2 dropped), numeric 1..39, 14 extra ident names. Early f4 was init+xBCsP4 with no numeric slots — picker prefers numeric. Kinds only; JSON.stringify would omit function/undefined extras. Do not fill values or POST."
+    },
+    "eveningLinear": {
+      "source": "headed Chrome iframe HTML, same SolveGate day after 56907 and 8904",
+      "kind": "linear",
+      "keyMul": 31579,
+      "keyAdd": 59205,
+      "byteBias": 113,
+      "firstSwitchCase": 104,
+      "initKey": null,
+      "note": "HTML formula ((key+op)*31579+59205)&255, wrapping_sub(byte,113). Opcode-tuple harvest did not recover key/byte (breakpoint key always 0). Not FETCH_LIVE. Do not execute handlers."
     }
   }
 }
