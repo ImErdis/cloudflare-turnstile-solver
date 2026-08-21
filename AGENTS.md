@@ -87,6 +87,10 @@ Snapshots:
   packed prefix `TX5omy48NT82Lp1u`, first opcode `dN` (8), string tag **179**.
 - Later `b`: `bias=253`, quadratic `(56907, 7914, 22357)`, entry `(0, 44, [])`,
   packed prefix `71GxwDchICYfNxik`, first opcode `Xf` (222), string tag **199**.
+- Evening `b` (same SolveGate day): HTML `mix²*8904 + 14792*mix + 11229`,
+  byte `-232`, first `switch` case **113**. `init_key` is not filled until a
+  headed opcode-tuple harvest. **Not** `FETCH_LIVE` (that stays the `56907`
+  table). The oracle inject matches both `I*I*8904` and `8904*(mix*mix)`.
 - Captured branch `g`: `bias=62`, `mul=19663`, `add=36376`, entry `(0, 100, [])`,
   prefix `ryrCJzUnLCItNTiVeJ`, first opcode `sF` (21).
 

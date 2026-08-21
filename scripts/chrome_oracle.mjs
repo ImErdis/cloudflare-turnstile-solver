@@ -231,6 +231,8 @@ const PREAMBLE = `(() => {
 
 function fetchSnippet(html) {
   for (const marker of [
+    "8904",
+    "14792",
     "56907",
     "36163)+38392",
     "19663)+36376",
@@ -246,12 +248,38 @@ function fetchSnippet(html) {
   return null;
 }
 
+/** HTML fetch schedule. `init_key` is not here — that needs opcode tuples. */
+function extractFetchQuadratic(html) {
+  if (!html) return null;
+  const idx = html.search(/(\w+)\*\1\*\d{4,5}|\d{4,5}\*\((\w+)\*\2\)/);
+  const window = idx >= 0 ? html.slice(Math.max(0, idx - 240), idx + 420) : html;
+  const sq = window.match(
+    /(\w+)\*\1\*(\d{4,5}),[\s\S]{0,96}?\(\1,(\d{4,5})\)\)\+(\d{4,5}),255/,
+  );
+  const alt = window.match(
+    /(\d{4,5})\*\((\w+)\*\2\)\+[\s\S]{0,96}?\(\2,(\d{4,5})\),(\d{4,5})\)&255/,
+  );
+  const biasM = window.match(/\]-(\d{2,3}),256\)&255/);
+  const caseM = window.match(/\{case (\d+):/);
+  if (!sq && !alt) return null;
+  return {
+    keyMul: sq ? Number(sq[2]) : Number(alt[1]),
+    keyQuadB: sq ? Number(sq[3]) : Number(alt[3]),
+    keyAdd: sq ? Number(sq[4]) : Number(alt[4]),
+    byteBias: biasM ? Number(biasM[1]) : null,
+    firstSwitchCase: caseM ? Number(caseM[1]) : null,
+    spelling: sq ? "mix*mix*mul" : "mul*(mix*mix)",
+    note: "HTML formula only; init_key needs opcode tuples. Not FETCH_LIVE.",
+  };
+}
+
 /**
  * Instrument both fetch loops. The arithmetic is stable; wrapping rotates:
  *   switch(state[pc]=pc+1, ...)
  *   switch(state[pc]=add(pc,1), ...)
  *   key = ((key+op)*mul+add)&255   as either `*mul+add,255` or `mul)+add&255.xx`
  *   key = (mix*mix*56907 + 7914*mix + 22357)&255  (later same-day b)
+ *   key = (mix*mix*8904 + 14792*mix + 11229)&255  (evening b; byte-232)
  * PC is snapshotted from `if(pc=state[slot],pc!==pc)return ...;switch(`.
  */
 function injectOpcodeLog(html) {
@@ -371,6 +399,47 @@ function injectOpcodeLog(html) {
     n++;
     return logAfterKeyUpdate(`*28814+40641&255`, opVar);
   });
+
+  // Evening b: opcode = key ^ wrapping_sub(byte, 232)
+  // Happy: D=aP[af]^helper(ae[D]-232,256)&255
+  out = out.replace(
+    /(\w+)=(\w+)\[(\w+)\]\^([\s\S]{0,96}?\((\w+)\[\1\]-(\d{2,3}),256\)&255)/g,
+    (_full, op, st, keySlot, rest, arr) => {
+      n++;
+      return `${op}=(globalThis.__cfT&&(globalThis.__cfT.key=${st}[${keySlot}]&255,globalThis.__cfT.byte=${arr}[${op}]&255),${st}[${keySlot}])^${rest}`;
+    },
+  );
+  // Catch: aJ=xor(aP[af], helper(ae[ag]-232,256)&255)
+  out = out.replace(
+    /(\w+)=(\w+\[[^\]]{0,80}\])\((\w+)\[(\w+)\],(\w+\[[^\]]{0,80}\])\((\w+)\[(\w+)\]-(\d{2,3}),256\)&255/g,
+    (_full, op, xorCallee, st, keySlot, subCallee, arr, pc, bias) => {
+      n++;
+      return `${op}=(globalThis.__cfT&&(globalThis.__cfT.key=${st}[${keySlot}]&255,globalThis.__cfT.byte=${arr}[${pc}]&255),${xorCallee}(${st}[${keySlot}],${subCallee}(${arr}[${pc}]-${bias},256)&255))`;
+    },
+  );
+
+  // Evening quadratic happy: helper(mix*mix*8904, helper(mix,14792))+11229,255), op
+  out = out.replace(
+    /(\w+)\*\1\*(\d{4,5}),([\s\S]{0,96}?)\(\1,(\d{4,5})\)\)\+(\d{4,5}),255\),(\w+)\)/g,
+    (_full, mixVar, mul, mid, quadB, add, opVar) => {
+      n++;
+      return logAfterKeyUpdate(
+        `${mixVar}*${mixVar}*${mul},${mid}(${mixVar},${quadB}))+${add},255`,
+        opVar,
+      );
+    },
+  );
+  // Evening quadratic catch: 8904*(mix*mix)+helper(mix,14792),11229)&255, op
+  out = out.replace(
+    /(\d{4,5})\*\((\w+)\*\2\)\+([\s\S]{0,96}?)\(\2,(\d{4,5})\),(\d{4,5})\)&255(?:\.\d+)?,(\w+)\)/g,
+    (_full, mul, mixVar, mid, quadB, add, opVar) => {
+      n++;
+      return logAfterKeyUpdate(
+        `${mul}*(${mixVar}*${mixVar})+${mid}(${mixVar},${quadB}),${add})&255`,
+        opVar,
+      );
+    },
+  );
 
   const nonceScript = /<script([^>]*nonce="[^"]+"[^>]*)>/i;
   if (nonceScript.test(out)) {
@@ -873,6 +942,10 @@ function selfTestInject() {
     "if(X=BO[Bl],X!==X)return BO[Ba];switch(BO[Bl]=X+1,X=Bv[jP(x7.j)](BO[Bp],Bv[jP(x7.X)](239+Bb[X],255)),BO[Bp]=Bv[jP(x7.Bb)](Bv[jP(x7.e)](BO[Bp],X)*28814,40641)&255.89,X){case 165:Ib(this);break;}";
   const catchLin28814 =
     "if(BY=BO[Bl],BY!==BY)return BO[Ba];switch(BO[Bl]=BY+1,Bh=Bv[jP(x7.Zg)](BO[Bp],Bv[jP(x7.Bv)](Bb[BY],17)+256&255.72),BO[Bp]=Bv[jP(x7.Zr)](BO[Bp],Bh)*28814+40641&255,Bh){case 165:Ib(this);break;}";
+  const happyEve8904 =
+    "if(D=aP[aQ],D!==D)return aP[aW];switch(aP[aQ]=D+1,D=aP[af]^au[EO(oV.E)](ae[D]-232,256)&255,I=aP[af]+D,aP[af]=au[EO(oV.D)](au[EO(oV.E)](I*I*8904,au[EO(oV.I)](I,14792))+11229,255),D){case 113:q7[EO(oV.af)](this);break;}";
+  const catchEve8904 =
+    "if(ag=aP[aQ],ag!==ag)return aP[aW];switch(aP[aQ]=au[EO(oV.E)](ag,1),aJ=au[EO(oV.i)](aP[af],au[EO(oV.E)](ae[ag]-232,256)&255),aO=au[EO(oV.XY)](aP[af],aJ),aP[af]=au[EO(oV.XC)](8904*(aO*aO)+au[EO(oV.I)](aO,14792),11229)&255,aJ){case 113:q7[EO(oV.XK)](this);break;}";
   const a = injectOpcodeLog(happyOld);
   const b = injectOpcodeLog(happyLive);
   const c = injectOpcodeLog(catchLive);
@@ -881,6 +954,26 @@ function selfTestInject() {
   const f = injectOpcodeLog(happyMulSq);
   const linHappy = injectOpcodeLog(happyLin28814);
   const linCatch = injectOpcodeLog(catchLin28814);
+  const eveHappy = injectOpcodeLog(happyEve8904);
+  const eveCatch = injectOpcodeLog(catchEve8904);
+  const eveFormula = extractFetchQuadratic(happyEve8904);
+  let liveEveOk = true;
+  let liveEve = null;
+  const liveEvePath = "artifacts/re-out/chrome-oracle-livecheck/iframe-1.html";
+  if (fs.existsSync(liveEvePath)) {
+    const liveHtml = fs.readFileSync(liveEvePath, "utf8");
+    const liveInj = injectOpcodeLog(liveHtml);
+    liveEve = {
+      replacements: liveInj.replacements,
+      pushed: liveInj.html.includes("__cfOp.push"),
+      formula: extractFetchQuadratic(liveHtml),
+    };
+    liveEveOk =
+      liveEve.pushed &&
+      liveEve.formula &&
+      liveEve.formula.keyMul === 8904 &&
+      liveEve.formula.byteBias === 232;
+  }
   const charsetHtml = `i=\`${CHARSET_BRANCH_B}\`,D=BigInt`;
   const extracted = extractCompressorCharset(charsetHtml);
   const prefixOk = charsInCharset("+6O6m5UJ8$PH0eF1Vh+4QucV", CHARSET_BRANCH_B);
@@ -977,6 +1070,19 @@ function selfTestInject() {
       linCatch.html.includes("__cfOp.push") &&
       linHappy.html.includes("pc:X") &&
       linCatch.html.includes("pc:BY") &&
+      eveHappy.injected &&
+      eveCatch.injected &&
+      eveHappy.html.includes("__cfOp.push") &&
+      eveCatch.html.includes("__cfOp.push") &&
+      eveHappy.html.includes("pc:D") &&
+      eveCatch.html.includes("pc:ag") &&
+      eveFormula &&
+      eveFormula.keyMul === 8904 &&
+      eveFormula.keyQuadB === 14792 &&
+      eveFormula.keyAdd === 11229 &&
+      eveFormula.byteBias === 232 &&
+      eveFormula.firstSwitchCase === 113 &&
+      liveEveOk &&
       extracted === CHARSET_BRANCH_B &&
       prefixOk &&
       stdReject &&
@@ -1016,6 +1122,12 @@ function selfTestInject() {
       happy: { replacements: linHappy.replacements, injected: linHappy.injected },
       catch: { replacements: linCatch.replacements, injected: linCatch.injected },
     },
+    eve8904: {
+      happy: { replacements: eveHappy.replacements, injected: eveHappy.injected },
+      catch: { replacements: eveCatch.replacements, injected: eveCatch.injected },
+      formula: eveFormula,
+    },
+    liveEve8904: liveEve,
     charset: { extracted, prefixOk, stdReject },
     initJson: initGot && { keyCount: initGot.keyCount },
     foPlaintext: {
@@ -1101,7 +1213,7 @@ async function onFetchPaused(session, evt) {
       );
       fs.writeFileSync(
         path.join(outDir, `iframe-rewritten-${iframeRewrites}.html`),
-        html.slice(0, 200000),
+        html.slice(0, 400000),
       );
       if (snippet && iframeRewrites <= 2) {
         fs.writeFileSync(
@@ -1117,6 +1229,9 @@ async function onFetchPaused(session, evt) {
         has19663: text.includes("19663"),
         has36163: text.includes("36163"),
         has56907: text.includes("56907"),
+        has8904: text.includes("8904"),
+        has232: text.includes("-232"),
+        fetchSchedule: extractFetchQuadratic(text),
         has36376: text.includes("36376"),
         has38392: text.includes("38392"),
         hasRunProgram: text.includes("runProgram"),
@@ -1554,6 +1669,7 @@ try {
 const bodyShape = foBodyShape(foNet, xhr, iframeHtml);
 const followUpShape = foFollowUpShape(foNet, xhr);
 const initJson = extractInitJsonKeys(iframeHtml);
+const fetchSchedule = extractFetchQuadratic(iframeHtml);
 const followUpJson = pickFollowUpShape(foShapes, initJson?.keys || []);
 const foPlaintextRows = foShapes.map((s) =>
   classifyFoPlaintext(s, initJson?.keys || []),
@@ -1585,6 +1701,7 @@ const summary = {
         note: "key names only; do not dump values or POST",
       }
     : null,
+  fetchSchedule,
   foFollowUpJson: followUpJson
     ? {
         kind: followUpJson.kind,
@@ -1682,6 +1799,7 @@ console.log(
       foInitJson: initJson
         ? { keyCount: initJson.keyCount, hasJsonStringify: initJson.hasJsonStringify }
         : null,
+      fetchSchedule,
       foFollowUpJson: followUpJson
         ? {
             kind: followUpJson.kind,
