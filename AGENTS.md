@@ -50,11 +50,18 @@ first `};`.
 
 There is still an `/orchestrate/chl_api/v1` URL, but the body is bootstrap JS that writes
 randomized `_cf_chl_opt` fields — not the VM this crate disassembles (no `"lang":"` payload).
-The iframe bootstrap loads an encoded `/fo/{session}/{ray}/{ch}` blob into a Worker (`eval`
-under a trustedTypes policy). `probe_iframe` should get iframe HTTP 200 + parsed options, then an honest failure:
-orchestrate is not the VM, `/fo/` is the live worker payload. `/cmg/1` 404s (images moved to
-`/ci/{ray}/...`) and is skipped so the client reaches that orchestrate/`/fo/` break. Do not treat
-decoding `/fo/` into a working solver as in-scope for a protocol-probe change.
+
+The iframe bootstrap then **XHR POSTs** `/fo/{session}/{ray}/{ch}` with headers `cf-chl` /
+`cf-chl-ra` and a compressed init body (`wZ(...)`). A GET or empty POST is expected to 400
+with JSON `{"d":"..."}`. A successful POST body is standard base64; `decrypt_cloudflare_response(ray, body)`
+yields a packed `runProgram` blob (prefix `ryrCJzUnLCItNTiVeJ...`), not JS. The Worker blob
+`eval`s that under a trustedTypes policy (`GAPH2`).
+
+`probe_iframe` / `solve_test` should get iframe HTTP 200 + parsed options, then an honest
+failure: orchestrate is not the VM, live `/fo/` without the init body 400s, and a captured
+successful `/fo/` decrypts to packed `runProgram`. `/cmg/1` 404s (images moved to
+`/ci/{ray}/...`) and is skipped so the client reaches that break. Do **not** reconstruct the
+init payload or implement `runProgram` as a working solver.
 
 Default demo: `https://solvegate.io/demo/invisible` (sitekey `0x4AAAAAAER49t0sMxTcief0`).
 

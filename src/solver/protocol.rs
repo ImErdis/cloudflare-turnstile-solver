@@ -1,5 +1,5 @@
 use crate::solver::VersionInfo;
-use anyhow::{anyhow, bail, Context};
+use anyhow::{Context, anyhow, bail};
 use rand::Rng;
 use regex::Regex;
 
@@ -153,6 +153,21 @@ mod tests {
         assert!(!url.contains("/if/ov2/"));
         assert!(!url.contains("/rcv/"));
         assert!(!url.ends_with("/auto/"));
+    }
+
+    #[test]
+    fn fo_blob_url_includes_session_ray_ch() {
+        let url = fo_blob_url(
+            "challenges.cloudflare.com",
+            "g",
+            "1:2:token",
+            "aabbccddeeff0011",
+            "chToken",
+        );
+        assert_eq!(
+            url,
+            "https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/g/fo/1:2:token/aabbccddeeff0011/chToken"
+        );
     }
 
     #[test]

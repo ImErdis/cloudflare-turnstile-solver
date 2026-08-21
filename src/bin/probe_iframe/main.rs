@@ -18,7 +18,11 @@ use cf::solver::protocol::{
     looks_like_javascript, looks_like_orchestrate_vm, orchestrate_url,
     parse_turnstile_api_js_response, turnstile_iframe_url,
 };
+use cf::{FoBlobAnalysis, analyze_fo_body};
 use rquest::Client;
+use rquest_util::Emulation::Chrome136;
+use rquest_util::EmulationOS::Windows;
+use rquest_util::EmulationOption;
 use serde_json::{Value, json};
 use std::env;
 use std::time::Duration;
@@ -48,12 +52,17 @@ async fn run() -> Result<Value> {
         .unwrap_or_else(|| DEMO_SITE_KEY.to_string());
     let href = env::args().nth(2).unwrap_or_else(|| DEMO_HREF.to_string());
 
+    let emulation = EmulationOption::builder()
+        .emulation(Chrome136)
+        .emulation_os(Windows)
+        .build();
     let client = Client::builder()
+        .emulation(emulation)
         .timeout(Duration::from_secs(20))
         .cookie_store(true)
         .redirect(rquest::redirect::Policy::limited(10))
         .build()
-        .context("build http client")?;
+        .context("build chrome-emulated http client")?;
 
     let api = client
         .get(PUBLIC_API_JS)
@@ -135,32 +144,47 @@ async fn run() -> Result<Value> {
             !opt.ch.is_empty() && !opt.c_ray.is_empty(),
         ) {
             let url = fo_blob_url(&opt.zone, &branch, session, &opt.c_ray, &opt.ch);
-            let fo_res = client
-                .get(&url)
-                .header("Accept", "*/*")
-                .header("Referer", &iframe_url)
-                .send()
-                .await;
-            match fo_res {
-                Ok(res) => {
-                    let status = res.status().as_u16();
-                    let bytes = res.bytes().await.unwrap_or_default();
-                    let prefix =
-                        String::from_utf8_lossy(bytes.as_ref().get(..24).unwrap_or(&bytes))
-                            .into_owned();
-                    let as_text = String::from_utf8_lossy(&bytes);
-                    fo = json!({
-                        "url": url,
-                        "status": status,
-                        "bytes": bytes.len(),
-                        "looks_like_js": looks_like_javascript(&as_text),
-                        "utf8_prefix": prefix,
-                    });
-                }
-                Err(e) => {
-                    fo = json!({ "url": url, "error": e.to_string() });
-                }
-            }
+            let origin = format!("https://{}", opt.zone);
+            let get = sample_fo(
+                &client,
+                "GET",
+                &url,
+                &iframe_url,
+                &origin,
+                &opt.c_ray,
+                None,
+                false,
+            )
+            .await;
+            let get_chl = sample_fo(
+                &client,
+                "GET",
+                &url,
+                &iframe_url,
+                &origin,
+                &opt.c_ray,
+                Some(opt.ch.as_str()),
+                false,
+            )
+            .await;
+            let post_empty = sample_fo(
+                &client,
+                "POST",
+                &url,
+                &iframe_url,
+                &origin,
+                &opt.c_ray,
+                Some(opt.ch.as_str()),
+                true,
+            )
+            .await;
+            fo = json!({
+                "url": url,
+                "note": "iframe XHR POSTs a compressed init body (wZ) with cf-chl; this probe does not reconstruct that payload",
+                "get": get,
+                "get_with_cf_chl": get_chl,
+                "post_empty_with_cf_chl": post_empty,
+            });
         } else if let Some(session) = &fo_session {
             fo = json!({
                 "session": session,
@@ -191,8 +215,18 @@ async fn run() -> Result<Value> {
     });
 
     let iframe_ok = iframe_status == 200 && parsed.is_some();
+    let fo_packed = fo_sample_packed(&fo, "get")
+        || fo_sample_packed(&fo, "get_with_cf_chl")
+        || fo_sample_packed(&fo, "post_empty_with_cf_chl");
+    let fo_json_error = fo_sample_json_error(&fo, "get")
+        || fo_sample_json_error(&fo, "get_with_cf_chl")
+        || fo_sample_json_error(&fo, "post_empty_with_cf_chl");
     let next_failure = if !iframe_ok {
         "iframe"
+    } else if fo_packed {
+        "runProgram_interpreter"
+    } else if fo_json_error {
+        "packed_run_program"
     } else {
         "orchestrate_replaced_by_fo_blob"
     };
@@ -220,4 +254,75 @@ async fn run() -> Result<Value> {
         "orchestrate": orchestrate,
         "fo": fo,
     }))
+}
+
+async fn sample_fo(
+    client: &Client,
+    method: &str,
+    url: &str,
+    iframe_url: &str,
+    origin: &str,
+    c_ray: &str,
+    ch: Option<&str>,
+    send_empty_body: bool,
+) -> Value {
+    let mut req = match method {
+        "POST" => client.post(url),
+        _ => client.get(url),
+    };
+    req = req
+        .header("Accept", "*/*")
+        .header("Sec-Fetch-Site", "same-origin")
+        .header("Sec-Fetch-Mode", "cors")
+        .header("Sec-Fetch-Dest", "empty")
+        .header("Referer", iframe_url)
+        .header("Priority", "u=2");
+    if method == "POST" {
+        req = req
+            .header("Content-Type", "text/plain;charset=UTF-8")
+            .header("Origin", origin);
+    }
+    if let Some(ch) = ch {
+        req = req.header("cf-chl", ch).header("cf-chl-ra", "0");
+    }
+    if send_empty_body {
+        req = req.header("Content-Length", "0").body("");
+    }
+
+    match req.send().await {
+        Ok(res) => {
+            let status = res.status().as_u16();
+            let body = res.text().await.unwrap_or_default();
+            let analysis = analyze_fo_body(c_ray, &body);
+            fo_sample_json(method, status, &body, &analysis)
+        }
+        Err(e) => json!({ "method": method, "error": e.to_string() }),
+    }
+}
+
+fn fo_sample_json(method: &str, status: u16, body: &str, analysis: &FoBlobAnalysis) -> Value {
+    json!({
+        "method": method,
+        "status": status,
+        "bytes": body.len(),
+        "utf8_prefix": body.chars().take(24).collect::<String>(),
+        "analysis": analysis,
+        "summary": analysis.summary(),
+    })
+}
+
+fn fo_sample_flag(fo: &Value, key: &str, field: &str) -> bool {
+    fo.get(key)
+        .and_then(|s| s.get("analysis"))
+        .and_then(|a| a.get(field))
+        .and_then(|v| v.as_bool())
+        == Some(true)
+}
+
+fn fo_sample_packed(fo: &Value, key: &str) -> bool {
+    fo_sample_flag(fo, key, "looks_like_packed_run_program")
+}
+
+fn fo_sample_json_error(fo: &Value, key: &str) -> bool {
+    fo_sample_flag(fo, key, "looks_like_json_error")
 }

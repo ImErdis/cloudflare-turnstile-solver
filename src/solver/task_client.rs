@@ -1,9 +1,10 @@
 use crate::reverse::encryption::decrypt_cloudflare_response;
 use crate::solver::VersionInfo;
 use crate::solver::challenge::CloudflareChallengeOptions;
+use crate::solver::fo_blob::{FoBlobAnalysis, analyze_fo_body};
 use crate::solver::performance::{PerformanceEntry, PerformanceResourceEntry};
 use crate::solver::protocol::{
-    PUBLIC_API_JS, generate_widget_id, looks_like_orchestrate_vm, orchestrate_url,
+    PUBLIC_API_JS, fo_blob_url, generate_widget_id, looks_like_orchestrate_vm, orchestrate_url,
     parse_turnstile_api_js_response, turnstile_iframe_url,
 };
 use crate::solver::timezone::get_timezone;
@@ -261,6 +262,103 @@ impl TaskClient {
             }),
             text,
         ))
+    }
+
+    /// GET/empty-POST `/fo/{session}/{ray}/{ch}` the way the iframe's XHR does
+    /// (`cf-chl`, `cf-chl-ra`), without reconstructing the compressed init body.
+    pub(crate) async fn probe_fo_blob(
+        &mut self,
+        zone: &str,
+        session: &str,
+        c_ray: &str,
+        ch: &str,
+    ) -> Vec<(String, u16, FoBlobAnalysis)> {
+        let url = fo_blob_url(zone, self.branch.as_str(), session, c_ray, ch);
+        let referer = self.solve_url.clone().unwrap_or_default();
+        let origin = format!("https://{zone}");
+        let mut out = Vec::new();
+        for (label, method, with_cf_chl, body) in [
+            ("GET", "GET", false, None),
+            ("GET+cf-chl", "GET", true, None),
+            ("POST+cf-chl+empty", "POST", true, Some("")),
+        ] {
+            match self
+                .fo_request(
+                    &url,
+                    &referer,
+                    &origin,
+                    method,
+                    with_cf_chl,
+                    ch,
+                    c_ray,
+                    body,
+                )
+                .await
+            {
+                Ok((status, analysis)) => out.push((label.to_string(), status, analysis)),
+                Err(e) => out.push((format!("{label} error: {e}"), 0, analyze_fo_body(c_ray, ""))),
+            }
+        }
+        out
+    }
+
+    async fn fo_request(
+        &mut self,
+        url: &str,
+        referer: &str,
+        origin: &str,
+        method: &str,
+        with_cf_chl: bool,
+        ch: &str,
+        c_ray: &str,
+        body: Option<&str>,
+    ) -> Result<(u16, FoBlobAnalysis), anyhow::Error> {
+        if method == "POST" {
+            self.set_post_headers_order();
+        } else {
+            self.set_get_headers_order();
+        }
+
+        let mut req = match method {
+            "POST" => self.client.post(url),
+            _ => self.client.get(url),
+        };
+        req = req
+            .header("Accept", "*/*")
+            .header("Sec-Fetch-Site", "same-origin")
+            .header("Sec-Fetch-Mode", "cors")
+            .header("Sec-Fetch-Dest", "empty")
+            .header("Referer", referer)
+            .header("Priority", "u=2");
+
+        if method == "POST" {
+            req = req
+                .header("Content-Type", "text/plain;charset=UTF-8")
+                .header("Origin", origin);
+        }
+        if with_cf_chl {
+            req = req.header("cf-chl", ch).header("cf-chl-ra", "0");
+        }
+        if let Some(b) = body {
+            req = req
+                .header("Content-Length", b.len().to_string())
+                .body(b.to_string());
+        }
+
+        let response = req.send().await?;
+        let status = response.status().as_u16();
+        let content_encoding = response
+            .headers()
+            .get("Content-Encoding")
+            .cloned()
+            .unwrap_or_else(|| HeaderValue::from_str("").unwrap())
+            .to_str()?
+            .to_string();
+        let bytes = response.bytes().await?;
+        let decompressed =
+            decompress_body(bytes.as_ref(), &content_encoding).unwrap_or_else(|_| bytes.to_vec());
+        let text = String::from_utf8_lossy(&decompressed).into_owned();
+        Ok((status, analyze_fo_body(c_ray, &text)))
     }
 
     pub async fn get_image(

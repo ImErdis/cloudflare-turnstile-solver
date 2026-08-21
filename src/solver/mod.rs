@@ -5,6 +5,7 @@ use std::fs;
 
 pub mod challenge;
 pub mod entries;
+pub mod fo_blob;
 pub mod keys;
 mod performance;
 pub mod protocol;

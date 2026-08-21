@@ -62,7 +62,7 @@ impl CloudflareChallengeOptions {
             )
         } else {
             format!(
-                "orchestrate/chl_api is not the VM this crate disassembles; iframe loads encoded /fo/{}/ (ray {}, branch {}, type {})",
+                "orchestrate/chl_api is not the VM; iframe XHR POSTs /fo/{}/{{ray}}/{{ch}} with cf-chl and a compressed init body, then runProgram()s the ray-decrypted response (ray {}, branch {}, type {})",
                 self.fo_session, self.c_ray, self.branch, self.c_type
             )
         }
