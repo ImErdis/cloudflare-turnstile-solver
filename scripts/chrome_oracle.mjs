@@ -1482,10 +1482,11 @@ async function attachSession(session, targetInfo, waitingForDebugger) {
             fetchSchedule: schedule,
           });
           const { lineNumber, columnNumber } = sourceLineCol(scriptSource, at);
-          // Break even when Fetch rewrite injected — OOPIF often runs the original.
-          await session.send("Debugger.setBreakpoint", {
-            location: { scriptId: s.scriptId, lineNumber, columnNumber },
-          });
+          if (!hasInject) {
+            await session.send("Debugger.setBreakpoint", {
+              location: { scriptId: s.scriptId, lineNumber, columnNumber },
+            });
+          }
         }
         for (const bpInfo of [compressor, sendHelper]) {
           if (!bpInfo) continue;
@@ -1544,7 +1545,7 @@ async function attachSession(session, targetInfo, waitingForDebugger) {
           }
           return;
         }
-        if (frame && liveOps.length < 400) {
+        if (frame && liveOps.length < 80) {
           const row = { via: "breakpoint" };
           try {
             const got = await session.send("Debugger.evaluateOnCallFrame", {
