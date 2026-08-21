@@ -129,7 +129,7 @@ pub fn analyze_packed_run_program(packed: &str) -> RunProgramAnalysis {
     } else if !magic_ok {
         "bytecode_magic_mismatch"
     } else {
-        // Fetch + operand layout + f4 wrapper are mapped; live /fo/ still needs init JSON.
+        // Fetch + operands + f4 wrapper + init-JSON shape are mapped; next is the follow-up /fo/ POST.
         crate::solver::run_program_vm::NEXT_GAP
     };
 

@@ -135,12 +135,21 @@ body = custom_b64(derived || pad_byte || XTEA(LZ(json), key))
 `N` is once per iframe, so both POSTs share the encoded RSA prefix. Charset
 **order** rotates; the **set** is `A–Za–z0–9` plus `+$ -` (no `/` or `=`).
 The crate's orchestrate `encrypt_payload` still zeros `N[0]` *before* RSA —
-leave that. Live `/fo/` still 400s without a valid init JSON. Do **not**
-reconstruct that JSON or POST a live body.
+leave that.
+
+First-POST plaintext is a **47-key JSON object** (`src/solver/fo_init_json.rs`).
+Key names follow the iframe JS build (same-day `b` captures kept one set even
+after fetch went quadratic; branch `g` uses different names). Several keys are
+shared with `_cf_chl_opt` (parse those by value). The iframe assigns the literal
+to a temp, then `setTimeout(send, 100, url, obj)`. One numeric field is
+overwritten with `Date.now() - start` immediately before `send(f4(obj))`. The
+orchestrate `PayloadKeyExtractor` looks for an object **literal** as the 4th
+`setTimeout` argument and misses this. Do **not** fill values or POST that JSON.
+Next gap is the ~90k follow-up `/fo/` body after `runProgram`.
 
 `probe_iframe` / `solve_test` should get iframe HTTP 200 + parsed options, then an honest
-failure: orchestrate is not the VM, live `/fo/` without the init body 400s. `/cmg/1` 404s
-(images moved to `/ci/{ray}/...`) and is skipped. Do **not** reconstruct the init JSON,
+failure: orchestrate is not the VM, live `/fo/` without a valid init body 400s. `/cmg/1` 404s
+(images moved to `/ci/{ray}/...`) and is skipped. Do **not** fill or POST the init JSON,
 run the opcode handlers as a solver, or hook `TurnstileTask::solve`.
 
 Static unpack + naive fetch: `cargo run --locked --bin analyze_run_program -- --decode 16 --ray <c_ray> <fo-body>`

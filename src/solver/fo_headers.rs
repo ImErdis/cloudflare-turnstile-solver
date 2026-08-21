@@ -10,8 +10,9 @@
 //! URL. First body ~4k (init) → ~846k packed `runProgram`; second body ~85–90k
 //! (follow-up) → ~2.4k. Both share `cf-chl` / `cf-chl-ra: 0` and the same
 //! compressed-body prefix. `priority` is `u=1, i`. Custom header names/values
-//! match this crate. The compressor wrapper is mapped in `fo_body`; the remaining
-//! live gap is the **plaintext JSON** (randomized keys), not a missing header.
+//! match this crate. The compressor wrapper is mapped in `fo_body`; init-JSON
+//! **shape** (47 keys, `setTimeout` 100) is mapped in `fo_init_json`. Remaining
+//! live gap is the follow-up `/fo/` body after `runProgram`, not a missing header.
 
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -128,7 +129,7 @@ pub fn compare_chrome_and_crate_fo_post() -> FoHeaderCompare {
     FoHeaderCompare {
         all_match,
         fields,
-        note: "crate matches Chrome XHR header names and priority u=1, i; Chrome POSTs twice to the same /fo/ URL (init ~4k then follow-up ~90k, same body prefix); wrapper is f4, remaining gap is init JSON",
+        note: "crate matches Chrome XHR header names and priority u=1, i; Chrome POSTs twice to the same /fo/ URL (init ~4k then follow-up ~90k, same body prefix); wrapper is f4, init JSON shape is 47 keys; remaining gap is the follow-up body",
     }
 }
 

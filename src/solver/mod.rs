@@ -8,6 +8,7 @@ pub mod entries;
 pub mod fo_blob;
 pub mod fo_body;
 pub mod fo_headers;
+pub mod fo_init_json;
 pub mod keys;
 mod performance;
 pub mod protocol;

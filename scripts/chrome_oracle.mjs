@@ -7,7 +7,7 @@
  * `mix*mix*56907+7914*mix+22357` later same-day / `* 19663 + 36376`
  * historical) inside the OOPIF iframe. Logs `{pc, op, key, byte}` so instruction
  * widths are PC deltas — not a 1-byte walk. Does **not** reconstruct a live
- * `/fo/` body (f4 / historical wZ), dump full POST bodies, execute handlers as a
+ * `/fo/` body (f4 / historical wZ), dump full POST bodies, fill init JSON, execute handlers as a
  * solver, or harvest a token.
  *
  * Usage:
@@ -400,9 +400,70 @@ function foBodyShape(foNet, xhr, iframeHtml) {
       charset && rows.length
         ? rows.every((r) => r.prefixInCharset)
         : null,
-    note: "N is once per iframe so paired POSTs share a 24-char RSA prefix. Do not dump full bodies or reconstruct plaintext JSON.",
+    note: "N is once per iframe so paired POSTs share a 24-char RSA prefix. Do not dump full bodies or fill init JSON.",
     rows,
   };
+}
+
+function braceEnd(js, start) {
+  if (js[start] !== "{") return -1;
+  let depth = 0;
+  let inStr = null;
+  for (let i = start; i < js.length; i++) {
+    const c = js[i];
+    if (inStr) {
+      if (c === "\\") {
+        i++;
+        continue;
+      }
+      if (c === inStr) inStr = null;
+    } else if (c === '"' || c === "'" || c === "`") {
+      inStr = c;
+    } else if (c === "{") depth++;
+    else if (c === "}") {
+      depth--;
+      if (depth === 0) return i + 1;
+    }
+  }
+  return -1;
+}
+
+function quotedObjectKeys(obj) {
+  const keys = [];
+  const re = /"([A-Za-z][A-Za-z0-9]{1,11})":/g;
+  let m;
+  while ((m = re.exec(obj))) keys.push(m[1]);
+  return keys;
+}
+
+function extractInitJsonKeys(html) {
+  if (!html) return null;
+  let search = 0;
+  while (true) {
+    const at = html.indexOf(":JSON[", search);
+    if (at < 0) return null;
+    const windowStart = Math.max(0, at - 8000);
+    const prefix = html.slice(windowStart, at);
+    const objRel = prefix.lastIndexOf("={");
+    if (objRel >= 0) {
+      const objStart = windowStart + objRel + 1;
+      const objEnd = braceEnd(html, objStart);
+      if (objEnd > objStart) {
+        const obj = html.slice(objStart, objEnd);
+        const keys = quotedObjectKeys(obj);
+        const after = html.slice(objEnd, objEnd + 800);
+        if (keys.length >= 40 && after.includes("setTimeout")) {
+          return {
+            keyCount: keys.length,
+            keys,
+            hasJsonStringify: obj.includes(":JSON["),
+            setTimeoutNearby: true,
+          };
+        }
+      }
+    }
+    search = at + 6;
+  }
 }
 
 function foPostPairs(foNet) {
@@ -455,6 +516,15 @@ function selfTestInject() {
   const extracted = extractCompressorCharset(charsetHtml);
   const prefixOk = charsInCharset("+6O6m5UJ8$PH0eF1Vh+4QucV", CHARSET_BRANCH_B);
   const stdReject = !charsInCharset("====hello/", CHARSET_BRANCH_B);
+  const fakeKeys = [];
+  for (let i = 0; i < 47; i++) fakeKeys.push(`K${i}a`);
+  const fakeObj = fakeKeys
+    .map((k, i) =>
+      i === 17 ? `"${k}":JSON[n](x)` : `"${k}":0`,
+    )
+    .join(",");
+  const initHtml = `Xm={${fakeObj}};setTimeout(fz,100,d,Xm)`;
+  const initGot = extractInitJsonKeys(initHtml);
   return {
     ok:
       a.injected &&
@@ -485,7 +555,9 @@ function selfTestInject() {
       prefixOk &&
       stdReject &&
       classifyBodyLen(3735) === "init" &&
-      classifyBodyLen(86882) === "followUp",
+      classifyBodyLen(86882) === "followUp" &&
+      initGot &&
+      initGot.keyCount === 47,
     happyOld: { replacements: a.replacements, injected: a.injected },
     happyLive: { replacements: b.replacements, injected: b.injected },
     catchLive: { replacements: c.replacements, injected: c.injected },
@@ -493,6 +565,7 @@ function selfTestInject() {
     catchQuad: { replacements: e.replacements, injected: e.injected },
     happyMulSq: { replacements: f.replacements, injected: f.injected },
     charset: { extracted, prefixOk, stdReject },
+    initJson: initGot && { keyCount: initGot.keyCount },
   };
 }
 
@@ -934,6 +1007,7 @@ try {
   iframeHtml = "";
 }
 const bodyShape = foBodyShape(foNet, xhr, iframeHtml);
+const initJson = extractInitJsonKeys(iframeHtml);
 const summary = {
   url,
   headed,
@@ -951,6 +1025,15 @@ const summary = {
   })),
   foPostPairs: foPostPairs(foNet),
   foBodyShape: bodyShape,
+  foInitJson: initJson
+    ? {
+        keyCount: initJson.keyCount,
+        setTimeoutNearby: initJson.setTimeoutNearby,
+        hasJsonStringify: initJson.hasJsonStringify,
+        keys: initJson.keys,
+        note: "key names only; do not dump values or POST",
+      }
+    : null,
   xhrHook: xhr,
   opcodeFetches: ops.slice(0, 128),
   pcDeltas: deltas.slice(0, 96),
@@ -1009,6 +1092,9 @@ console.log(
         charsetMatchesBranchB: bodyShape.charsetMatchesBranchB,
         rows: bodyShape.rows,
       },
+      foInitJson: initJson
+        ? { keyCount: initJson.keyCount, hasJsonStringify: initJson.hasJsonStringify }
+        : null,
       headerCompare: summary.headerCompare,
       firstFo: foNet[0]
         ? {

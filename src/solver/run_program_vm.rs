@@ -24,7 +24,7 @@
 
 use serde::Serialize;
 
-/// Honest remaining work after fetch, operands, and the `f4` wrapper: init JSON.
+/// Honest remaining work after fetch, operands, `f4`, and init-JSON shape.
 pub const NEXT_GAP: &str = crate::solver::run_program_ops::NEXT_GAP;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

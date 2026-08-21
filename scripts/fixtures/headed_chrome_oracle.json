@@ -105,7 +105,23 @@
       "initLens": [3724, 4172, 4183, 3735],
       "followUpLens": [86882, 86636, 88108],
       "pairSharesPrefix": true,
-      "note": "N is once per iframe so paired POSTs share the RSA prefix. Wrapper mapped; do not reconstruct plaintext JSON."
+      "note": "N is once per iframe so paired POSTs share the RSA prefix. Wrapper mapped; init JSON shape is in foInitJson — do not fill or POST it."
+    },
+    "foInitJson": {
+      "keyCount": 47,
+      "setTimeoutDelayMs": 100,
+      "crateOrchestrateSlots": 40,
+      "jsonStringifyField": true,
+      "sendOverwritesTiming": true,
+      "keys": [
+        "ThPv3", "zlGF5", "OpPY6", "IlxW5", "XxyI8", "HmVl5", "Hvdx8", "SpRN6", "uHTPv5", "xOSD5",
+        "Eugge3", "MaOkK2", "sYTa8", "ANNwt4", "XNzg0", "Qkvw6", "wSEe6", "XNAR2", "jPUKG9", "BfDsa5",
+        "NLBQh4", "gZuvw0", "DmMyh8", "UqfC6", "SsIhw3", "UvCHC0", "QNwGo0", "bxwC4", "mPCxG3", "rrYRv3",
+        "ZVrB5", "oEyAb1", "SdHeo9", "uzri0", "WIuS3", "RjLr7", "FWhj7", "wwGxq8", "samm5", "SiHjy8",
+        "XsrRO3", "Qppo3", "jzZH4", "axZzC3", "ElYCL0", "gzpfB4", "yZZpI0"
+      ],
+      "sharedWithChlOpt": ["DmMyh8", "Eugge3", "SdHeo9", "UqfC6", "bxwC4", "uzri0", "xOSD5", "zlGF5"],
+      "note": "Keys follow the iframe JS build (stable on same-day b). Do not fill values or POST."
     }
   }
 }

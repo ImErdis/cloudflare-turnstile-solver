@@ -25,6 +25,9 @@ use cf::solver::run_program_vm::{
 use cf::solver::fo_body::{
     CHARSET_BRANCH_B, body_chars_in_charset, charset_is_well_formed, classify_fo_body_len,
 };
+use cf::solver::fo_init_json::{
+    INIT_JSON_KEY_COUNT, INIT_JSON_KEYS_B, LIVE_FO_INIT_JSON, keys_match_snapshot,
+};
 use cf::{
     analyze_fo_body, analyze_packed_run_program, compare_chrome_and_crate_fo_post, LIVE_FO_WRAPPER,
 };
@@ -294,6 +297,30 @@ fn verify_oracle_file(path: &PathBuf) -> Result<Value> {
             }
         }
     }
+    let fo_init = v
+        .pointer("/laterSameDay/foInitJson")
+        .or_else(|| v.get("foInitJson"))
+        .cloned();
+    let mut fo_init_keys_ok = false;
+    if let Some(init) = &fo_init {
+        if init.get("keyCount").and_then(|x| x.as_u64()) != Some(INIT_JSON_KEY_COUNT as u64) {
+            errors.push("foInitJson.keyCount should be 47".into());
+        }
+        if init.get("setTimeoutDelayMs").and_then(|x| x.as_u64()) != Some(100) {
+            errors.push("foInitJson.setTimeoutDelayMs should be 100".into());
+        }
+        if let Some(prefs) = init.get("keys").and_then(|x| x.as_array()) {
+            let keys: Vec<String> = prefs
+                .iter()
+                .filter_map(|x| x.as_str().map(str::to_string))
+                .collect();
+            if keys_match_snapshot(&keys, INIT_JSON_KEYS_B) {
+                fo_init_keys_ok = true;
+            } else {
+                errors.push("foInitJson.keys do not match branch-b snapshot".into());
+            }
+        }
+    }
     Ok(json!({
         "ok": errors.is_empty(),
         "path": path.display().to_string(),
@@ -305,7 +332,9 @@ fn verify_oracle_file(path: &PathBuf) -> Result<Value> {
         "errors": errors,
         "header_compare": compare_chrome_and_crate_fo_post(),
         "fo_wrapper": LIVE_FO_WRAPPER,
+        "fo_init_json": LIVE_FO_INIT_JSON,
         "fo_prefix_ok": fo_prefix_ok,
+        "fo_init_keys_ok": fo_init_keys_ok,
         "first": fetches.first(),
     }))
 }

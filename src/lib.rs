@@ -13,6 +13,9 @@ pub use solver::fo_body::{
     classify_fo_body_len, extract_compressor_charset, looks_like_custom_b64, xtea_key_index,
 };
 pub use solver::fo_headers::{CHROME_FO_POST, CRATE_FO_POST, compare_chrome_and_crate_fo_post};
+pub use solver::fo_init_json::{
+    INIT_JSON_KEY_COUNT, INIT_JSON_KEYS_B, LIVE_FO_INIT_JSON, extract_init_json_keys,
+};
 pub use solver::protocol::{
     DEMO_HREF, DEMO_SITE_KEY, PUBLIC_API_JS, extract_fo_session, parse_turnstile_api_js_url,
     turnstile_iframe_url,

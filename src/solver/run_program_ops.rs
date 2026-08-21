@@ -20,8 +20,8 @@ use crate::solver::run_program_vm::{
 };
 use serde::Serialize;
 
-/// Remaining live gap after fetch, operands, and the `f4` wrapper: init JSON keys.
-pub const NEXT_GAP: &str = crate::solver::fo_body::NEXT_AFTER_WRAPPER;
+/// Remaining live gap after fetch, operands, `f4` wrapper, and init-JSON shape.
+pub const NEXT_GAP: &str = crate::solver::fo_init_json::NEXT_AFTER_SHAPE;
 
 /// JS `x ^ 62.48` is `x ^ ToInt32(62.48)` = `x ^ 62`.
 pub fn js_xor_imm(float_const: f64) -> u8 {
