@@ -15,7 +15,8 @@
 //! This module does **not** execute handlers or produce a token.
 
 use crate::solver::run_program_vm::{
-    FETCH_BRANCH_B, FetchParams, OPCODE_TABLE_B, decode_opcode, opcode_def_in, step_fetch,
+    FETCH_BRANCH_B, FETCH_BRANCH_B_LATE, FetchParams, OPCODE_TABLE_B, decode_opcode, opcode_def_in,
+    step_fetch,
 };
 use serde::Serialize;
 
@@ -65,6 +66,20 @@ pub const DN_TAG_NULL: u8 = 42;
 pub const DN_TAG_FALSE: u8 = 66;
 pub const DN_TAG_FLOAT: u8 = 191;
 pub const DN_TAG_BYTES: u8 = 206;
+
+/// Later same-day tagged load (`case 222: Xf`). Same family as `dN`; extras rotated.
+pub const XF_OPCODE: u8 = 222;
+pub const XF_TAG_XOR: u8 = 86;
+pub const XF_DST_XOR: u8 = 112;
+pub const XF_INT_XOR: u8 = 19;
+pub const XF_TAG_INT: u8 = 162;
+pub const XF_TAG_UNDEF: u8 = 86;
+pub const XF_TAG_STRING: u8 = 199;
+pub const XF_TAG_LEB: u8 = 36;
+pub const XF_TAG_FLOAT: u8 = 58;
+pub const XF_TAG_NULL: u8 = 80;
+pub const XF_TAG_FALSE: u8 = 202;
+pub const XF_TAG_BYTES: u8 = 161;
 
 /// Fixed-width handlers recovered from the headed-Chrome iframe (branch `b`).
 /// Operand extras are `ToInt32` of the floats in the handler source.
@@ -153,6 +168,13 @@ pub const HANDLER_LAYOUT_B: &[HandlerLayout] = &[
         extra_xors: &[],
         note: "s2 family: unary typeof/- /+ /! /~ selected by switch immediate",
     },
+    HandlerLayout {
+        opcode: 222,
+        handler: "Xf",
+        width: InstrWidth::Variable,
+        extra_xors: &[XF_TAG_XOR, XF_DST_XOR],
+        note: "later-day tagged load (dN renamed): 162 int (+xor 19), 86 undef, 199 string, 36 LEB, 58 float, 80 null, 202 false, 161 bytes",
+    },
 ];
 
 pub fn layout_for(opcode: u8) -> Option<&'static HandlerLayout> {
@@ -173,6 +195,22 @@ pub fn first_dn_tag(params: FetchParams, bytecode: &[u8]) -> Option<u8> {
 
 pub fn first_dn_tag_b(bytecode: &[u8]) -> Option<u8> {
     first_dn_tag(FETCH_BRANCH_B, bytecode)
+}
+
+/// First `Xf` tag on the later same-day `b` rotation (opcode 222 at pc 0).
+pub fn first_xf_tag(params: FetchParams, bytecode: &[u8]) -> Option<u8> {
+    if bytecode.len() < 2 {
+        return None;
+    }
+    let (op, next_key) = step_fetch(params, params.init_key, bytecode[0]);
+    if op != XF_OPCODE {
+        return None;
+    }
+    Some(operand_from_byte(params, next_key, bytecode[1], XF_TAG_XOR))
+}
+
+pub fn first_xf_tag_late(bytecode: &[u8]) -> Option<u8> {
+    first_xf_tag(FETCH_BRANCH_B_LATE, bytecode)
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -202,8 +240,8 @@ pub fn classify_pc_delta(opcode: u8, width: i32) -> WidthObservation {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::solver::run_program::RUN_PROGRAM_MAGIC_BYTES_B;
-    use crate::solver::run_program_vm::{FETCH_BRANCH_B, next_key};
+    use crate::solver::run_program::{RUN_PROGRAM_MAGIC_BYTES_B, RUN_PROGRAM_MAGIC_BYTES_B_LATE};
+    use crate::solver::run_program_vm::{FETCH_BRANCH_B, FETCH_BRANCH_B_LATE, OPCODE_TABLE_B_LATE, next_key};
 
     #[test]
     fn js_float_xor_truncates_like_to_int32() {
@@ -233,6 +271,24 @@ mod tests {
     }
 
     #[test]
+    fn post_fetch_key_then_xf_tag_is_string() {
+        let params = FETCH_BRANCH_B_LATE;
+        let byte0 = RUN_PROGRAM_MAGIC_BYTES_B_LATE[0];
+        let (op, nk) = step_fetch(params, params.init_key, byte0);
+        assert_eq!(op, XF_OPCODE);
+        assert_eq!(nk, next_key(params, params.init_key, op));
+        assert_eq!(nk, 197);
+        assert_eq!(
+            operand_from_byte(params, nk, RUN_PROGRAM_MAGIC_BYTES_B_LATE[1], XF_TAG_XOR),
+            XF_TAG_STRING
+        );
+        assert_eq!(
+            first_xf_tag_late(&RUN_PROGRAM_MAGIC_BYTES_B_LATE),
+            Some(XF_TAG_STRING)
+        );
+    }
+
+    #[test]
     fn wrapping_sub_operand_matches_plus_219() {
         let params = FETCH_BRANCH_B;
         for (key, byte, extra) in [(112u8, 0x7e, 154u8), (112, 0x68, 48), (0, 0, 0)] {
@@ -246,7 +302,7 @@ mod tests {
     #[test]
     fn layouts_point_at_real_switch_ids() {
         for h in HANDLER_LAYOUT_B {
-            if matches!(h.handler, "x" | "g") {
+            if matches!(h.handler, "x" | "g" | "Xf") {
                 continue;
             }
             assert_eq!(
@@ -257,9 +313,14 @@ mod tests {
                 h.handler
             );
         }
+        assert_eq!(
+            opcode_def_in(OPCODE_TABLE_B_LATE, XF_OPCODE).map(|d| d.handler),
+            Some("Xf")
+        );
         assert_eq!(layout_for(14).unwrap().width, InstrWidth::Fixed(2));
         assert_eq!(layout_for(9).unwrap().width, InstrWidth::Fixed(4));
         assert_eq!(layout_for(8).unwrap().width, InstrWidth::Variable);
+        assert_eq!(layout_for(222).unwrap().width, InstrWidth::Variable);
     }
 
     #[test]

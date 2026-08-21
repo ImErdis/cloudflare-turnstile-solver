@@ -13,13 +13,14 @@
 
 use anyhow::{Context, Result, bail};
 use cf::reverse::encryption::decrypt_cloudflare_response;
-use cf::solver::run_program::{RUN_PROGRAM_MAGIC_BYTES_B, unpack_packed_run_program};
+use cf::solver::run_program::unpack_packed_run_program;
 use cf::solver::run_program_ops::{
-    DN_OPCODE, DN_TAG_STRING, classify_pc_delta, first_dn_tag_b, operand_from_byte,
+    DN_OPCODE, DN_TAG_STRING, XF_TAG_STRING, classify_pc_delta, first_dn_tag_b, first_xf_tag_late,
+    operand_from_byte,
 };
 use cf::solver::run_program_vm::{
-    FETCH_BRANCH_B, FETCH_BRANCH_G, FETCH_LIVE, OPCODE_TABLE_B, OPCODE_TABLE_G,
-    naive_one_byte_fetches, opcode_def_in, verify_oracle_tuple,
+    FETCH_BRANCH_B, FETCH_LIVE, naive_one_byte_fetches, opcode_def_in, params_for_magic,
+    params_from_oracle_fetch, verify_oracle_tuple,
 };
 use cf::{analyze_fo_body, analyze_packed_run_program, compare_chrome_and_crate_fo_post};
 use serde_json::{Value, json};
@@ -98,11 +99,7 @@ fn run() -> Result<Value> {
         });
         if decode_n > 0 && analysis.decode_ok {
             let bytecode = unpack_packed_run_program(&packed)?;
-            let (params, table) = if bytecode.starts_with(&RUN_PROGRAM_MAGIC_BYTES_B) {
-                (FETCH_BRANCH_B, OPCODE_TABLE_B)
-            } else {
-                (FETCH_BRANCH_G, OPCODE_TABLE_G)
-            };
+            let (params, table) = params_for_magic(&bytecode).unwrap_or((FETCH_LIVE, cf::solver::run_program_vm::OPCODE_TABLE));
             let stream = naive_one_byte_fetches(&bytecode, params, table, decode_n);
             let fetches: Vec<Value> = stream
                 .fetches
@@ -141,6 +138,13 @@ fn verify_oracle_file(path: &PathBuf) -> Result<Value> {
     let raw = fs::read_to_string(path).with_context(|| path.display().to_string())?;
     let v: Value = serde_json::from_str(&raw)?;
     let mut errors = Vec::new();
+    let fetch = v.get("fetch").cloned().unwrap_or(v.clone());
+    let params = params_from_oracle_fetch(
+        fetch.get("init_key").and_then(|x| x.as_u64()).unwrap_or(0) as u8,
+        fetch.get("byte_bias").and_then(|x| x.as_u64()).unwrap_or(0) as u8,
+        fetch.get("key_mul").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
+    )
+    .unwrap_or(FETCH_BRANCH_B);
     let fetches = v
         .get("opcodeFetches")
         .or_else(|| v.get("fetches"))
@@ -160,12 +164,48 @@ fn verify_oracle_file(path: &PathBuf) -> Result<Value> {
             .or_else(|| f.get("opcode"))
             .and_then(|x| x.as_u64())
             .unwrap_or(0) as u8;
-        if let Err(e) = verify_oracle_tuple(FETCH_LIVE, pc, key, byte, op) {
+        if let Err(e) = verify_oracle_tuple(params, pc, key, byte, op) {
             errors.push(format!("fetch {i}: {e}"));
         }
         if byte != 0 || key != 0 {
             // Operand path: post-fetch key is `next_key`, not the fetch key.
-            let _ = operand_from_byte(FETCH_LIVE, key, byte, 0);
+            let _ = operand_from_byte(params, key, byte, 0);
+        }
+    }
+    if let Some(late) = v.get("laterSameDay") {
+        let late_fetch = late.get("fetch").cloned().unwrap_or(late.clone());
+        if let Some(lp) = params_from_oracle_fetch(
+            late_fetch.get("init_key").and_then(|x| x.as_u64()).unwrap_or(0) as u8,
+            late_fetch
+                .get("byte_bias")
+                .and_then(|x| x.as_u64())
+                .unwrap_or(0) as u8,
+            late_fetch.get("key_mul").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
+        ) {
+            let lf = late
+                .get("fetches")
+                .and_then(|x| x.as_array())
+                .cloned()
+                .unwrap_or_default();
+            for (i, f) in lf.iter().enumerate() {
+                let pc = f.get("pc").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
+                let key = f.get("key").and_then(|x| x.as_u64()).unwrap_or(0) as u8;
+                let byte = f.get("byte").and_then(|x| x.as_u64()).unwrap_or(0) as u8;
+                let op = f
+                    .get("op")
+                    .or_else(|| f.get("opcode"))
+                    .and_then(|x| x.as_u64())
+                    .unwrap_or(0) as u8;
+                if let Err(e) = verify_oracle_tuple(lp, pc, key, byte, op) {
+                    errors.push(format!("laterSameDay fetch {i}: {e}"));
+                }
+            }
+            if late.get("firstXfTag").and_then(|x| x.as_u64()) != Some(u64::from(XF_TAG_STRING)) {
+                errors.push("laterSameDay firstXfTag should be 199 (string)".into());
+            }
+            let _ = first_xf_tag_late(&[0xef, 0x51]);
+        } else {
+            errors.push("laterSameDay fetch constants did not match FETCH_BRANCH_B_LATE".into());
         }
     }
     let deltas = v
@@ -189,12 +229,12 @@ fn verify_oracle_file(path: &PathBuf) -> Result<Value> {
         .or_else(|| v.get("first_dn_tag"))
         .and_then(|x| x.as_u64())
         .map(|n| n as u8);
-    if let Some(tag) = first_tag {
-        if tag != DN_TAG_STRING {
-            errors.push(format!(
-                "first dN tag {tag}, expected string tag {DN_TAG_STRING} for TX5omy48 magic"
-            ));
-        }
+    if let Some(tag) = first_tag
+        && tag != DN_TAG_STRING
+    {
+        errors.push(format!(
+            "first dN tag {tag}, expected string tag {DN_TAG_STRING} for TX5omy48 magic"
+        ));
     }
     let first_op = fetches
         .first()
@@ -207,6 +247,7 @@ fn verify_oracle_file(path: &PathBuf) -> Result<Value> {
     Ok(json!({
         "ok": errors.is_empty(),
         "path": path.display().to_string(),
+        "params_label": params.label,
         "fetch_count": fetches.len(),
         "pc_delta_count": deltas.len(),
         "widths": width_rows,

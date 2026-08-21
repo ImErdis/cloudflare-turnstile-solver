@@ -3,7 +3,8 @@
  * Headed Chrome oracle for live Turnstile `/fo/` + `runProgram`.
  *
  * Captures real request headers (CDP Network extraInfo) and injects a log at
- * the interpreter's opcode fetch (`* 36163 + 38392` live / `* 19663 + 36376`
+ * the interpreter's opcode fetch (`* 36163 + 38392` live linear /
+ * `mix*mix*56907+7914*mix+22357` later same-day / `* 19663 + 36376`
  * historical) inside the OOPIF iframe. Logs `{pc, op, key, byte}` so instruction
  * widths are PC deltas — not a 1-byte walk. Does **not** reconstruct wZ, dump
  * full POST bodies, execute handlers as a solver, or harvest a token.
@@ -34,11 +35,11 @@ if (!selfTest) {
 }
 
 const PREAMBLE = `(() => {
-  if (window.__cfOracleHook) return;
-  window.__cfOracleHook = true;
-  window.__cfOp = window.__cfOp || [];
-  window.__cfXhr = window.__cfXhr || [];
-  window.__cfRP = window.__cfRP || [];
+  if (globalThis.__cfOracleHook) return;
+  globalThis.__cfOracleHook = true;
+  globalThis.__cfOp = globalThis.__cfOp || [];
+  globalThis.__cfXhr = globalThis.__cfXhr || [];
+  globalThis.__cfRP = globalThis.__cfRP || [];
   try {
     const proto = XMLHttpRequest.prototype;
     const open = proto.open;
@@ -64,7 +65,7 @@ const PREAMBLE = `(() => {
           bodyLen: b.length,
           bodyPrefix: b.slice(0, 24),
         };
-        window.__cfXhr.push(row);
+        globalThis.__cfXhr.push(row);
         this.addEventListener("loadend", function () {
           row.status = this.status;
           row.respLen = (this.responseText || "").length;
@@ -74,11 +75,11 @@ const PREAMBLE = `(() => {
       return send.apply(this, arguments);
     };
   } catch (e) {
-    window.__cfHookErr = String(e);
+    globalThis.__cfHookErr = String(e);
   }
   try {
     let rp;
-    Object.defineProperty(window, "runProgram", {
+    Object.defineProperty(globalThis, "runProgram", {
       configurable: true,
       enumerable: true,
       set(v) {
@@ -86,7 +87,7 @@ const PREAMBLE = `(() => {
           typeof v === "function"
             ? function (packed, helper) {
                 try {
-                  window.__cfRP.push({
+                  globalThis.__cfRP.push({
                     packedType: typeof packed,
                     packedLen: packed && packed.length,
                     packedPrefix: String(packed || "").slice(0, 20),
@@ -101,12 +102,18 @@ const PREAMBLE = `(() => {
       },
     });
   } catch (e) {
-    window.__cfHookErr = (window.__cfHookErr || "") + String(e);
+    globalThis.__cfHookErr = (globalThis.__cfHookErr || "") + String(e);
   }
 })();`;
 
 function fetchSnippet(html) {
-  for (const marker of ["36163)+38392", "19663)+36376", "36163", "19663"]) {
+  for (const marker of [
+    "56907",
+    "36163)+38392",
+    "19663)+36376",
+    "36163",
+    "19663",
+  ]) {
     const idx = html.indexOf(marker);
     if (idx >= 0) {
       return html.slice(Math.max(0, idx - 280), idx + 220);
@@ -116,9 +123,12 @@ function fetchSnippet(html) {
 }
 
 /**
- * Instrument both fetch loops (happy path `,37)+256&255` and try/catch
- * `219+byte&255`) so Chrome records `{pc, op, key, byte}` at each opcode.
- * PC deltas are instruction widths except when a handler jumps.
+ * Instrument both fetch loops. The arithmetic is stable; wrapping rotates:
+ *   switch(state[pc]=pc+1, ...)
+ *   switch(state[pc]=add(pc,1), ...)
+ *   key = ((key+op)*mul+add)&255   as either `*mul+add,255` or `mul)+add&255.xx`
+ *   key = (mix*mix*56907 + 7914*mix + 22357)&255  (later same-day b)
+ * PC is snapshotted from `if(pc=state[slot],pc!==pc)return ...;switch(`.
  */
 function injectOpcodeLog(html) {
   if (!html) {
@@ -129,10 +139,13 @@ function injectOpcodeLog(html) {
   let out = html;
 
   out = out.replace(
-    /switch\((\w+)\[(\w+)\]=(\w+)\+1,/g,
-    (_full, st, slot, pc) => {
+    /if\((\w+)=(\w+)\[(\w+)\],\1!==\1\)return \2\[(\w+)\];switch\(/g,
+    (_full, pc, st, slot, ret) => {
       n++;
-      return `switch((window.__cfT={pc:${pc}}),${st}[${slot}]=${pc}+1,`;
+      return (
+        `if(${pc}=${st}[${slot}],${pc}!==${pc})return ${st}[${ret}];` +
+        `switch((globalThis.__cfT={pc:${pc}}),`
+      );
     },
   );
 
@@ -140,7 +153,7 @@ function injectOpcodeLog(html) {
     /(\w+)=(\w+)\[(\w+)\]\^([\s\S]{0,80}?\((\w+)\[\1\],(?:37|62)\)\+256&255,)/g,
     (_full, op, st, keySlot, rest, arr) => {
       n++;
-      return `${op}=(window.__cfT&&(window.__cfT.key=${st}[${keySlot}]&255,window.__cfT.byte=${arr}[${op}]&255),${st}[${keySlot}])^${rest}`;
+      return `${op}=(globalThis.__cfT&&(globalThis.__cfT.key=${st}[${keySlot}]&255,globalThis.__cfT.byte=${arr}[${op}]&255),${st}[${keySlot}])^${rest}`;
     },
   );
 
@@ -148,30 +161,63 @@ function injectOpcodeLog(html) {
     /(\w+)=(\w+\[[^\]]{0,48}\])\((\w+)\[(\w+)\],219\+(\w+)\[(\w+)\]&255\)/g,
     (_full, op, callee, st, keySlot, arr, pc) => {
       n++;
-      return `${op}=(window.__cfT&&(window.__cfT.key=${st}[${keySlot}]&255,window.__cfT.byte=${arr}[${pc}]&255),${callee}(${st}[${keySlot}],219+${arr}[${pc}]&255))`;
+      return `${op}=(globalThis.__cfT&&(globalThis.__cfT.key=${st}[${keySlot}]&255,globalThis.__cfT.byte=${arr}[${pc}]&255),${callee}(${st}[${keySlot}],219+${arr}[${pc}]&255))`;
     },
   );
 
-  for (const [mul, add] of [
-    ["36163", "38392"],
-    ["19663", "36376"],
-  ]) {
-    const re = new RegExp(`${mul}\\)\\+${add}&255(?:\\.\\d+)?,(\\w+)\\)`, "g");
-    out = out.replace(re, (_full, opVar) => {
+  out = out.replace(
+    /(\w+)=(\w+)\[(\w+)\]\^3\+(\w+)\[\1\]&255(?:\.\d+)?,/g,
+    (_full, op, st, keySlot, arr) => {
       n++;
-      return (
-        `${mul})+${add}&255,` +
-        `(window.__cfT&&(window.__cfT.op=${opVar}&255),` +
-        `window.__cfOp=window.__cfOp||[],` +
-        `window.__cfOp.length<2500&&window.__cfOp.push({` +
-        `pc:window.__cfT&&window.__cfT.pc,` +
-        `op:${opVar}&255,` +
-        `key:window.__cfT&&window.__cfT.key,` +
-        `byte:window.__cfT&&window.__cfT.byte` +
-        `})),${opVar})`
-      );
-    });
-  }
+      return `${op}=(globalThis.__cfT&&(globalThis.__cfT.key=${st}[${keySlot}]&255,globalThis.__cfT.byte=${arr}[${op}]&255),${st}[${keySlot}])^3+${arr}[${op}]&255,`;
+    },
+  );
+
+  // Catch copy: xor(key, add(sub(byte,253),256)&255)
+  out = out.replace(
+    /(\w+)=(\w+\[[^\]]{0,64}\])\((\w+)\[(\w+)\],(\w+\[[^\]]{0,64}\])\((\w+\[[^\]]{0,64}\])\((\w+)\[(\w+)\],253\),256\)&255(?:\.\d+)?\)/g,
+    (_full, op, xorCallee, st, keySlot, addCallee, subCallee, arr, pc) => {
+      n++;
+      return `${op}=(globalThis.__cfT&&(globalThis.__cfT.key=${st}[${keySlot}]&255,globalThis.__cfT.byte=${arr}[${pc}]&255),${xorCallee}(${st}[${keySlot}],${addCallee}(${subCallee}(${arr}[${pc}],253),256)&255))`;
+    },
+  );
+
+  out = out.replace(/\*36163\+38392,255\),(\w+)\)/g, (_full, opVar) => {
+    n++;
+    return logAfterKeyUpdate(`*36163+38392,255)`, opVar);
+  });
+  out = out.replace(/36163\)\+38392&255(?:\.\d+)?,(\w+)\)/g, (_full, opVar) => {
+    n++;
+    return logAfterKeyUpdate(`36163)+38392&255`, opVar);
+  });
+  out = out.replace(/36163\+38392&255(?:\.\d+)?,(\w+)\)\{case/g, (_full, opVar) => {
+    n++;
+    return `${logAfterKeyUpdate("36163+38392&255", opVar)}{case`;
+  });
+  out = out.replace(/\*19663\+36376,255\),(\w+)\)/g, (_full, opVar) => {
+    n++;
+    return logAfterKeyUpdate(`*19663+36376,255)`, opVar);
+  });
+  out = out.replace(/19663\)\+36376&255(?:\.\d+)?,(\w+)\)/g, (_full, opVar) => {
+    n++;
+    return logAfterKeyUpdate(`19663)+36376&255`, opVar);
+  });
+  // Quadratic try: (Xm(Xm(mix*mix,56907),7914*mix)+22357&255, op)
+  out = out.replace(
+    /56907\),7914\*(\w+)\)\+22357&255,(\w+)\)/g,
+    (_full, mixVar, opVar) => {
+      n++;
+      return logAfterKeyUpdate(`56907),7914*${mixVar})+22357&255`, opVar);
+    },
+  );
+  // Quadratic catch: (Xm(Xm(mix,mix),56907)+7914*mix+22357,255), op)
+  out = out.replace(
+    /56907\)\+7914\*(\w+)\+22357,255\),(\w+)\)/g,
+    (_full, mixVar, opVar) => {
+      n++;
+      return logAfterKeyUpdate(`56907)+7914*${mixVar}+22357,255`, opVar);
+    },
+  );
 
   const nonceScript = /<script([^>]*nonce="[^"]+"[^>]*)>/i;
   if (nonceScript.test(out)) {
@@ -182,6 +228,17 @@ function injectOpcodeLog(html) {
     out = `<script>${PREAMBLE}</script>` + out;
   }
   return { html: out, injected: n > 0, replacements: n, snippet };
+}
+
+function logAfterKeyUpdate(prefix, opVar) {
+  return (
+    `${prefix},(globalThis.__cfT&&(globalThis.__cfT.op=${opVar}&255),` +
+    `globalThis.__cfOp=globalThis.__cfOp||[],` +
+    `globalThis.__cfOp.length<2500&&(globalThis.__cfOp.push({` +
+    `pc:globalThis.__cfT&&globalThis.__cfT.pc,op:${opVar}&255,` +
+    `key:globalThis.__cfT&&globalThis.__cfT.key,byte:globalThis.__cfT&&globalThis.__cfT.byte}),` +
+    `console.debug("__cfOp",globalThis.__cfOp[globalThis.__cfOp.length-1])),${opVar})`
+  );
 }
 
 function pcDeltas(ops) {
@@ -241,24 +298,48 @@ function foPostPairs(foNet) {
 }
 
 function selfTestInject() {
-  const happy =
-    "switch(hy[hH]=E+1,E=hy[hY]^G[A1(I2.L)](hj[E],37)+256&255,hy[hY]=G[A1(I2.hC)](hy[hY]+E,36163)+38392&255.07,E){case 8:dN(this);break;}";
-  const catchLoop =
-    "switch(hy[hH]=ht+1,hg=G[A1(I2.N)](hy[hY],219+hj[ht]&255),hy[hY]=G[A1(I2.Na)](hy[hY]+hg,36163)+38392&255.15,hg){case 8:dN(this);break;}";
-  const a = injectOpcodeLog(happy);
-  const b = injectOpcodeLog(catchLoop);
+  const happyOld =
+    "if(E=hy[hH],E!==E)return hy[hw];switch(hy[hH]=E+1,E=hy[hY]^G[A1(I2.L)](hj[E],37)+256&255,hy[hY]=G[A1(I2.hC)](hy[hY]+E,36163)+38392&255.07,E){case 8:dN(this);break;}";
+  const happyLive =
+    "if(o=fM[fs],o!==o)return fM[fa];switch(fM[fs]=fh[FI(cE.fu)](o,1),o=fM[fu]^fh[FI(cE.fV)](219+fd[o],255),fM[fu]=fh[FI(cE.l)]((fM[fu]+o)*36163+38392,255),o){case 8:Cf(this);break;}";
+  const catchLive =
+    "if(fJ=fM[fs],fJ!==fJ)return fM[fa];switch(fM[fs]=fh[FI(cE.fx)](fJ,1),fS=fh[FI(cE.GU)](fM[fu],x),fM[fu]=fh[FI(cE.Gl)](fh[FI(cE.Go)](fM[fu],fS),36163)+38392&255.41,fS){case 8:Cf(this);break;}";
+  const happyQuad =
+    "if(Xt=Xw[XQ],Xt!==Xt)return Xw[XY];switch(Xw[XQ]=Xm[dH(ik.A)](Xt,1),Xt=Xw[Xo]^3+XS[Xt]&255.25,XM=Xw[Xo]+Xt,Xw[Xo]=Xm[dH(ik.XQ)](Xm[dH(ik.Xo)](XM*XM,56907),7914*XM)+22357&255,Xt){case 222:Xf(this);break;}";
+  const catchQuad =
+    "if(XZ=Xw[XQ],XZ!==XZ)return Xw[XY];switch(Xw[XQ]=XZ+1,Xl=Xm[dH(ik.Xt)](Xw[Xo],Xm[dH(ik.aW)](Xm[dH(ik.ah)](XS[XZ],253),256)&255.37),XG=Xw[Xo]+Xl,Xw[Xo]=Xm[dH(ik.Xm)](Xm[dH(ik.aE)](Xm[dH(ik.aE)](XG,XG),56907)+7914*XG+22357,255),Xl){case 222:Xf(this);break;}";
+  const a = injectOpcodeLog(happyOld);
+  const b = injectOpcodeLog(happyLive);
+  const c = injectOpcodeLog(catchLive);
+  const d = injectOpcodeLog(happyQuad);
+  const e = injectOpcodeLog(catchQuad);
   return {
     ok:
       a.injected &&
       b.injected &&
+      c.injected &&
+      d.injected &&
+      e.injected &&
       a.html.includes("__cfOp.push") &&
       b.html.includes("__cfOp.push") &&
+      c.html.includes("__cfOp.push") &&
+      d.html.includes("__cfOp.push") &&
+      e.html.includes("__cfOp.push") &&
       a.html.includes("pc:E") &&
-      b.html.includes("pc:ht") &&
-      a.replacements >= 3 &&
-      b.replacements >= 2,
-    happy: { replacements: a.replacements, injected: a.injected },
-    catchLoop: { replacements: b.replacements, injected: b.injected },
+      b.html.includes("pc:o") &&
+      c.html.includes("pc:fJ") &&
+      d.html.includes("pc:Xt") &&
+      e.html.includes("pc:XZ") &&
+      a.replacements >= 2 &&
+      b.replacements >= 2 &&
+      c.replacements >= 2 &&
+      d.replacements >= 3 &&
+      e.replacements >= 3,
+    happyOld: { replacements: a.replacements, injected: a.injected },
+    happyLive: { replacements: b.replacements, injected: b.injected },
+    catchLive: { replacements: c.replacements, injected: c.injected },
+    happyQuad: { replacements: d.replacements, injected: d.injected },
+    catchQuad: { replacements: e.replacements, injected: e.injected },
   };
 }
 
@@ -285,6 +366,9 @@ function redactedPost(rec) {
 const events = [];
 const network = [];
 const pending = new Map();
+const cdpSessions = [];
+const liveOps = [];
+const scriptNotes = [];
 let iframeRewrites = 0;
 
 function note(kind, payload) {
@@ -324,6 +408,10 @@ async function onFetchPaused(session, evt) {
         path.join(outDir, `iframe-${iframeRewrites}.html`),
         text.slice(0, 400000),
       );
+      fs.writeFileSync(
+        path.join(outDir, `iframe-rewritten-${iframeRewrites}.html`),
+        html.slice(0, 200000),
+      );
       if (snippet && iframeRewrites <= 2) {
         fs.writeFileSync(
           path.join(outDir, `iframe-19663-${iframeRewrites}.txt`),
@@ -337,6 +425,7 @@ async function onFetchPaused(session, evt) {
         bytes: html.length,
         has19663: text.includes("19663"),
         has36163: text.includes("36163"),
+        has56907: text.includes("56907"),
         has36376: text.includes("36376"),
         has38392: text.includes("38392"),
         hasRunProgram: text.includes("runProgram"),
@@ -387,6 +476,7 @@ function wireNetwork(session, label) {
 
 async function attachSession(session, targetInfo, waitingForDebugger) {
   const label = `${targetInfo?.type || "?"}:${(targetInfo?.url || "").slice(0, 80)}`;
+  cdpSessions.push({ session, label, type: targetInfo?.type || "?" });
   try {
     await session.send("Network.enable").catch(() => {});
     wireNetwork(session, label);
@@ -410,6 +500,78 @@ async function attachSession(session, targetInfo, waitingForDebugger) {
       .send("Page.addScriptToEvaluateOnNewDocument", { source: PREAMBLE })
       .catch(() => {});
     await session.send("Runtime.enable").catch(() => {});
+    session.on("Runtime.consoleAPICalled", (evt) => {
+      const first = evt.args?.[0]?.value;
+      const rec = evt.args?.[1]?.value;
+      if (first === "__cfOp" && rec && liveOps.length < 400) liveOps.push(rec);
+    });
+    session.on("Debugger.scriptParsed", async (s) => {
+      try {
+        if (scriptNotes.length < 24) {
+          scriptNotes.push({
+            phase: "parsed",
+            url: (s.url || "").slice(0, 140),
+            endLine: s.endLine,
+            endColumn: s.endColumn,
+          });
+        }
+        const huge = (s.endColumn || 0) > 8000 || (s.endLine || 0) > 30;
+        if (!huge && !(s.url || "").includes("challenges.cloudflare.com")) return;
+        const { scriptSource } = await session.send("Debugger.getScriptSource", {
+          scriptId: s.scriptId,
+        });
+        const idxQ = scriptSource.indexOf("56907");
+        const idx = scriptSource.indexOf("36163");
+        const idxG = scriptSource.indexOf("19663");
+        if (idxQ < 0 && idx < 0 && idxG < 0) return;
+        const hasInject = scriptSource.includes("__cfOp.push");
+        note("scriptFetchConst", {
+          url: (s.url || "").slice(0, 140),
+          len: scriptSource.length,
+          hasInject,
+          idx: idxQ >= 0 ? idxQ : idx >= 0 ? idx : idxG,
+          marker: idxQ >= 0 ? "56907" : idx >= 0 ? "36163" : "19663",
+        });
+        const at = idxQ >= 0 ? idxQ : idx >= 0 ? idx : idxG;
+        const pre = scriptSource.slice(0, at);
+        const lineNumber = (pre.match(/\n/g) || []).length;
+        const nl = pre.lastIndexOf("\n");
+        const columnNumber = nl < 0 ? pre.length : pre.length - nl - 1;
+        if (!hasInject) {
+          await session.send("Debugger.setBreakpoint", {
+            location: { scriptId: s.scriptId, lineNumber, columnNumber },
+          });
+        }
+      } catch (e) {
+        note("bpErr", { error: String(e), url: (s.url || "").slice(0, 80) });
+      }
+    });
+    session.on("Debugger.paused", async (evt) => {
+      try {
+        const frame = evt.callFrames?.[0];
+        if (frame && liveOps.length < 200) {
+          const local = frame.scopeChain?.find((sc) => sc.type === "local");
+          const row = { via: "breakpoint" };
+          if (local?.object?.objectId) {
+            const got = await session.send("Runtime.getProperties", {
+              objectId: local.object.objectId,
+              ownProperties: true,
+            });
+            for (const p of got.result || []) {
+              if (p.value?.type === "number" && typeof p.value.value === "number") {
+                row[p.name] = p.value.value;
+              }
+            }
+          }
+          liveOps.push(row);
+        }
+      } catch (e) {
+        note("pausedErr", { error: String(e) });
+      } finally {
+        await session.send("Debugger.resume").catch(() => {});
+      }
+    });
+    await session.send("Debugger.enable").catch(() => {});
   } catch (e) {
     note("attachErr", { label, error: String(e) });
   } finally {
@@ -461,26 +623,94 @@ await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60_000 }).catch((
   note("gotoErr", { error: e.message });
 });
 
-await new Promise((r) => setTimeout(r, waitMs));
+async function harvestSessions(tag) {
+  for (const { session, label, type } of cdpSessions) {
+    try {
+      const { result } = await session.send("Runtime.evaluate", {
+        expression: `({
+          label: ${JSON.stringify(label)},
+          type: ${JSON.stringify(type)},
+          opCount: (globalThis.__cfOp||[]).length,
+          ops: (globalThis.__cfOp||[]).slice(0,400),
+          xhr: globalThis.__cfXhr||[],
+          runProgramCalls: globalThis.__cfRP||[]
+        })`,
+        returnByValue: true,
+      });
+      const v = result?.value;
+      if (v?.ops?.length) {
+        for (const o of v.ops) {
+          if (liveOps.length < 400) liveOps.push(o);
+        }
+        note("harvest", { tag, label, opCount: v.opCount });
+      }
+    } catch (e) {
+      note("harvestErr", { tag, label, error: String(e).slice(0, 160) });
+    }
+  }
+}
+
+const harvestDeadline = Date.now() + waitMs;
+while (Date.now() < harvestDeadline) {
+  await harvestSessions("poll");
+  await new Promise((r) => setTimeout(r, 400));
+}
+await harvestSessions("final");
 
 const frameDumps = [];
 for (const frame of page.frames()) {
   const fu = frame.url();
   if (!interestingUrl(fu) && frame !== page.mainFrame()) continue;
   try {
-                const dump = await frame.evaluate(() => ({
+            const dump = await frame.evaluate(() => ({
       href: location.href,
-      opCount: (window.__cfOp || []).length,
-      ops: (window.__cfOp || []).slice(0, 400),
-      reads: (window.__cfReads || []).slice(0, 96),
-      xhr: window.__cfXhr || [],
-      runProgramCalls: window.__cfRP || [],
-      hookErr: window.__cfHookErr || null,
+      world: "frame",
+      opCount: (globalThis.__cfOp || []).length,
+      ops: (globalThis.__cfOp || []).slice(0, 400),
+      reads: (globalThis.__cfReads || []).slice(0, 96),
+      xhr: globalThis.__cfXhr || [],
+      runProgramCalls: globalThis.__cfRP || [],
+      hookErr: globalThis.__cfHookErr || null,
     }));
     frameDumps.push(dump);
   } catch (e) {
     frameDumps.push({ href: fu, error: String(e) });
   }
+}
+
+for (const { session, label, type } of cdpSessions) {
+  try {
+    const { result } = await session.send("Runtime.evaluate", {
+      expression: `({
+        label: ${JSON.stringify(label)},
+        type: ${JSON.stringify(type)},
+        opCount: (globalThis.__cfOp||[]).length,
+        ops: (globalThis.__cfOp||[]).slice(0,400),
+        xhr: globalThis.__cfXhr||[],
+        runProgramCalls: globalThis.__cfRP||[],
+        hookErr: globalThis.__cfHookErr||null
+      })`,
+      returnByValue: true,
+    });
+    if (result?.value) frameDumps.push({ href: label, world: "cdp", ...result.value });
+  } catch (e) {
+    frameDumps.push({ href: label, world: "cdp", error: String(e) });
+  }
+}
+
+try {
+  for (const worker of page.workers()) {
+    const dump = await worker.evaluate(() => ({
+      href: "worker",
+      world: "worker",
+      opCount: (globalThis.__cfOp || []).length,
+      ops: (globalThis.__cfOp || []).slice(0, 400),
+      hookErr: globalThis.__cfHookErr || null,
+    }));
+    frameDumps.push(dump);
+  }
+} catch (e) {
+  note("workerEvalErr", { error: String(e) });
 }
 
 let screenshot = null;
@@ -504,7 +734,7 @@ await browser.close();
 
 const foNet = network.filter((n) => /\/fo\//.test(n.url || ""));
 const firstFo = foNet[0] || null;
-const ops = frameDumps.flatMap((f) => f.ops || []);
+const ops = [...frameDumps.flatMap((f) => f.ops || []), ...liveOps];
 const reads = frameDumps.flatMap((f) => f.reads || []);
 const xhr = frameDumps.flatMap((f) => f.xhr || []);
 
@@ -558,7 +788,15 @@ const summary = {
     referer: foHeaders["referer"] ? "present" : null,
   },
   firstOpcode: ops[0] || null,
-  events: events.slice(0, 40),
+  scriptNotes: scriptNotes.slice(0, 8),
+  worlds: frameDumps.map((f) => ({
+    href: (f.href || f.label || "").slice(0, 100),
+    world: f.world,
+    opCount: f.opCount,
+    error: f.error || null,
+    hookErr: f.hookErr || null,
+  })),
+  events: events.slice(0, 50),
 };
 
 fs.writeFileSync(path.join(outDir, "oracle.json"), JSON.stringify(summary, null, 2));

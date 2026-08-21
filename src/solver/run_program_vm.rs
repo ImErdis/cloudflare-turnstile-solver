@@ -1,17 +1,25 @@
 //! Static map of the iframe `runProgram` interpreter.
 //!
-//! Fetch constants and switch IDs **rotate with the iframe build**. Headed Chrome
-//! is the oracle: dump the iframe HTML (`* 36163 + 38392` / `new dy(N)(0,32,[])`)
-//! and `/fo/` extraInfo headers. This module does **not** execute handlers,
-//! reconstruct `wZ(...)`, or produce a token.
+//! Fetch constants and switch IDs **rotate with the iframe build**, including
+//! mid-day. Headed Chrome is the oracle: dump the iframe HTML and `/fo/`
+//! extraInfo headers. This module does **not** execute handlers, reconstruct
+//! `wZ(...)`, or produce a token.
 //!
+//! Linear builds (`g`, early `b`):
 //! ```text
 //! opcode = key ^ ((byte wrapping_sub bias) & 0xff)
 //! key    = ((key + opcode) * mul + add) & 0xff
 //! ```
 //!
-//! The try/catch copy uses `key ^ ((byte + (256-bias)) & 0xff)` — same wrapping
-//! subtract. Mapped handlers then read immediates with **different** biases.
+//! Later same-day `b` (Chrome 2026-08-21, `56907`):
+//! ```text
+//! opcode = key ^ ((byte wrapping_sub 253) & 0xff)   // == key ^ ((3 + byte) & 0xff)
+//! mix    = key + opcode
+//! key    = (mix*mix*56907 + 7914*mix + 22357) & 0xff
+//! ```
+//!
+//! Catch copies use `byte-253+256` or `219+byte` — same wrapping subtract.
+//! Mapped handlers then read immediates with **different** extra-xors.
 
 use serde::Serialize;
 
@@ -24,8 +32,18 @@ pub struct FetchParams {
     pub init_pc: u32,
     pub init_key: u8,
     pub byte_bias: u8,
+    /// Linear: `mix * key_mul + key_add`. Quadratic: `mix² * key_mul`.
     pub key_mul: u32,
+    /// Linear add, or quadratic constant term (`22357`).
     pub key_add: u32,
+    /// `0` = linear schedule. Nonzero = quadratic `mix²*mul + key_quad_b*mix + add`.
+    pub key_quad_b: u32,
+}
+
+impl FetchParams {
+    pub const fn is_quadratic(self) -> bool {
+        self.key_quad_b != 0
+    }
 }
 
 /// Captured branch-`g` iframe (`aae2b9a1c261` / prettier dump).
@@ -36,9 +54,11 @@ pub const FETCH_BRANCH_G: FetchParams = FetchParams {
     byte_bias: 62,
     key_mul: 19_663,
     key_add: 36_376,
+    key_quad_b: 0,
 };
 
-/// Headed Chrome oracle, SolveGate, 2026-08-21, platform branch `b`.
+/// Headed Chrome oracle, SolveGate, 2026-08-21 morning, platform branch `b`
+/// (`* 36163 + 38392`, `new dy(N)(0,32,[])`).
 pub const FETCH_BRANCH_B: FetchParams = FetchParams {
     label: "chrome-oracle-2026-08-21-b",
     init_pc: 0,
@@ -46,9 +66,22 @@ pub const FETCH_BRANCH_B: FetchParams = FetchParams {
     byte_bias: 37,
     key_mul: 36_163,
     key_add: 38_392,
+    key_quad_b: 0,
 };
 
-pub const FETCH_LIVE: FetchParams = FETCH_BRANCH_B;
+/// Same day, later Chrome iframe (`mix²*56907 + 7914*mix + 22357`, `new XL(n)(0,44,[])`).
+pub const FETCH_BRANCH_B_LATE: FetchParams = FetchParams {
+    label: "chrome-oracle-2026-08-21-b-late",
+    init_pc: 0,
+    init_key: 44,
+    byte_bias: 253,
+    key_mul: 56_907,
+    key_add: 22_357,
+    key_quad_b: 7_914,
+};
+
+/// Latest headed-Chrome snapshot. Earlier same-day linear `b` is [`FETCH_BRANCH_B`].
+pub const FETCH_LIVE: FetchParams = FETCH_BRANCH_B_LATE;
 
 /// Live entry (Chrome). Historical g-branch used key 100.
 pub const INIT_PC: u32 = FETCH_LIVE.init_pc;
@@ -219,6 +252,81 @@ pub const OPCODE_TABLE_B: &[OpcodeDef] = &[
     s2(25, 81),
 ];
 
+/// Same-day rotation (`56907` / `new XL(n)(0,44,[])`). First mapped opcode is
+/// `222` (`Xf`, tagged load — `dN`/`Cf` renamed). `gS` is the s1 family, `gK` s2.
+pub const OPCODE_TABLE_B_LATE: &[OpcodeDef] = &[
+    d(187, "XX"),
+    d(153, "X5"),
+    d(38, "X6"),
+    d(34, "X8"),
+    d(26, "X7"),
+    d(122, "X9"),
+    d(196, "X2"),
+    d(45, "X1"),
+    d(104, "X3"),
+    d(12, "X4"),
+    d(222, "Xf"),
+    d(130, "Xg"),
+    d(113, "XP"),
+    d(201, "Xj"),
+    d(52, "Xz"),
+    d(230, "Xv"),
+    d(94, "XH"),
+    d(73, "Xk"),
+    d(27, "XB"),
+    d(55, "XT"),
+    d(177, "XU"),
+    d(135, "Xi"),
+    d(219, "XD"),
+    d(134, "gO"),
+    d(127, "gc"),
+    d(103, "X0"),
+    d(30, "gx"),
+    d(246, "gq"),
+    d(11, "XJ"),
+    d(208, "Xn"),
+    d(168, "Xb"),
+    d(161, "Xr"),
+    d(119, "Xd"),
+    d(165, "XA"),
+    d(126, "XW"),
+    d(181, "Xh"),
+    d(176, "XE"),
+    d(98, "XV"),
+    d(227, "gG"),
+    d(169, "ge"),
+    d(138, "gN"),
+    d(226, "gC"),
+    d(132, "gy"),
+    d(72, "gY"),
+    d(183, "gZ"),
+    d(140, "gl"),
+    s1(194, 66),
+    s1(221, 18),
+    s1(66, 241),
+    s1(157, 65),
+    s1(203, 3),
+    s1(10, 22),
+    s1(43, 214),
+    s1(15, 88),
+    s1(137, 149),
+    s1(214, 131),
+    s1(108, 150),
+    s1(0, 55),
+    s1(19, 62),
+    s1(90, 249),
+    s1(93, 27),
+    s1(234, 21),
+    s1(4, 198),
+    s1(31, 220),
+    s2(97, 139),
+    s2(22, 234),
+    s2(87, 133),
+    s2(148, 119),
+    s2(241, 144),
+];
+
+/// Operand-layout table ([`HANDLER_LAYOUT_B`]) is keyed to [`OPCODE_TABLE_B`].
 pub const OPCODE_TABLE: &[OpcodeDef] = OPCODE_TABLE_B;
 
 const fn d(opcode: u8, handler: &'static str) -> OpcodeDef {
@@ -278,8 +386,41 @@ pub fn encode_byte(params: FetchParams, key: u8, opcode: u8) -> u8 {
 }
 
 pub fn next_key(params: FetchParams, key: u8, opcode: u8) -> u8 {
-    let mixed = (u32::from(key) + u32::from(opcode)) * params.key_mul + params.key_add;
+    let mix = u64::from(key) + u64::from(opcode);
+    let mixed = if params.key_quad_b == 0 {
+        mix * u64::from(params.key_mul) + u64::from(params.key_add)
+    } else {
+        // JS Number is exact for mix <= 510; mix² * 56907 ≈ 1.48e10 < 2^53.
+        mix * mix * u64::from(params.key_mul)
+            + u64::from(params.key_quad_b) * mix
+            + u64::from(params.key_add)
+    };
     (mixed & 0xff) as u8
+}
+
+/// Pick fetch + switch table from a packed-program magic header.
+pub fn params_for_magic(
+    magic: &[u8],
+) -> Option<(FetchParams, &'static [OpcodeDef])> {
+    use crate::solver::run_program::{
+        RUN_PROGRAM_MAGIC_BYTES, RUN_PROGRAM_MAGIC_BYTES_B, RUN_PROGRAM_MAGIC_BYTES_B_LATE,
+    };
+    if magic.starts_with(&RUN_PROGRAM_MAGIC_BYTES_B_LATE) {
+        Some((FETCH_BRANCH_B_LATE, OPCODE_TABLE_B_LATE))
+    } else if magic.starts_with(&RUN_PROGRAM_MAGIC_BYTES_B) {
+        Some((FETCH_BRANCH_B, OPCODE_TABLE_B))
+    } else if magic.starts_with(&RUN_PROGRAM_MAGIC_BYTES) {
+        Some((FETCH_BRANCH_G, OPCODE_TABLE_G))
+    } else {
+        None
+    }
+}
+
+/// Match a headed-Chrome oracle fixture's `fetch` object to a known snapshot.
+pub fn params_from_oracle_fetch(init_key: u8, byte_bias: u8, key_mul: u32) -> Option<FetchParams> {
+    [FETCH_BRANCH_B_LATE, FETCH_BRANCH_B, FETCH_BRANCH_G]
+        .into_iter()
+        .find(|&p| p.init_key == init_key && p.byte_bias == byte_bias && p.key_mul == key_mul)
 }
 
 pub fn opcode_def_in(table: &[OpcodeDef], opcode: u8) -> Option<&OpcodeDef> {
@@ -380,11 +521,13 @@ pub fn magic_header_naive_fetches(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::solver::run_program::{RUN_PROGRAM_MAGIC_BYTES, RUN_PROGRAM_MAGIC_BYTES_B};
+    use crate::solver::run_program::{
+        RUN_PROGRAM_MAGIC_BYTES, RUN_PROGRAM_MAGIC_BYTES_B, RUN_PROGRAM_MAGIC_BYTES_B_LATE,
+    };
 
     #[test]
     fn tables_are_unique_69() {
-        for table in [OPCODE_TABLE_G, OPCODE_TABLE_B] {
+        for table in [OPCODE_TABLE_G, OPCODE_TABLE_B, OPCODE_TABLE_B_LATE] {
             let mut seen = [false; 256];
             for def in table {
                 assert!(!seen[def.opcode as usize], "dup {}", def.opcode);
@@ -396,13 +539,19 @@ mod tests {
 
     #[test]
     fn fetch_roundtrip_both_builds() {
-        for params in [FETCH_BRANCH_G, FETCH_BRANCH_B] {
+        for params in [FETCH_BRANCH_G, FETCH_BRANCH_B, FETCH_BRANCH_B_LATE] {
             for key in [0u8, 1, params.init_key, 255] {
-                for opcode in [0u8, 1, 8, 21, 255] {
+                for opcode in [0u8, 1, 8, 21, 222, 255] {
                     let byte = encode_byte(params, key, opcode);
                     assert_eq!(decode_opcode(params, key, byte), opcode);
-                    let mixed =
-                        (u32::from(key) + u32::from(opcode)) * params.key_mul + params.key_add;
+                    let mix = u64::from(key) + u64::from(opcode);
+                    let mixed = if params.key_quad_b == 0 {
+                        mix * u64::from(params.key_mul) + u64::from(params.key_add)
+                    } else {
+                        mix * mix * u64::from(params.key_mul)
+                            + u64::from(params.key_quad_b) * mix
+                            + u64::from(params.key_add)
+                    };
                     assert_eq!(next_key(params, key, opcode), (mixed & 0xff) as u8);
                 }
             }
@@ -453,11 +602,56 @@ mod tests {
     }
 
     #[test]
+    fn b_late_magic_at_init_is_mapped_xf() {
+        // 71GxwDchICYfNxik → ef51b1… ; key 44 ^ (0xef wrapping_sub 253) = 222.
+        assert_eq!(
+            decode_opcode(
+                FETCH_BRANCH_B_LATE,
+                FETCH_BRANCH_B_LATE.init_key,
+                RUN_PROGRAM_MAGIC_BYTES_B_LATE[0]
+            ),
+            222
+        );
+        assert_eq!(
+            opcode_def_in(OPCODE_TABLE_B_LATE, 222).map(|d| d.handler),
+            Some("Xf")
+        );
+        let stream = magic_header_naive_fetches(
+            &RUN_PROGRAM_MAGIC_BYTES_B_LATE,
+            FETCH_BRANCH_B_LATE,
+            OPCODE_TABLE_B_LATE,
+        );
+        assert_eq!(stream.fetches[0].pc, 0);
+        assert_eq!(stream.fetches[0].key, 44);
+        assert_eq!(stream.fetches[0].opcode, 222);
+        assert!(stream.fetches[0].mapped);
+        assert_eq!(stream.fetches[0].next_key, 197);
+        assert_eq!(
+            params_for_magic(&RUN_PROGRAM_MAGIC_BYTES_B_LATE)
+                .map(|(p, _)| p.label),
+            Some(FETCH_BRANCH_B_LATE.label)
+        );
+    }
+
+    #[test]
+    fn quadratic_key_matches_reduced_mod_256() {
+        let params = FETCH_BRANCH_B_LATE;
+        let mix = u32::from(params.init_key) + 222;
+        let full = u64::from(mix) * u64::from(mix) * 56_907 + 7_914 * u64::from(mix) + 22_357;
+        let reduced = u64::from(mix) * u64::from(mix) * 75 + 234 * u64::from(mix) + 85;
+        assert_eq!(full & 0xff, reduced & 0xff);
+        assert_eq!(next_key(params, params.init_key, 222), (full & 0xff) as u8);
+    }
+
+    #[test]
     fn wrapping_sub_37_equals_plus_219() {
         for byte in [0u8, 1, 37, 77, 0x4d, 255] {
             let a = byte.wrapping_sub(37);
             let b = byte.wrapping_add(219);
             assert_eq!(a, b, "byte {byte}");
+        }
+        for byte in [0u8, 1, 0xef, 253, 255] {
+            assert_eq!(byte.wrapping_sub(253), byte.wrapping_add(3));
         }
     }
 
@@ -483,6 +677,8 @@ mod tests {
         assert!(verify_oracle_tuple(FETCH_BRANCH_B, 0, 32, 0x4d, 8).is_ok());
         assert!(verify_oracle_tuple(FETCH_BRANCH_B, 0, 32, 0x4d, 0).is_err());
         assert!(verify_oracle_tuple(FETCH_BRANCH_G, 0, 100, 0xaf, 21).is_ok());
+        assert!(verify_oracle_tuple(FETCH_BRANCH_B_LATE, 0, 44, 0xef, 222).is_ok());
+        assert!(verify_oracle_tuple(FETCH_BRANCH_B_LATE, 0, 44, 0xef, 8).is_err());
     }
 
     #[test]
@@ -494,7 +690,12 @@ mod tests {
         let v: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
         let fetch = v.get("fetch").cloned().unwrap_or(v.clone());
-        let params = FETCH_BRANCH_B;
+        let params = params_from_oracle_fetch(
+            fetch.get("init_key").and_then(|x| x.as_u64()).unwrap_or(0) as u8,
+            fetch.get("byte_bias").and_then(|x| x.as_u64()).unwrap_or(0) as u8,
+            fetch.get("key_mul").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
+        )
+        .unwrap_or(FETCH_BRANCH_B);
         if let Some(key) = fetch.get("init_key").and_then(|x| x.as_u64()) {
             assert_eq!(key as u8, params.init_key);
         }
@@ -536,6 +737,24 @@ mod tests {
             if let Some(ra) = fo.get("cfChlRa").or_else(|| fo.get("cf_chl_ra")) {
                 assert_eq!(ra.as_str().unwrap_or(""), "0");
             }
+        }
+        if let Some(late) = v.get("laterSameDay") {
+            let p = FETCH_BRANCH_B_LATE;
+            assert_eq!(
+                late["fetch"]["init_key"].as_u64().unwrap() as u8,
+                p.init_key
+            );
+            assert_eq!(
+                late["fetch"]["key_mul"].as_u64().unwrap() as u32,
+                p.key_mul
+            );
+            assert_eq!(
+                late["fetch"]["key_quad_b"].as_u64().unwrap() as u32,
+                p.key_quad_b
+            );
+            let op = late["firstMappedOpcode"].as_u64().unwrap() as u8;
+            let byte = late["fetches"][0]["byte"].as_u64().unwrap() as u8;
+            verify_oracle_tuple(p, 0, p.init_key, byte, op).unwrap();
         }
     }
 }

@@ -12,6 +12,9 @@ pub const PACKED_RUN_PROGRAM_PREFIX: &str = "ryrCJzUnLCItNTiVeJ";
 /// chars = 12 magic bytes). The 17th–18th chars vary with byte 14 (`Y`/`Z`).
 pub const PACKED_RUN_PROGRAM_PREFIX_B: &str = "TX5omy48NT82Lp1u";
 
+/// Later same-day Chrome rotation (`71GxwDchICYfNxikQT…`).
+pub const PACKED_RUN_PROGRAM_PREFIX_B_LATE: &str = "71GxwDchICYfNxik";
+
 /// First 13 decoded bytes of branch-`g` packed programs.
 ///
 /// The iframe copies `atob(packed)` into a byte array (`function C`) and runs a
@@ -24,6 +27,11 @@ pub const RUN_PROGRAM_MAGIC_BYTES: [u8; 13] = [
 /// First 13 decoded bytes of live branch-`b` packed programs (`TX5omy48NT82Lp1ueY`).
 pub const RUN_PROGRAM_MAGIC_BYTES_B: [u8; 13] = [
     0x4d, 0x7e, 0x68, 0x9b, 0x2e, 0x3c, 0x35, 0x3f, 0x36, 0x2e, 0x9d, 0x6e, 0x79,
+];
+
+/// First 13 decoded bytes of the later same-day `b` rotation (`71GxwDchICYfNxikQT`).
+pub const RUN_PROGRAM_MAGIC_BYTES_B_LATE: [u8; 13] = [
+    0xef, 0x51, 0xb1, 0xc0, 0x37, 0x21, 0x20, 0x26, 0x1f, 0x37, 0x18, 0xa4, 0x41,
 ];
 
 /// Stable header size in decoded bytecode (the magic). Two `/fo/` captures from
@@ -90,7 +98,8 @@ pub fn analyze_packed_run_program(packed: &str) -> RunProgramAnalysis {
     let decode_ok = decoded.is_some();
     let bytecode = decoded.unwrap_or_default();
     let magic_ok = bytecode.starts_with(&RUN_PROGRAM_MAGIC_BYTES)
-        || bytecode.starts_with(&RUN_PROGRAM_MAGIC_BYTES_B);
+        || bytecode.starts_with(&RUN_PROGRAM_MAGIC_BYTES_B)
+        || bytecode.starts_with(&RUN_PROGRAM_MAGIC_BYTES_B_LATE);
     let magic_hex = bytecode
         .get(..RUN_PROGRAM_MAGIC_LEN.min(bytecode.len()))
         .unwrap_or(&[])
@@ -235,6 +244,12 @@ mod tests {
             encoded_b.starts_with(PACKED_RUN_PROGRAM_PREFIX_B),
             "encoded {encoded_b} prefix {PACKED_RUN_PROGRAM_PREFIX_B}"
         );
+        let twelve_late =
+            base64::prelude::BASE64_STANDARD.encode(&RUN_PROGRAM_MAGIC_BYTES_B_LATE[..12]);
+        assert_eq!(
+            PACKED_RUN_PROGRAM_PREFIX_B_LATE,
+            twelve_late.trim_end_matches('=')
+        );
     }
 
     #[test]
@@ -350,21 +365,15 @@ mod tests {
             bytecodes.push(unpack_packed_run_program(packed).unwrap());
         }
         for bc in &bytecodes {
-            assert_eq!(&bc[..RUN_PROGRAM_MAGIC_LEN], &RUN_PROGRAM_MAGIC_BYTES);
-            let stream = crate::solver::run_program_vm::naive_one_byte_fetches(
-                bc,
-                if bc.starts_with(&RUN_PROGRAM_MAGIC_BYTES_B) {
-                    crate::solver::run_program_vm::FETCH_BRANCH_B
-                } else {
-                    crate::solver::run_program_vm::FETCH_BRANCH_G
-                },
-                if bc.starts_with(&RUN_PROGRAM_MAGIC_BYTES_B) {
-                    crate::solver::run_program_vm::OPCODE_TABLE_B
-                } else {
-                    crate::solver::run_program_vm::OPCODE_TABLE_G
-                },
-                8,
+            assert!(
+                crate::solver::run_program_vm::params_for_magic(bc).is_some(),
+                "unknown magic {:02x?}",
+                &bc[..RUN_PROGRAM_MAGIC_LEN.min(bc.len())]
             );
+            let (params, table) = crate::solver::run_program_vm::params_for_magic(bc)
+                .expect("captured bytecode magic");
+            let stream =
+                crate::solver::run_program_vm::naive_one_byte_fetches(bc, params, table, 8);
             assert!(
                 stream.fetches[0].mapped,
                 "magic + documented init must land on a switch opcode, got {}",

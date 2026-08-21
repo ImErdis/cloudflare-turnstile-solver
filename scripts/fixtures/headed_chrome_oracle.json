@@ -39,5 +39,38 @@
       "note": "first byte of TX5omy48… magic under live fetch; Chrome HTML has case 8"
     }
   ],
-  "note": "XHR setRequestHeader only cf-chl + cf-chl-ra. Content-Type is Chrome's default for xhr.send(string). Operands use post-fetch key: imm = next_key ^ wrapping_sub(byte, 37) ^ extra. First dN tag is 179 (string). Fetch constants and switch IDs rotate; re-run scripts/chrome_oracle.mjs."
+  "note": "XHR setRequestHeader only cf-chl + cf-chl-ra. Content-Type is Chrome's default for xhr.send(string). Operands use post-fetch key: imm = next_key ^ wrapping_sub(byte, 37) ^ extra. First dN tag is 179 (string). Fetch constants and switch IDs rotate mid-day; laterSameDay is the 56907 quadratic snapshot. Re-run scripts/chrome_oracle.mjs.",
+  "laterSameDay": {
+    "source": "headed Chrome oracle, same SolveGate demo, later 2026-08-21",
+    "packedPrefix": "71GxwDchICYfNxik",
+    "magicHex": "ef51b1c0372120261f3718a441",
+    "firstMappedOpcode": 222,
+    "firstMappedHandler": "Xf",
+    "firstXfTag": 199,
+    "firstXfTagName": "string",
+    "fetch": {
+      "init_pc": 0,
+      "init_key": 44,
+      "byte_bias": 253,
+      "key_mul": 56907,
+      "key_add": 22357,
+      "key_quad_b": 7914,
+      "entry": "new XL(packed)[method](0,44,[])"
+    },
+    "fetches": [
+      {
+        "pc": 0,
+        "key": 44,
+        "byte": 239,
+        "op": 222,
+        "note": "first byte of 71GxwDch… magic; key 44 ^ (0xef wrapping_sub 253) = 222 (Xf)"
+      }
+    ],
+    "foUnchanged": {
+      "postsPerChallenge": 2,
+      "cfChlRa": "0",
+      "priority": "u=1, i",
+      "contentType": "text/plain;charset=UTF-8"
+    }
+  }
 }

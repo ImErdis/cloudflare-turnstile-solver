@@ -62,36 +62,55 @@ standard base64; `decrypt_cloudflare_response(ray, body)` yields a packed `runPr
 bytecode whose first 13 bytes are a stable magic (`af2ac22735272c222d35389578`). The iframe
 unpacks it with `atob` + `charCodeAt` (`function C`) and interprets it in `runProgram`.
 
-Opcode fetch (headed Chrome oracle; **constants rotate per iframe build**):
+Opcode fetch (headed Chrome oracle; **constants rotate per iframe build**, including
+mid-day):
+
+Linear (`g` and early `b`):
 
 ```
 opcode = key ^ ((byte - bias) & 0xff)
 key    = ((key + opcode) * mul + add) & 0xff
 ```
 
-Live (branch `b`, 2026-08-21): `bias=37`, `mul=36163`, `add=38392`, entry `(0, 32, [])`,
-packed prefix `TX5omy48NT82Lp1ueY`. Captured branch `g`: `bias=62`, `mul=19663`,
-`add=36376`, entry `(0, 100, [])`, prefix `ryrCJzUnLCItNTiVeJ`. Both have 69 switch
-cases with different IDs.
+Later same-day `b` (Chrome 2026-08-21, `56907` in the iframe):
 
-Operand immediates use the **post-fetch** key (no mul/add):
+```
+opcode = key ^ ((3 + byte) & 0xff)          // bias 253
+mix    = key + opcode
+key    = (mix*mix*56907 + 7914*mix + 22357) & 0xff
+```
+
+Snapshots:
+
+- Early `b`: `bias=37`, `mul=36163`, `add=38392`, entry `(0, 32, [])`,
+  packed prefix `TX5omy48NT82Lp1u`, first opcode `dN` (8), string tag **179**.
+- Later `b`: `bias=253`, quadratic `(56907, 7914, 22357)`, entry `(0, 44, [])`,
+  packed prefix `71GxwDchICYfNxik`, first opcode `Xf` (222), string tag **199**.
+- Captured branch `g`: `bias=62`, `mul=19663`, `add=36376`, entry `(0, 100, [])`,
+  prefix `ryrCJzUnLCItNTiVeJ`, first opcode `sF` (21).
+
+All three have **69** switch cases with different IDs. `dN`/`Cf`/`Xf` is the
+same tagged-load family; extra-xors rotate (`154/48` → `86/112`).
+
+Operand immediates use the **post-fetch** key (no mul/add / no quadratic):
 
 ```
 imm = next_key ^ ((byte - bias) & 0xff) ^ extra_xor
 ```
 
-First live opcode is `dN` (8), a tagged load. Magic `TX5omy48…` decodes tag **179**
-(string). Extra-xors are JS `ToInt32` of floats (`154.33` → 154). Fixed-width
-handlers (d6/d7/d4 width 2, dQ/d1/d3 width 3, p/F width 4) are in
-`src/solver/run_program_ops.rs`. Chrome PC deltas confirm widths; jumps show
-large/negative deltas. A 1-byte walk still diverges immediately.
+Fixed-width handlers on early `b` (d6/d7/d4 width 2, dQ/d1/d3 width 3, p/F
+width 4) are in `src/solver/run_program_ops.rs`. A 1-byte walk still diverges
+immediately. Chrome PC-delta inject must match the **current** key-update
+spelling (`36163)+38392&255` or `mix*mix,56907`) and harvest `{pc,op}` **while
+the OOPIF lives** (iframes close before end-of-run `frame.evaluate`).
 
 Headed Chrome oracle: `cd scripts && npm install && DISPLAY=:1 node chrome_oracle.mjs`.
 It logs `/fo/` extraInfo headers and `{pc,op,key,byte}` fetches. Chrome POSTs
 twice to the same `/fo/` URL (init ~4k → packed program; follow-up ~90k);
 `Content-Type: text/plain;charset=UTF-8` is XHR's default; `cf-chl-ra` is `0` on
-the first attempt; `priority: u=1, i`. Crate POST header names and probe
-priority match. Live `/fo/` still 400s without `wZ(...)`.
+the first attempt; `priority: u=1, i`. That **header shape did not rotate**
+with the 56907 fetch. Crate POST header names and probe priority match. Live
+`/fo/` still 400s without `wZ(...)`.
 
 `probe_iframe` / `solve_test` should get iframe HTTP 200 + parsed options, then an honest
 failure: orchestrate is not the VM, live `/fo/` without the init body 400s. `/cmg/1` 404s

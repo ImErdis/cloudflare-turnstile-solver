@@ -14,14 +14,15 @@ pub use solver::protocol::{
     turnstile_iframe_url,
 };
 pub use solver::run_program::{
-    PACKED_RUN_PROGRAM_PREFIX, PACKED_RUN_PROGRAM_PREFIX_B, RUN_PROGRAM_MAGIC_BYTES,
-    RUN_PROGRAM_MAGIC_BYTES_B, RunProgramAnalysis, analyze_packed_run_program,
-    unpack_packed_run_program,
+    PACKED_RUN_PROGRAM_PREFIX, PACKED_RUN_PROGRAM_PREFIX_B, PACKED_RUN_PROGRAM_PREFIX_B_LATE,
+    RUN_PROGRAM_MAGIC_BYTES, RUN_PROGRAM_MAGIC_BYTES_B, RUN_PROGRAM_MAGIC_BYTES_B_LATE,
+    RunProgramAnalysis, analyze_packed_run_program, unpack_packed_run_program,
 };
 pub use solver::run_program_ops::{
-    DN_TAG_STRING, HANDLER_LAYOUT_B, classify_pc_delta, first_dn_tag_b, operand_from_byte,
+    DN_TAG_STRING, HANDLER_LAYOUT_B, XF_TAG_STRING, classify_pc_delta, first_dn_tag_b,
+    first_xf_tag_late, operand_from_byte,
 };
 pub use solver::run_program_vm::{
     FETCH_LIVE, INIT_KEY, INIT_PC, OPCODE_TABLE, decode_opcode, naive_one_byte_fetches, next_key,
-    opcode_def, opcode_def_in, verify_oracle_tuple,
+    opcode_def, opcode_def_in, params_for_magic, verify_oracle_tuple,
 };
