@@ -44,7 +44,10 @@ impl<'a> Visit<'a> for ScriptVisitor {
 
         let first_arg_str = match first_arg.as_expression().unwrap() {
             Expression::StringLiteral(str) => str,
-            _ => panic!("expected a string literal"),
+            _ => {
+                walk_call_expression(self, it);
+                return;
+            }
         }
             .value
             .as_str();
