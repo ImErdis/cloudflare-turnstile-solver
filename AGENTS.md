@@ -106,14 +106,18 @@ imm = next_key ^ ((byte - bias) & 0xff) ^ extra_xor
 ```
 
 Fixed-width handlers on early `b` (d6/d7/d4 width 2, dQ/d1/d3 width 3, p/F
-width 4) are in `src/solver/run_program_ops.rs`. Late-`b` Chrome-stable widths
-and extra-xors (`HANDLER_LAYOUT_B_LATE`): `gq`/246 width 3 extras `123,148`;
-`gG`/227 width 4 extras `221,41,180`; `X3`/104 width 2 extra `1`; `gY`/72
-width 5 extras `117,221,231,177`; `Xf`/222 variable tag `86` dst `112`.
-Minified names rotate on later same-day HTML (`gx`/`ge`/`X4`/`gZ`/`Xg`);
-opcode numbers and `ToInt32` extras did not. A 1-byte walk still diverges
-immediately. Do **not** execute these handlers as a solver. Chrome PC-delta
-inject must match the **current** key-update spelling (`36163)+38392&255` or
+width 4) are in `src/solver/run_program_ops.rs`. Late-`b` (`56907`) Direct
+handlers are all 46 switch cases in `HANDLER_LAYOUT_B_LATE`, keyed by opcode
+number. Chrome-stable widths: `gq`/246 width 3 extras `123,148`; `gG`/227
+width 4 extras `221,41,180`; `X3`/104 width 2 extra `1`; `gY`/72 width 5
+extras `117,221,231,177`; `X4`/12 width 2 extra `58`; `Xz`/52 width 3 extra
+`132`; `Xg`/130 width 3 extras `112,19`; `ge`/169 width 5 extras `41,221,180,19`;
+`Xf`/222 variable tag `86` dst `112`. The rest are HTML family tags (jump,
+cond jump, LEB/`this.m[].o`, call/apply, `new`, property get/set, string-key
+get/set, register swap). Minified names rotate; opcode numbers, `ToInt32`
+extras, and family tags did not. A 1-byte walk still diverges immediately.
+Do **not** execute these handlers as a solver. Chrome PC-delta inject must
+match the **current** key-update spelling (`36163)+38392&255` or
 `mix*mix,56907`) and harvest `{pc,op}` **while the OOPIF lives** (iframes close
 before end-of-run `frame.evaluate`).
 

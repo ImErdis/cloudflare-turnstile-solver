@@ -12,12 +12,11 @@
 //! slots are then usually `imm ^ this.h`. Headed Chrome logs PC deltas: a stable
 //! small delta is the instruction width; large or negative deltas are jumps.
 //!
-//! Late-`b` (`56907`) extra-xors for the Chrome-stable widths (`gq`/246,
-//! `gG`/227, `X3`/104, `gY`/72, `X4`/12, `Xz`/52, `Xg`/130, `ge`/169) plus
-//! already-mapped `Xf`/222 live in [`HANDLER_LAYOUT_B_LATE`]. Minified names
-//! rotate on later same-day HTML (`gx`/`ge`/`X4`/`gZ`/`Xg` for the first five;
-//! `X5`/`Xv`/`XX`/`gN` for the four added here); opcode numbers and `ToInt32`
-//! extras did not.
+//! Late-`b` (`56907`) Direct handlers are catalogued in [`HANDLER_LAYOUT_B_LATE`]
+//! by **opcode number** (46 switch cases). Chrome-stable widths stay as
+//! `Fixed`; jumps, LEB, `new`/`call` arity, and tagged load are `Variable`.
+//! Minified names rotate; opcode numbers, `ToInt32` extras, and family tags
+//! did not on the same-day HTML. s1/s2 (`gS`/`gK`) stay case-immediate families.
 //!
 //! This module does **not** execute handlers or produce a token.
 
@@ -28,7 +27,8 @@ use crate::solver::run_program_vm::{
 use serde::Serialize;
 
 /// Remaining live gap after fetch, operands, `f4`, init-JSON shape, follow-up
-/// envelope, late-`b` extra-xors, and follow-up JSON key names: handler semantics.
+/// envelope, late-`b` extra-xors, follow-up JSON key names, and HTML family
+/// tags: handler semantics (do not run handlers as a solver).
 pub const NEXT_GAP: &str = crate::solver::fo_followup_json::NEXT_AFTER_FOLLOWUP_JSON;
 
 /// JS `x ^ 62.48` is `x ^ ToInt32(62.48)` = `x ^ 62`.
@@ -56,7 +56,27 @@ pub struct HandlerLayout {
     pub handler: &'static str,
     pub width: InstrWidth,
     pub extra_xors: &'static [u8],
+    /// Shape tag from HTML (not a solver). Opcode-keyed; names rotate.
+    pub family: &'static str,
     pub note: &'static str,
+}
+
+const fn h(
+    opcode: u8,
+    handler: &'static str,
+    width: InstrWidth,
+    extra_xors: &'static [u8],
+    family: &'static str,
+    note: &'static str,
+) -> HandlerLayout {
+    HandlerLayout {
+        opcode,
+        handler,
+        width,
+        extra_xors,
+        family,
+        note,
+    }
 }
 
 /// First mapped opcode on live branch `b` (`case 8: dN`).
@@ -92,104 +112,31 @@ pub const XF_TAG_BYTES: u8 = 161;
 /// Fixed-width handlers recovered from the headed-Chrome iframe (branch `b`).
 /// Operand extras are `ToInt32` of the floats in the handler source.
 pub const HANDLER_LAYOUT_B: &[HandlerLayout] = &[
-    HandlerLayout {
-        opcode: 8,
-        handler: "dN",
-        width: InstrWidth::Variable,
-        extra_xors: &[DN_TAG_XOR, DN_DST_XOR],
-        note: "tagged load: 49 int (+xor 59), 230 undef, 179 string, 191 float, 42 null, 66 false, 206 bytes",
-    },
-    HandlerLayout {
-        opcode: 14,
-        handler: "d6",
-        width: InstrWidth::Fixed(2),
-        extra_xors: &[62],
-        note: "store {} at (imm^h)",
-    },
-    HandlerLayout {
-        opcode: 176,
-        handler: "d7",
-        width: InstrWidth::Fixed(2),
-        extra_xors: &[8],
-        note: "store [] at (imm^h)",
-    },
-    HandlerLayout {
-        opcode: 50,
-        handler: "d4",
-        width: InstrWidth::Fixed(2),
-        extra_xors: &[29],
-        note: "throw register",
-    },
-    HandlerLayout {
-        opcode: 215,
-        handler: "d5",
-        width: InstrWidth::Fixed(2),
-        extra_xors: &[154],
-        note: "1-imm helper (stack/slot xor 36 and 53 are not bytecode)",
-    },
-    HandlerLayout {
-        opcode: 49,
-        handler: "dQ",
-        width: InstrWidth::Fixed(3),
-        extra_xors: &[48, 59],
-        note: "2-imm store of a decoded byte",
-    },
-    HandlerLayout {
-        opcode: 0,
-        handler: "d1",
-        width: InstrWidth::Fixed(3),
-        extra_xors: &[123, 5],
-        note: "array push",
-    },
-    HandlerLayout {
-        opcode: 31,
-        handler: "d3",
-        width: InstrWidth::Fixed(3),
-        extra_xors: &[205, 31],
-        note: "2-imm call/result store",
-    },
-    HandlerLayout {
-        opcode: 9,
-        handler: "p",
-        width: InstrWidth::Fixed(4),
-        extra_xors: &[80, 243, 107],
-        note: "property get: dst = obj[key]",
-    },
-    HandlerLayout {
-        opcode: 112,
-        handler: "F",
-        width: InstrWidth::Fixed(4),
-        extra_xors: &[84, 250, 33],
-        note: "property set: obj[key] = src",
-    },
-    HandlerLayout {
-        opcode: 185,
-        handler: "x",
-        width: InstrWidth::Variable,
-        extra_xors: &[],
-        note: "s1 family: switch immediate from the case (245,17,105,…) plus bytecode",
-    },
-    HandlerLayout {
-        opcode: 69,
-        handler: "g",
-        width: InstrWidth::Variable,
-        extra_xors: &[],
-        note: "s2 family: unary typeof/- /+ /! /~ selected by switch immediate",
-    },
-    HandlerLayout {
-        opcode: 222,
-        handler: "Xf",
-        width: InstrWidth::Variable,
-        extra_xors: &[XF_TAG_XOR, XF_DST_XOR],
-        note: "later-day tagged load (dN renamed): 162 int (+xor 19), 86 undef, 199 string, 36 LEB, 58 float, 80 null, 202 false, 161 bytes",
-    },
+    h(8, "dN", InstrWidth::Variable, &[DN_TAG_XOR, DN_DST_XOR], "tagged_load",
+        "tagged load: 49 int (+xor 59), 230 undef, 179 string, 191 float, 42 null, 66 false, 206 bytes"),
+    h(14, "d6", InstrWidth::Fixed(2), &[62], "store_empty_object", "store {} at (imm^h)"),
+    h(176, "d7", InstrWidth::Fixed(2), &[8], "store_empty_array", "store [] at (imm^h)"),
+    h(50, "d4", InstrWidth::Fixed(2), &[29], "throw_register", "throw register"),
+    h(215, "d5", InstrWidth::Fixed(2), &[154], "helper_1imm",
+        "1-imm helper (stack/slot xor 36 and 53 are not bytecode)"),
+    h(49, "dQ", InstrWidth::Fixed(3), &[48, 59], "store_decoded_byte", "2-imm store of a decoded byte"),
+    h(0, "d1", InstrWidth::Fixed(3), &[123, 5], "array_push", "array push"),
+    h(31, "d3", InstrWidth::Fixed(3), &[205, 31], "call_result_store", "2-imm call/result store"),
+    h(9, "p", InstrWidth::Fixed(4), &[80, 243, 107], "property_get", "property get: dst = obj[key]"),
+    h(112, "F", InstrWidth::Fixed(4), &[84, 250, 33], "property_set", "property set: obj[key] = src"),
+    h(185, "x", InstrWidth::Variable, &[], "s1",
+        "s1 family: switch immediate from the case (245,17,105,…) plus bytecode"),
+    h(69, "g", InstrWidth::Variable, &[], "s2",
+        "s2 family: unary typeof/- /+ /! /~ selected by switch immediate"),
+    h(222, "Xf", InstrWidth::Variable, &[XF_TAG_XOR, XF_DST_XOR], "tagged_load",
+        "later-day tagged load (dN renamed): 162 int (+xor 19), 86 undef, 199 string, 36 LEB, 58 float, 80 null, 202 false, 161 bytes"),
 ];
 
-/// Late-`b` (`56907`) handlers whose Chrome PC deltas are stable widths.
+/// Late-`b` (`56907`) Direct handlers from headed-Chrome iframe HTML.
 ///
-/// Operand extras are `ToInt32` of the floats next to bytecode bumps in the
-/// headed-Chrome iframe (`chrome-oracle` / `chrome-oracle-bp` used these
-/// names; `chrome-oracle-norm` renamed the functions).
+/// Chrome-stable widths (`gq`/`gG`/`X3`/`gY`/`X4`/`Xz`/`Xg`/`ge`) keep `Fixed`.
+/// Jumps, LEB, `new`/`call` arity, and tagged load are `Variable`. Operand extras
+/// are `ToInt32` of the floats next to bytecode bumps. Do not execute.
 pub const GQ_OPCODE: u8 = 246;
 pub const GG_OPCODE: u8 = 227;
 pub const X3_OPCODE: u8 = 104;
@@ -201,70 +148,102 @@ pub const XG_OPCODE: u8 = 130;
 /// 4-imm property set. Later HTML calls this `gN`; later HTML's `ge` is opcode 227.
 pub const GE_OPCODE: u8 = 169;
 
+/// One entry per Direct switch case on the 56907 iframe (not s1/s2).
+pub const LATE_DIRECT_HANDLER_COUNT: usize = 46;
+
 pub const HANDLER_LAYOUT_B_LATE: &[HandlerLayout] = &[
-    HandlerLayout {
-        opcode: XF_OPCODE,
-        handler: "Xf",
-        width: InstrWidth::Variable,
-        extra_xors: &[XF_TAG_XOR, XF_DST_XOR],
-        note: "tagged load: tag^86 dst^112, string tag 199. Later HTML calls this Xg.",
-    },
-    HandlerLayout {
-        opcode: GQ_OPCODE,
-        handler: "gq",
-        width: InstrWidth::Fixed(3),
-        extra_xors: &[123, 148],
-        note: "2-imm (js 123.64/123.07, 148); dst slot then register load. Later HTML: gx.",
-    },
-    HandlerLayout {
-        opcode: GG_OPCODE,
-        handler: "gG",
-        width: InstrWidth::Fixed(4),
-        extra_xors: &[221, 41, 180],
-        note: "3-imm (js 221, 41, 180.99); obj[key] = src. Later HTML: ge.",
-    },
-    HandlerLayout {
-        opcode: X3_OPCODE,
-        handler: "X3",
-        width: InstrWidth::Fixed(2),
-        extra_xors: &[1],
-        note: "1-imm store {} at (imm^h); early-b d6 analogue. Later HTML: X4.",
-    },
-    HandlerLayout {
-        opcode: GY_OPCODE,
-        handler: "gY",
-        width: InstrWidth::Fixed(5),
-        extra_xors: &[117, 221, 231, 177],
-        note: "4-imm nested property get dst = obj[k1][k2] (js 177.81). Later HTML: gZ.",
-    },
-    HandlerLayout {
-        opcode: X4_OPCODE,
-        handler: "X4",
-        width: InstrWidth::Fixed(2),
-        extra_xors: &[58],
-        note: "1-imm store [] at (imm^h); early-b d7 analogue (js ^58). Later HTML: X5.",
-    },
-    HandlerLayout {
-        opcode: XZ_OPCODE,
-        handler: "Xz",
-        width: InstrWidth::Fixed(3),
-        extra_xors: &[132],
-        note: "LEB then slot^132.63; Xm[XQ]['o']=reg. Chrome histogram was all width 3 (1-byte LEB). Later HTML: Xv.",
-    },
-    HandlerLayout {
-        opcode: XG_OPCODE,
-        handler: "Xg",
-        width: InstrWidth::Fixed(3),
-        extra_xors: &[112, 19],
-        note: "2-imm store (js 112.87, 19). Later HTML: XX.",
-    },
-    HandlerLayout {
-        opcode: GE_OPCODE,
-        handler: "ge",
-        width: InstrWidth::Fixed(5),
-        extra_xors: &[41, 221, 180, 19],
-        note: "4-imm property set dest[key]=src (js 41.43, 221, 180, 19). Later HTML: gN.",
-    },
+    h(187, "XX", InstrWidth::Variable, &[207], "jump_u24",
+        "unconditional pc=u24; extra 207 on the key byte at post-increment pc. Chrome deltas are jumps."),
+    h(153, "X5", InstrWidth::Variable, &[96, 207], "cond_jump",
+        "if reg then pc=u24 and key^=207 else fall through (js ^96, ^207.34)"),
+    h(38, "X6", InstrWidth::Variable, &[21, 200, 207], "cond_jump",
+        "compare two regs (extras 21, 200); taken path pc=u24 key^207 (else also ^207)"),
+    h(34, "X8", InstrWidth::Variable, &[21, 200, 207], "cond_jump",
+        "compare two regs (js ,21 ^200.95 ^207); taken/else u24 like X6"),
+    h(26, "X7", InstrWidth::Variable, &[112, 19, 21, 207], "cond_jump",
+        "2-imm store-like (112.88, 19) then cond (21.07) then u24 key^207"),
+    h(122, "X9", InstrWidth::Variable, &[120, 252, 54, 207], "cond_jump",
+        "compare >= (js 120, 252, 54) then u24 key^207.37"),
+    h(196, "X2", InstrWidth::Fixed(2), &[131], "number_helper",
+        "1-imm (js 131.21); Number host helper, not bytecode arithmetic"),
+    h(45, "X1", InstrWidth::Fixed(2), &[144], "throw_register",
+        "1-imm throw register (js ^144); early-b d4 analogue"),
+    h(X3_OPCODE, "X3", InstrWidth::Fixed(2), &[1], "store_empty_object",
+        "1-imm store {} at (imm^h); early-b d6 analogue. Later HTML: X4."),
+    h(X4_OPCODE, "X4", InstrWidth::Fixed(2), &[58], "store_empty_array",
+        "1-imm store [] at (imm^h); early-b d7 analogue (js ^58). Later HTML: X5."),
+    h(XF_OPCODE, "Xf", InstrWidth::Variable, &[XF_TAG_XOR, XF_DST_XOR], "tagged_load",
+        "tagged load: tag^86 dst^112, string tag 199. Later HTML calls this Xg."),
+    h(XG_OPCODE, "Xg", InstrWidth::Fixed(3), &[112, 19], "register_store",
+        "2-imm store (js 112.87, 19). Later HTML: XX."),
+    h(113, "XP", InstrWidth::Variable, &[52, 132], "leb_object_slot",
+        "tag^52 then LEB; branch loads table[n].o or slot^132. Later HTML name rotates."),
+    h(201, "Xj", InstrWidth::Variable, &[], "leb_alloc_objects",
+        "LEB count then per-slot LEB; allocates {o: undefined} into this.m. No extra xor on the count."),
+    h(XZ_OPCODE, "Xz", InstrWidth::Fixed(3), &[132], "leb_object_slot",
+        "LEB then slot^132.63; Xm[XQ]['o']=reg. Chrome histogram was all width 3 (1-byte LEB). Later HTML: Xv."),
+    h(230, "Xv", InstrWidth::Variable, &[132, 209, 199], "leb_object_slot",
+        "LEB then extras 132, 209, 199; o-slot family like Xz with more immediates"),
+    h(94, "XH", InstrWidth::Variable, &[132], "leb_object_slot",
+        "LEB then slot^132; store table[n].o. Same extra as Xz, variable LEB width."),
+    h(73, "Xk", InstrWidth::Variable, &[15, 223], "leb_object_slot",
+        "LEB then ^15 ^223; bind Xm[n]['o'] and store the object"),
+    h(27, "XB", InstrWidth::Variable, &[27, 223, 246, 77, 132, 213], "leb_object_state",
+        "state machine over this.m[].o (js 27.67, 223.27, 246.32, 77.01, 132, 213). Do not execute."),
+    h(55, "XT", InstrWidth::Variable, &[132, 112, 19, 207], "leb_cond_jump",
+        "LEB slot^132 then 2-imm (112.89, 19) then u24 key^207"),
+    h(177, "XU", InstrWidth::Variable, &[96, 207, 68, 83, 37], "apply_construct",
+        "u24 + flags (js 96, 207, 68, 83, 37) then XI.apply-like call. Arity from bytecode."),
+    h(135, "Xi", InstrWidth::Variable, &[85, 63, 207, 164], "typed_store",
+        "switch on type tag (js 85.58, 63, 207, 164.29); Number/bytes store. Do not execute."),
+    h(219, "XD", InstrWidth::Variable, &[77], "binary_arith",
+        "1-imm (js 77.98) then packed u32 constants; host/binary arithmetic. Do not execute."),
+    h(134, "gO", InstrWidth::Fixed(3), &[125, 131], "call_1arg",
+        "2-imm (js 125, 131); callee(arg) with no result store"),
+    h(127, "gc", InstrWidth::Variable, &[131, 207], "push_frame",
+        "slot^131 then u24 key^207; method call with a 4-tuple frame. Chrome deltas are jumps."),
+    h(103, "X0", InstrWidth::Fixed(3), &[209, 199], "call_noarg",
+        "2-imm (js 209.39, 199); store callee() result"),
+    h(30, "gx", InstrWidth::Fixed(3), &[20, 36], "register_swap",
+        "2-imm (js 20.58, 36.26); swap two registers"),
+    h(GQ_OPCODE, "gq", InstrWidth::Fixed(3), &[123, 148], "register_load",
+        "2-imm (js 123.64/123.07, 148); dst slot then register load. Later HTML: gx."),
+    h(11, "XJ", InstrWidth::Variable, &[16, 108, 206, 87], "new_construct",
+        "dst^16.51 arity^108 ctor^206 then N args ^87.86; switch(N) new Ctor(...)"),
+    h(208, "Xn", InstrWidth::Variable, &[77, 27, 246, 22, 217], "call_apply",
+        "call/apply (js 77.5, 27, 246, 22, 217); arity from bytecode"),
+    h(168, "Xb", InstrWidth::Variable, &[77, 27, 246, 217], "call_apply",
+        "call/apply state machine (js 77.07, 27, 246.12, 217.37)"),
+    h(161, "Xr", InstrWidth::Variable, &[77, 27, 246, 217], "call_apply",
+        "call/apply state machine (js 77, 27, 246.93, 217.37); 2-arg apply path"),
+    h(119, "Xd", InstrWidth::Variable, &[47, 191, 129, 194], "call_apply",
+        "N-arg call (js 47.63, 191, 129, 194/194.71/194.33); switch on arity"),
+    h(165, "XA", InstrWidth::Variable, &[90, 154, 36], "call_apply",
+        "LEB index into this.m[].o then N-arg call (js 90, 154.7, 36.98/36.17)"),
+    h(126, "XW", InstrWidth::Variable, &[176, 104], "call_apply",
+        "LEB then this.m[].o call (js 176.88, 104.03)"),
+    h(181, "Xh", InstrWidth::Variable, &[19, 30], "call_apply",
+        "2-arg call (js 19, 30) via state machine"),
+    h(176, "XE", InstrWidth::Variable, &[44, 10, 206, 25, 37], "named_call",
+        "dst^44 name-idx^10 then LEB string (charset ^206.24) then arity ^25.01 args ^37"),
+    h(98, "XV", InstrWidth::Variable, &[51, 17, 141, 56], "named_call",
+        "like XE via this.m[].o (js 51, 17.26, 141, 56.48/56.04)"),
+    h(GG_OPCODE, "gG", InstrWidth::Fixed(4), &[221, 41, 180], "property_set",
+        "3-imm (js 221, 41, 180.99); obj[key] = src. Later HTML: ge."),
+    h(GE_OPCODE, "ge", InstrWidth::Fixed(5), &[41, 221, 180, 19], "property_set",
+        "4-imm property set dest[key]=src (js 41.43, 221, 180, 19). Later HTML: gN."),
+    h(138, "gN", InstrWidth::Fixed(5), &[41, 221, 180, 19], "property_set",
+        "4-imm property set obj[key]=src (js 41, 221, 180.64, 19); sibling of ge"),
+    h(226, "gC", InstrWidth::Variable, &[42, 182, 1], "string_key_set",
+        "2-imm (42, 182) then LEB string (charset ^1); obj[str]=src"),
+    h(132, "gy", InstrWidth::Fixed(4), &[99, 216, 38], "property_get",
+        "3-imm property get dst=obj[key] (js 99.04, 216.44, 38); early-b p analogue"),
+    h(GY_OPCODE, "gY", InstrWidth::Fixed(5), &[117, 221, 231, 177], "nested_property_get",
+        "4-imm nested property get dst = obj[k1][k2] (js 177.81). Later HTML: gZ."),
+    h(183, "gZ", InstrWidth::Fixed(6), &[208, 108, 168, 12, 192], "dual_property_get",
+        "5-imm (js 208.82, 108, 168, 12, 192); two gets from the same object"),
+    h(140, "gl", InstrWidth::Variable, &[43, 69, 118], "string_key_get",
+        "LEB string (charset ^43) then extras 69, 118; dst = obj[str]"),
 ];
 
 pub fn layout_for(opcode: u8) -> Option<&'static HandlerLayout> {
@@ -350,7 +329,9 @@ pub fn classify_pc_delta_late(opcode: u8, width: i32) -> WidthObservation {
 mod tests {
     use super::*;
     use crate::solver::run_program::{RUN_PROGRAM_MAGIC_BYTES_B, RUN_PROGRAM_MAGIC_BYTES_B_LATE};
-    use crate::solver::run_program_vm::{FETCH_BRANCH_B, FETCH_BRANCH_B_LATE, OPCODE_TABLE_B_LATE, next_key};
+    use crate::solver::run_program_vm::{
+        FETCH_BRANCH_B, FETCH_BRANCH_B_LATE, OPCODE_TABLE_B_LATE, OpcodeKind, next_key,
+    };
 
     #[test]
     fn js_float_xor_truncates_like_to_int32() {
@@ -495,6 +476,31 @@ mod tests {
         assert_eq!(classify_pc_delta_late(52, 3).matches_fixed, Some(true));
         assert_eq!(classify_pc_delta_late(130, 3).matches_fixed, Some(true));
         assert_eq!(classify_pc_delta_late(169, 5).matches_fixed, Some(true));
+        assert_eq!(layout_for_late(45).unwrap().family, "throw_register");
+        assert_eq!(layout_for_late(132).unwrap().family, "property_get");
+        assert_eq!(layout_for_late(30).unwrap().family, "register_swap");
+        assert_eq!(layout_for_late(187).unwrap().family, "jump_u24");
+        assert_eq!(classify_pc_delta_late(187, 4).matches_fixed, None);
+        assert_eq!(classify_pc_delta_late(30, 3).matches_fixed, Some(true));
+        assert_eq!(classify_pc_delta_late(132, 4).matches_fixed, Some(true));
+        assert_eq!(classify_pc_delta_late(138, 5).matches_fixed, Some(true));
+        assert_eq!(classify_pc_delta_late(183, 6).matches_fixed, Some(true));
+    }
+
+    #[test]
+    fn late_direct_handlers_are_catalogued() {
+        assert_eq!(HANDLER_LAYOUT_B_LATE.len(), LATE_DIRECT_HANDLER_COUNT);
+        let mut seen = std::collections::BTreeSet::new();
+        for def in OPCODE_TABLE_B_LATE {
+            if def.kind != OpcodeKind::Direct {
+                continue;
+            }
+            let h = layout_for_late(def.opcode).unwrap_or_else(|| panic!("{}", def.handler));
+            assert_eq!(h.handler, def.handler, "opcode {}", def.opcode);
+            assert!(!h.family.is_empty(), "{}", def.handler);
+            assert!(seen.insert(def.opcode), "duplicate {}", def.opcode);
+        }
+        assert_eq!(seen.len(), LATE_DIRECT_HANDLER_COUNT);
     }
 
     #[test]
@@ -509,6 +515,18 @@ mod tests {
         const XZ: &str = "^132.63,A[Xs]=Xw,Xm[XQ][`o`]=A[Xt^W]";
         const XG: &str = "^112.87,XM^=W[d3(Ta.d)](W[d3(Ta.W)](Xs[Xw++]-253,256),255)^19,h[Xm]=Xw,h[Xu^Xt]=XM";
         const GE: &str = "^41.43,XM),Xo=W[bS(zv.Xm)](Xs^W[bS(zv.Xw)](W[bS(zv.h)](W[bS(zv.Xu)](Xm[Xu++],253),256),255),221)^XM,XM^=W[bS(zv.Xt)](W[bS(zv.XQ)](Xs,W[bS(zv.n)](3+Xm[Xu++],255)),180),Xs^=W[bS(zv.Xo)](W[bS(zv.XR)](W[bS(zv.XS)](W[bS(zv.Xu)](Xm[Xu++],253),256),255),19)";
+        const X1: &str = "^144^Xt],h[XM]=Xs,Xt}";
+        const X2: &str = "^131.21^Xt],h[XM]=Number";
+        const GX: &str = "^36.26,h[Xm]=Xw,Xm=h[Xt],h[Xt]=h[Xu],h[Xu]=Xm";
+        const GN: &str = "Xt[XQ][Xt[Xo]]=Xs}";
+        const GY_GET: &str = "Xt[Xo]=Xt[XQ][Xt[XM]]}";
+        const GZ: &str = "Xt[XM]=Xt[XR][Xt[XS]],Xt[Xo]=Xt[XR][Xt[XQ]]}";
+        const X5: &str = "^207.34,XM?";
+        const XJ: &str = "^16.51";
+        const XJ_NEW: &str = "new Xt(";
+        const GC: &str = ",42)^W";
+        const GL: &str = "^118,A[Xs]=Xm,A[W]=A[XQ][Xw]}";
+        const XJ_ALLOC: &str = "XY[`o`]=void 0";
         assert_eq!(js_xor_imm(123.64), 123);
         assert!(GQ.contains("^148^"));
         assert!(GG.contains(",41)") && GG.contains("^180.99"));
@@ -526,7 +544,10 @@ mod tests {
         let path = std::path::Path::new("artifacts/re-out/chrome-oracle/iframe-1.html");
         if path.is_file() {
             let html = std::fs::read_to_string(path).unwrap();
-            for snip in [GQ, GG, X3, GY, XF, X4, XZ, XG, GE] {
+            for snip in [
+                GQ, GG, X3, GY, XF, X4, XZ, XG, GE, X1, X2, GX, GN, GY_GET, GZ, X5, XJ, XJ_NEW, GC,
+                GL, XJ_ALLOC,
+            ] {
                 assert!(html.contains(snip), "iframe missing snippet {snip}");
             }
         }
@@ -561,7 +582,14 @@ mod tests {
                 .map(|x| x.as_u64().unwrap() as u8)
                 .collect();
             assert_eq!(got, h.extra_xors, "{}", h.handler);
+            if let Some(fam) = row.get("family").and_then(|x| x.as_str()) {
+                assert_eq!(fam, h.family, "{}", h.handler);
+            }
         }
+        assert_eq!(
+            extras.as_object().map(|m| m.len() - usize::from(extras.get("note").is_some())),
+            Some(LATE_DIRECT_HANDLER_COUNT)
+        );
         assert_eq!(
             late["foFollowUp"]["plaintextKind"].as_str(),
             Some("compressed_blob_after_runProgram")

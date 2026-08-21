@@ -15,8 +15,9 @@ use anyhow::{Context, Result, bail};
 use cf::reverse::encryption::decrypt_cloudflare_response;
 use cf::solver::run_program::unpack_packed_run_program;
 use cf::solver::run_program_ops::{
-    DN_OPCODE, DN_TAG_STRING, HANDLER_LAYOUT_B_LATE, XF_TAG_STRING, classify_pc_delta,
-    classify_pc_delta_late, first_dn_tag_b, first_xf_tag_late, operand_from_byte,
+    DN_OPCODE, DN_TAG_STRING, HANDLER_LAYOUT_B_LATE, LATE_DIRECT_HANDLER_COUNT, XF_TAG_STRING,
+    classify_pc_delta, classify_pc_delta_late, first_dn_tag_b, first_xf_tag_late,
+    operand_from_byte,
 };
 use cf::solver::run_program_vm::{
     FETCH_BRANCH_B, FETCH_LIVE, naive_one_byte_fetches, opcode_def_in, params_for_magic,
@@ -253,6 +254,21 @@ fn verify_oracle_file(path: &PathBuf) -> Result<Value> {
                             h.handler
                         ));
                     }
+                    if let Some(fam) = row.and_then(|r| r.get("family")).and_then(|x| x.as_str())
+                        && fam != h.family
+                    {
+                        errors.push(format!(
+                            "laterSameDay.operandExtras.{} family mismatch",
+                            h.handler
+                        ));
+                    }
+                }
+                if late.get("directHandlerCount").and_then(|x| x.as_u64())
+                    != Some(LATE_DIRECT_HANDLER_COUNT as u64)
+                {
+                    errors.push(format!(
+                        "laterSameDay.directHandlerCount should be {LATE_DIRECT_HANDLER_COUNT}"
+                    ));
                 }
             }
             if let Some(fu) = late.get("foFollowUp") {
