@@ -103,7 +103,8 @@ impl<'a> TurnstileTask<'a> {
         let (orchestrate_perf, orchestrate_js) = self
             .task_client
             .get_orchestrate(&challenge_data.zone, &challenge_data.c_ray)
-            .await?;
+            .await
+            .with_context(|| challenge_data.missing_orchestrate_hint())?;
 
         self.performance.add_entry(orchestrate_perf);
         

@@ -29,10 +29,35 @@ may not fully work end-to-end against live Cloudflare.
 - Build: `cargo build --locked`
 - Lint: `cargo clippy --locked --all-targets`  (currently emits warnings only, no errors)
 - Test: `cargo test --locked`
-- Run the app: `cargo run --locked --bin solve_test`
+- Probe live iframe protocol (no fingerprint): `cargo run --locked --bin probe_iframe`
+- Run the solver against the SolveGate demo: `cargo run --locked --bin solve_test`
+
+### Live Turnstile protocol (as of 2026-08)
+
+Public `api.js` redirects to `/turnstile/v0/{branch}/{version}/api.js` (currently `g` /
+`aae2b9a1c261`). The widget iframe is:
+
+```
+https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/{branch}/turnstile/f/av0/rch/{widget}/{sitekey}/{theme}/{fbE|fbD}/new/normal?lang={lang}
+```
+
+The old crate URL (`/h/b/turnstile/if/ov2/av0/rcv/.../{lang}/`, version `8359bcf47b68`) 404s.
+
+`window._cf_chl_opt` still exists, but keys are randomized per challenge and the object ends in a
+`postMessage` function — parse by value (sitekey, 16-hex ray, `chl_api_*`, `widgetId` / `nextRcV`
+inside the function), not by `cType` / `cRay` names, and brace-match instead of truncating on the
+first `};`.
+
+There is no `/orchestrate/chl_api/v1`. The iframe bootstrap loads an encoded `/fo/{session}/{ray}/{ch}`
+blob into a Worker (`eval` under a trustedTypes policy). That blob is not the VM this crate
+disassembles. `probe_iframe` should get iframe HTTP 200 + parsed options, then an honest failure
+on orchestrate / `/fo/`. Do not treat decoding `/fo/` into a working solver as in-scope for a
+protocol-probe change.
+
+Default demo: `https://solvegate.io/demo/invisible` (sitekey `0x4AAAAAAER49t0sMxTcief0`).
 
 ### Running the `solve_test` binary
 - `TurnstileSolver::new()` reads a private fingerprint dataset from `./workspace/cloudflare_test.json`
   (relative to the current dir). That file is gitignored (`/workspace` in `.gitignore`, i.e. the
-  `workspace/` subdirectory) and is **not** included in the repo, so the binary panics with
-  `NotFound` until that dataset is supplied. Building, linting, and testing do not need it.
+  `workspace/` subdirectory) and is **not** included in the repo, so the binary panics until that
+  dataset is supplied. Building, linting, `probe_iframe`, and unit tests do not need it.

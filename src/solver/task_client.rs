@@ -1,17 +1,20 @@
 use crate::reverse::encryption::decrypt_cloudflare_response;
+use crate::solver::VersionInfo;
 use crate::solver::challenge::CloudflareChallengeOptions;
 use crate::solver::performance::{PerformanceEntry, PerformanceResourceEntry};
+use crate::solver::protocol::{
+    PUBLIC_API_JS, generate_widget_id, looks_like_javascript, orchestrate_url,
+    parse_turnstile_api_js_url, turnstile_iframe_url,
+};
 use crate::solver::timezone::get_timezone;
 use crate::solver::user_fingerprint::Headers;
 use crate::solver::utils::imprecise_performance_now_value;
-use crate::solver::VersionInfo;
-use anyhow::{bail};
-use rand::Rng;
+use anyhow::{Context, bail};
 use rquest::header::{HeaderMap, HeaderName, HeaderValue};
 use rquest::{Client, EmulationProviderFactory, Version};
 use rquest_util::Emulation::Chrome136;
 use rquest_util::EmulationOS::Windows;
-use rquest_util::{EmulationOption};
+use rquest_util::EmulationOption;
 use std::io::Read;
 use std::time::{Duration, Instant};
 use url::Url;
@@ -25,10 +28,7 @@ pub struct TaskClient {
 }
 
 impl TaskClient {
-    pub(crate) fn new(
-        referrer: String,
-        headers: Headers,
-    ) -> Result<TaskClient, anyhow::Error> {
+    pub(crate) fn new(referrer: String, headers: Headers) -> Result<TaskClient, anyhow::Error> {
         let emulation = EmulationOption::builder()
             .emulation(Chrome136)
             .emulation_os(Windows)
@@ -38,17 +38,38 @@ impl TaskClient {
         Ok(Self {
             host: get_referrer_host(referrer.as_str())?,
             client,
-            branch: "b".to_string(),
+            branch: "g".to_string(),
             solve_url: None,
         })
     }
 
     pub(crate) async fn get_api(&mut self) -> Result<VersionInfo, anyhow::Error> {
-        self.branch = "b".to_string();
-        Ok(VersionInfo {
-            branch: "b".to_string(),
-            version: "8359bcf47b68".to_string(),
-        })
+        let response = self
+            .client
+            .get(PUBLIC_API_JS)
+            .header("Accept", "*/*")
+            .header("Sec-Fetch-Site", "cross-site")
+            .header("Sec-Fetch-Mode", "no-cors")
+            .header("Sec-Fetch-Dest", "script")
+            .header("Referer", &self.host)
+            .send()
+            .await
+            .context("fetch turnstile api.js")?;
+
+        if response.status() != 200 {
+            bail!(
+                "turnstile api.js returned HTTP {} for {}",
+                response.status(),
+                PUBLIC_API_JS
+            );
+        }
+
+        let final_url = response.url().to_string();
+        let info = parse_turnstile_api_js_url(&final_url).with_context(|| {
+            format!("redirected api.js url was not branch/versioned: {final_url}")
+        })?;
+        self.branch = info.branch.clone();
+        Ok(info)
     }
 
     pub(crate) async fn get_random_image(
@@ -119,7 +140,7 @@ impl TaskClient {
         site_key: &str,
     ) -> Result<(String, String, CloudflareChallengeOptions), anyhow::Error> {
         self.set_get_html_headers_order();
-        let solve_url = generate_solve_url(self.branch.as_str(), site_key);
+        let solve_url = turnstile_iframe_url(self.branch.as_str(), site_key, &generate_widget_id());
 
         let response = self
             .client
@@ -134,6 +155,7 @@ impl TaskClient {
             .send()
             .await?;
 
+        let status = response.status();
         let content_encoding = response
             .headers()
             .get("Content-Encoding")
@@ -145,7 +167,19 @@ impl TaskClient {
         let decompressed = decompress_body(bytes.as_ref(), &content_encoding).unwrap();
         let text = String::from_utf8(decompressed)?;
 
+        if status != 200 {
+            bail!(
+                "turnstile iframe returned HTTP {} for {} ({} bytes)",
+                status,
+                solve_url,
+                text.len()
+            );
+        }
+
         let challenge = CloudflareChallengeOptions::from_html(text.as_str())?;
+        if !challenge.branch.is_empty() {
+            self.branch = challenge.branch.clone();
+        }
         self.solve_url = Some(solve_url.clone());
 
         Ok((solve_url, text, challenge))
@@ -159,10 +193,7 @@ impl TaskClient {
         self.set_get_headers_order();
         let t = Instant::now();
 
-        let url = format!(
-            "https://{}/cdn-cgi/challenge-platform/h/{}/orchestrate/chl_api/v1?ray={}&lang=auto",
-            zone, self.branch, c_ray
-        );
+        let url = orchestrate_url(zone, self.branch.as_str(), c_ray);
 
         let response = self
             .client
@@ -177,6 +208,7 @@ impl TaskClient {
             .send()
             .await?;
 
+        let status = response.status();
         let content_encoding = response
             .headers()
             .get("Content-Encoding")
@@ -186,7 +218,24 @@ impl TaskClient {
             .to_string();
         let bytes = response.bytes().await?;
         let decompressed = decompress_body(bytes.as_ref(), &content_encoding).unwrap();
-        let text = String::from_utf8(decompressed)?;
+        let text = String::from_utf8_lossy(&decompressed).into_owned();
+
+        if status != 200 {
+            bail!(
+                "orchestrate returned HTTP {} for {} ({} bytes)",
+                status,
+                url,
+                text.len()
+            );
+        }
+        if !looks_like_javascript(&text) {
+            bail!(
+                "orchestrate body is not JavaScript (HTTP {}, {} bytes) for {}",
+                status,
+                text.len(),
+                url
+            );
+        }
         Ok((
             PerformanceEntry::Resource(PerformanceResourceEntry {
                 r#type: "r".to_string(),
@@ -509,37 +558,6 @@ impl TaskClient {
 fn get_referrer_host(referrer: &str) -> Result<String, anyhow::Error> {
     let parsed = Url::parse(referrer)?;
     Ok(parsed.origin().ascii_serialization() + "/")
-}
-
-const ENABLE_FEEDBACK: bool = true;
-const THEME: &str = "auto";
-const LANGUAGE: &str = "auto";
-
-fn generate_solve_url(branch: &str, site_key: &str) -> String {
-    let feedback_param = if ENABLE_FEEDBACK { "fbE" } else { "fbD" };
-
-    format!(
-        "https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/{}/turnstile/if/ov2/av0/rcv/{}/{}/{}/{}/new/normal/{}/",
-        branch,
-        generate_widget_id(),
-        site_key,
-        THEME,
-        feedback_param,
-        LANGUAGE,
-    )
-}
-
-fn generate_widget_id() -> String {
-    let chars: Vec<char> = "abcdefghijklmnopqrstuvwxyz0123456789".chars().collect();
-    let mut rng = rand::rng();
-    let mut r = String::new();
-
-    for _ in 0..5 {
-        let idx = rng.random_range(0..chars.len());
-        r.push(chars[idx]);
-    }
-
-    r
 }
 
 fn build_client<P>(
