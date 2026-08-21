@@ -57,12 +57,12 @@ impl CloudflareChallengeOptions {
     pub fn missing_orchestrate_hint(&self) -> String {
         if self.fo_session.is_empty() {
             format!(
-                "orchestrate/chl_api JS is gone; iframe challenge type is {} (ray {}, branch {})",
+                "orchestrate/chl_api is not the VM this crate disassembles (type {}, ray {}, branch {})",
                 self.c_type, self.c_ray, self.branch
             )
         } else {
             format!(
-                "orchestrate/chl_api JS is gone; iframe loads encoded /fo/{}/ (ray {}, branch {}, type {}). That blob is not the VM this crate disassembles.",
+                "orchestrate/chl_api is not the VM this crate disassembles; iframe loads encoded /fo/{}/ (ray {}, branch {}, type {})",
                 self.fo_session, self.c_ray, self.branch, self.c_type
             )
         }

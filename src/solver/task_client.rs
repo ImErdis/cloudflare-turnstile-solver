@@ -3,8 +3,8 @@ use crate::solver::VersionInfo;
 use crate::solver::challenge::CloudflareChallengeOptions;
 use crate::solver::performance::{PerformanceEntry, PerformanceResourceEntry};
 use crate::solver::protocol::{
-    PUBLIC_API_JS, generate_widget_id, looks_like_javascript, orchestrate_url,
-    parse_turnstile_api_js_url, turnstile_iframe_url,
+    PUBLIC_API_JS, generate_widget_id, looks_like_orchestrate_vm, orchestrate_url,
+    parse_turnstile_api_js_response, turnstile_iframe_url,
 };
 use crate::solver::timezone::get_timezone;
 use crate::solver::user_fingerprint::Headers;
@@ -52,11 +52,12 @@ impl TaskClient {
             .header("Sec-Fetch-Mode", "no-cors")
             .header("Sec-Fetch-Dest", "script")
             .header("Referer", &self.host)
+            .redirect(rquest::redirect::Policy::limited(10))
             .send()
             .await
             .context("fetch turnstile api.js")?;
 
-        if response.status() != 200 {
+        if !response.status().is_success() && !response.status().is_redirection() {
             bail!(
                 "turnstile api.js returned HTTP {} for {}",
                 response.status(),
@@ -64,10 +65,15 @@ impl TaskClient {
             );
         }
 
+        let location = response
+            .headers()
+            .get("location")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
         let final_url = response.url().to_string();
-        let info = parse_turnstile_api_js_url(&final_url).with_context(|| {
-            format!("redirected api.js url was not branch/versioned: {final_url}")
-        })?;
+        let info = parse_turnstile_api_js_response(&final_url, location.as_deref()).with_context(
+            || format!("redirected api.js url was not branch/versioned: {final_url}"),
+        )?;
         self.branch = info.branch.clone();
         Ok(info)
     }
@@ -75,11 +81,11 @@ impl TaskClient {
     pub(crate) async fn get_random_image(
         &mut self,
         zone: &str,
-    ) -> Result<PerformanceEntry, anyhow::Error> {
+    ) -> Result<Option<PerformanceEntry>, anyhow::Error> {
         self.set_get_headers_order();
         let url = format!(
             "https://{}/cdn-cgi/challenge-platform/h/{}/cmg/1",
-            zone, &self.branch
+            zone, self.branch
         );
 
         let response = self
@@ -97,6 +103,11 @@ impl TaskClient {
             .send()
             .await?;
 
+        // Live Turnstile serves challenge images at /ci/{ray}/..., not /cmg/1.
+        if response.status() == 404 {
+            return Ok(None);
+        }
+
         if response.status() != 200 {
             bail!(
                 "received invalid status code when getting random image: {}",
@@ -104,7 +115,7 @@ impl TaskClient {
             );
         }
 
-        Ok(PerformanceEntry::Resource(PerformanceResourceEntry {
+        Ok(Some(PerformanceEntry::Resource(PerformanceResourceEntry {
             r#type: "r".to_string(),
             time_taken: imprecise_performance_now_value(510.0),
             initiator_type: "link".to_string(),
@@ -112,7 +123,7 @@ impl TaskClient {
             next_hop_protocol: "h2".to_string(),
             transfer_size: 386,
             encoded_body_size: 61,
-        }))
+        })))
     }
 
     pub(crate) async fn get_timezone(&mut self) -> Result<String, anyhow::Error> {
@@ -228,9 +239,9 @@ impl TaskClient {
                 text.len()
             );
         }
-        if !looks_like_javascript(&text) {
+        if !looks_like_orchestrate_vm(&text) {
             bail!(
-                "orchestrate body is not JavaScript (HTTP {}, {} bytes) for {}",
+                "orchestrate URL returned HTTP {} ({} bytes) but not the VM this crate disassembles (missing \"lang\":) for {}",
                 status,
                 text.len(),
                 url
@@ -592,6 +603,7 @@ where
         .brotli(false)
         .deflate(false)
         .zstd(false)
+        .cookie_store(true)
         .timeout(Duration::from_secs(15))
         .pool_idle_timeout(Some(Duration::from_millis(30000)))
         .default_headers(header_map);

@@ -1,5 +1,5 @@
 use crate::solver::VersionInfo;
-use anyhow::{anyhow, bail};
+use anyhow::{anyhow, bail, Context};
 use rand::Rng;
 use regex::Regex;
 
@@ -66,6 +66,28 @@ pub fn parse_turnstile_api_js_url(url: &str) -> Result<VersionInfo, anyhow::Erro
     })
 }
 
+/// Resolve public `api.js` version from the final URL and/or a 302 Location.
+pub fn parse_turnstile_api_js_response(
+    url: &str,
+    location: Option<&str>,
+) -> Result<VersionInfo, anyhow::Error> {
+    if let Ok(info) = parse_turnstile_api_js_url(url) {
+        return Ok(info);
+    }
+    let Some(loc) = location.filter(|s| !s.is_empty()) else {
+        bail!("turnstile api.js was not redirected to a versioned URL: {url}");
+    };
+    let absolute = if loc.starts_with("https://") || loc.starts_with("http://") {
+        loc.to_string()
+    } else if loc.starts_with('/') {
+        format!("https://challenges.cloudflare.com{loc}")
+    } else {
+        format!("https://challenges.cloudflare.com/turnstile/v0/{loc}")
+    };
+    parse_turnstile_api_js_url(&absolute)
+        .with_context(|| format!("could not parse api.js Location {loc:?} from {url}"))
+}
+
 pub fn extract_fo_session(html: &str) -> Option<String> {
     let re = Regex::new(r"/fo/([0-9]+:[0-9]+:[A-Za-z0-9_.-]+)").ok()?;
     re.captures(html)
@@ -85,6 +107,13 @@ pub fn looks_like_javascript(body: &str) -> bool {
         return false;
     }
     t.contains("function") || t.contains("=>") || t.contains("window.")
+}
+
+/// The VM this crate disassembles embeds `"lang":"..."` in orchestrate JS.
+/// Current Turnstile still has an `/orchestrate/chl_api/v1` URL, but the body is
+/// bootstrap JS that writes randomized `_cf_chl_opt` fields — not that VM.
+pub fn looks_like_orchestrate_vm(body: &str) -> bool {
+    looks_like_javascript(body) && body.contains("\"lang\":\"")
 }
 
 pub fn orchestrate_url(zone: &str, branch: &str, c_ray: &str) -> String {
@@ -140,5 +169,24 @@ mod tests {
     fn html_is_not_javascript() {
         assert!(!looks_like_javascript("<!DOCTYPE html><html>"));
         assert!(looks_like_javascript("function hello(){}"));
+    }
+
+    #[test]
+    fn parse_api_js_from_relative_location() {
+        let info = parse_turnstile_api_js_response(
+            "https://challenges.cloudflare.com/turnstile/v0/api.js",
+            Some("/turnstile/v0/g/aae2b9a1c261/api.js"),
+        )
+        .unwrap();
+        assert_eq!(info.branch, "g");
+        assert_eq!(info.version, "aae2b9a1c261");
+    }
+
+    #[test]
+    fn current_orchestrate_bootstrap_is_not_the_vm() {
+        let body = r#"window._cf_chl_opt.ZnPJH0="challenges.cloudflare.com";window._cf_chl_opt.RayZr1={};"#;
+        assert!(looks_like_javascript(body));
+        assert!(!looks_like_orchestrate_vm(body));
+        assert!(looks_like_orchestrate_vm(r#"window.x={"lang":"auto"};"#));
     }
 }

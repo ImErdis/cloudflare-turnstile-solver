@@ -94,11 +94,13 @@ impl<'a> TurnstileTask<'a> {
         self.query_selector_calls
             .extend(repeat_n("window.frameElement".to_string(), 3));
 
-        self.performance.add_entry(
-            self.task_client
-                .get_random_image(&challenge_data.zone)
-                .await?,
-        );
+        if let Some(entry) = self
+            .task_client
+            .get_random_image(&challenge_data.zone)
+            .await?
+        {
+            self.performance.add_entry(entry);
+        }
 
         let (orchestrate_perf, orchestrate_js) = self
             .task_client

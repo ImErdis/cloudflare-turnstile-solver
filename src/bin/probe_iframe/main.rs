@@ -15,7 +15,8 @@ use anyhow::{Context, Result};
 use cf::solver::challenge::CloudflareChallengeOptions;
 use cf::solver::protocol::{
     DEMO_HREF, DEMO_SITE_KEY, PUBLIC_API_JS, extract_fo_session, fo_blob_url, generate_widget_id,
-    looks_like_javascript, orchestrate_url, parse_turnstile_api_js_url, turnstile_iframe_url,
+    looks_like_javascript, looks_like_orchestrate_vm, orchestrate_url,
+    parse_turnstile_api_js_response, turnstile_iframe_url,
 };
 use rquest::Client;
 use serde_json::{Value, json};
@@ -49,6 +50,8 @@ async fn run() -> Result<Value> {
 
     let client = Client::builder()
         .timeout(Duration::from_secs(20))
+        .cookie_store(true)
+        .redirect(rquest::redirect::Policy::limited(10))
         .build()
         .context("build http client")?;
 
@@ -61,8 +64,13 @@ async fn run() -> Result<Value> {
         .context("fetch api.js")?;
     let api_status = api.status().as_u16();
     let api_url = api.url().to_string();
+    let api_location = api
+        .headers()
+        .get("location")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
     let api_bytes = api.bytes().await.context("api.js body")?.len();
-    let version = parse_turnstile_api_js_url(&api_url).ok();
+    let version = parse_turnstile_api_js_response(&api_url, api_location.as_deref()).ok();
 
     let branch = version
         .as_ref()
@@ -113,6 +121,7 @@ async fn run() -> Result<Value> {
                     "status": status,
                     "bytes": body.len(),
                     "looks_like_js": looks_like_javascript(&body),
+                    "looks_like_vm": looks_like_orchestrate_vm(&body),
                     "prefix": body.chars().take(80).collect::<String>(),
                 });
             }

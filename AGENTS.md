@@ -48,11 +48,13 @@ The old crate URL (`/h/b/turnstile/if/ov2/av0/rcv/.../{lang}/`, version `8359bcf
 inside the function), not by `cType` / `cRay` names, and brace-match instead of truncating on the
 first `};`.
 
-There is no `/orchestrate/chl_api/v1`. The iframe bootstrap loads an encoded `/fo/{session}/{ray}/{ch}`
-blob into a Worker (`eval` under a trustedTypes policy). That blob is not the VM this crate
-disassembles. `probe_iframe` should get iframe HTTP 200 + parsed options, then an honest failure
-on orchestrate / `/fo/`. Do not treat decoding `/fo/` into a working solver as in-scope for a
-protocol-probe change.
+There is still an `/orchestrate/chl_api/v1` URL, but the body is bootstrap JS that writes
+randomized `_cf_chl_opt` fields — not the VM this crate disassembles (no `"lang":"` payload).
+The iframe bootstrap loads an encoded `/fo/{session}/{ray}/{ch}` blob into a Worker (`eval`
+under a trustedTypes policy). `probe_iframe` should get iframe HTTP 200 + parsed options, then an honest failure:
+orchestrate is not the VM, `/fo/` is the live worker payload. `/cmg/1` 404s (images moved to
+`/ci/{ray}/...`) and is skipped so the client reaches that orchestrate/`/fo/` break. Do not treat
+decoding `/fo/` into a working solver as in-scope for a protocol-probe change.
 
 Default demo: `https://solvegate.io/demo/invisible` (sitekey `0x4AAAAAAER49t0sMxTcief0`).
 
