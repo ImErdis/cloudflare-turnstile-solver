@@ -756,6 +756,15 @@ mod tests {
             let op = late["firstMappedOpcode"].as_u64().unwrap() as u8;
             let byte = late["fetches"][0]["byte"].as_u64().unwrap() as u8;
             verify_oracle_tuple(p, 0, p.init_key, byte, op).unwrap();
+            if let Some(bp) = late.get("chromeBreakpointFirst") {
+                let bop = bp["op"].as_u64().unwrap() as u8;
+                let mix = bp["mix"].as_u64().unwrap() as u32;
+                let bkey = bp["key"].as_u64().unwrap() as u8;
+                assert_eq!(bop, 222);
+                assert_eq!(bkey, p.init_key);
+                assert_eq!(mix, u32::from(bkey) + u32::from(bop));
+                assert_eq!(next_key(p, bkey, bop), 197);
+            }
         }
     }
 }

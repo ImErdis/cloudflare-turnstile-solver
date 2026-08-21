@@ -70,7 +70,15 @@
       "op": 222,
       "mix": 266,
       "key": 44,
-      "note": "headed Chrome Debugger pause at 56907; mix 266 = 44+222. Next mix 419 = 197+222."
+      "note": "headed Chrome Debugger pause at 56907 after pc+=1 (observed pc 1). mix 266 = 44+222. Next mix 419 = 197+222."
+    },
+    "chromeStableWidths": {
+      "note": "PC deltas from the 56907 breakpoint. Huge/negative values are jumps. Pause is after pc+=1 so widths are still instruction sizes.",
+      "gq_246": 3,
+      "gG_227": 4,
+      "X3_104": 2,
+      "gY_72": 5,
+      "Xf_222": "variable tagged load"
     },
     "foUnchanged": {
       "postsPerChallenge": 2,

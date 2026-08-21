@@ -104,13 +104,19 @@ immediately. Chrome PC-delta inject must match the **current** key-update
 spelling (`36163)+38392&255` or `mix*mix,56907`) and harvest `{pc,op}` **while
 the OOPIF lives** (iframes close before end-of-run `frame.evaluate`).
 
+Headed Chrome Debugger pause at `56907` sees opcode `222` and mix `266`
+(`44+222`); the next mix is `419` (`197+222`). `Fetch.fulfillRequest` rewrite
+is ignored by the OOPIF; the breakpoint on the executed script is the oracle.
+Minified local names rotate; the oracle classifies the varying 0–255 local as
+opcode. Pause is after `pc+=1`, so the first observed pc is 1; deltas are still
+instruction widths (`Xf` variable, `gq`/246 width 3, `gG`/227 width 4).
+
 Headed Chrome oracle: `cd scripts && npm install && DISPLAY=:1 node chrome_oracle.mjs`.
-It logs `/fo/` extraInfo headers and `{pc,op,key,byte}` fetches. Chrome POSTs
-twice to the same `/fo/` URL (init ~4k → packed program; follow-up ~90k);
-`Content-Type: text/plain;charset=UTF-8` is XHR's default; `cf-chl-ra` is `0` on
-the first attempt; `priority: u=1, i`. That **header shape did not rotate**
-with the 56907 fetch. Crate POST header names and probe priority match. Live
-`/fo/` still 400s without `wZ(...)`.
+Chrome POSTs twice to the same `/fo/` URL (init ~4k → packed program; follow-up
+~90k); `Content-Type: text/plain;charset=UTF-8` is XHR's default; `cf-chl-ra`
+is `0` on the first attempt; `priority: u=1, i`. That **header shape did not
+rotate** with the 56907 fetch. Crate POST header names and probe priority
+match. Live `/fo/` still 400s without `wZ(...)`.
 
 `probe_iframe` / `solve_test` should get iframe HTTP 200 + parsed options, then an honest
 failure: orchestrate is not the VM, live `/fo/` without the init body 400s. `/cmg/1` 404s
