@@ -35,7 +35,7 @@ impl FoBlobAnalysis {
             )
         } else if self.looks_like_json_error {
             format!(
-                "/fo/ returned JSON error (d_len={:?}); iframe POSTs a compressed init payload with cf-chl, GET without that body 400s",
+                "/fo/ returned JSON error (d_len={:?}); iframe POSTs a compressed init payload (f4) with cf-chl, GET without that body 400s",
                 self.json_error_d_len
             )
         } else if self.decrypt_ok {

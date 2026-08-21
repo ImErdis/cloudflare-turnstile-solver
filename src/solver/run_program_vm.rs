@@ -3,7 +3,7 @@
 //! Fetch constants and switch IDs **rotate with the iframe build**, including
 //! mid-day. Headed Chrome is the oracle: dump the iframe HTML and `/fo/`
 //! extraInfo headers. This module does **not** execute handlers, reconstruct
-//! `wZ(...)`, or produce a token.
+//! a live `/fo/` body, or produce a token.
 //!
 //! Linear builds (`g`, early `b`):
 //! ```text
@@ -24,7 +24,7 @@
 
 use serde::Serialize;
 
-/// Honest remaining work after fetch + operand layout: the compressed `/fo/` body.
+/// Honest remaining work after fetch, operands, and the `f4` wrapper: init JSON.
 pub const NEXT_GAP: &str = crate::solver::run_program_ops::NEXT_GAP;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

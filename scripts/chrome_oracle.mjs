@@ -6,8 +6,9 @@
  * the interpreter's opcode fetch (`* 36163 + 38392` live linear /
  * `mix*mix*56907+7914*mix+22357` later same-day / `* 19663 + 36376`
  * historical) inside the OOPIF iframe. Logs `{pc, op, key, byte}` so instruction
- * widths are PC deltas — not a 1-byte walk. Does **not** reconstruct wZ, dump
- * full POST bodies, execute handlers as a solver, or harvest a token.
+ * widths are PC deltas — not a 1-byte walk. Does **not** reconstruct a live
+ * `/fo/` body (f4 / historical wZ), dump full POST bodies, execute handlers as a
+ * solver, or harvest a token.
  *
  * Usage:
  *   DISPLAY=:1 node scripts/chrome_oracle.mjs [url] [out-dir]
@@ -325,6 +326,85 @@ function widthHistogram(deltas) {
   return m;
 }
 
+const CHARSET_BRANCH_B =
+  "eoUfnCPsq3FtDYIAyr5hGd18az9ju+HbL-m$KJ0S24BpMQZVlvTkx6gXciW7REONw";
+
+function uniqueAlphabet(s) {
+  return [...new Set(String(s || ""))]
+    .sort()
+    .join("");
+}
+
+function charsetIsWellFormed(s) {
+  if (!s || s.length !== 65) return false;
+  const set = new Set(s);
+  return (
+    set.size === 65 &&
+    s.includes("$") &&
+    s.includes("+") &&
+    s.includes("-") &&
+    !s.includes("/") &&
+    !s.includes("=")
+  );
+}
+
+function extractCompressorCharset(html) {
+  if (!html) return null;
+  const re = /[`'"]([A-Za-z0-9$+\-]{65})[`'"]/g;
+  let m;
+  while ((m = re.exec(html))) {
+    if (charsetIsWellFormed(m[1])) return m[1];
+  }
+  return null;
+}
+
+function charsInCharset(s, charset) {
+  if (!charset || !s) return false;
+  const set = new Set(charset);
+  return [...String(s)].every((c) => set.has(c));
+}
+
+function classifyBodyLen(len) {
+  if (len >= 3000 && len <= 5000) return "init";
+  if (len >= 70000 && len <= 100000) return "followUp";
+  return "other";
+}
+
+function foBodyShape(foNet, xhr, iframeHtml) {
+  const charset = extractCompressorCharset(iframeHtml || "");
+  const rows = [];
+  const seen = new Set();
+  for (const n of [...(foNet || []), ...(xhr || [])]) {
+    const prefix = String(n.bodyPrefix || "").slice(0, 24);
+    const len = n.bodyLen || 0;
+    if (!prefix && !len) continue;
+    const key = `${len}:${prefix}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    rows.push({
+      bodyLen: len,
+      bodyPrefix: prefix,
+      prefixInCharset: charset ? charsInCharset(prefix, charset) : null,
+      uniqueAlphabet: uniqueAlphabet(prefix),
+      band: classifyBodyLen(len),
+    });
+  }
+  return {
+    compressorLiveName: "f4",
+    compressorHistoricalName: "wZ",
+    charsetLen: charset ? charset.length : 0,
+    charsetUnique: charset ? new Set(charset).size : 0,
+    charsetHasDollar: charset ? charset.includes("$") : false,
+    charsetMatchesBranchB: charset === CHARSET_BRANCH_B,
+    prefixesInCharset:
+      charset && rows.length
+        ? rows.every((r) => r.prefixInCharset)
+        : null,
+    note: "N is once per iframe so paired POSTs share a 24-char RSA prefix. Do not dump full bodies or reconstruct plaintext JSON.",
+    rows,
+  };
+}
+
 function foPostPairs(foNet) {
   const byUrl = new Map();
   for (const n of foNet) {
@@ -371,6 +451,10 @@ function selfTestInject() {
   const d = injectOpcodeLog(happyQuad);
   const e = injectOpcodeLog(catchQuad);
   const f = injectOpcodeLog(happyMulSq);
+  const charsetHtml = `i=\`${CHARSET_BRANCH_B}\`,D=BigInt`;
+  const extracted = extractCompressorCharset(charsetHtml);
+  const prefixOk = charsInCharset("+6O6m5UJ8$PH0eF1Vh+4QucV", CHARSET_BRANCH_B);
+  const stdReject = !charsInCharset("====hello/", CHARSET_BRANCH_B);
   return {
     ok:
       a.injected &&
@@ -396,13 +480,19 @@ function selfTestInject() {
       c.replacements >= 2 &&
       d.replacements >= 3 &&
       e.replacements >= 3 &&
-      f.replacements >= 2,
+      f.replacements >= 2 &&
+      extracted === CHARSET_BRANCH_B &&
+      prefixOk &&
+      stdReject &&
+      classifyBodyLen(3735) === "init" &&
+      classifyBodyLen(86882) === "followUp",
     happyOld: { replacements: a.replacements, injected: a.injected },
     happyLive: { replacements: b.replacements, injected: b.injected },
     catchLive: { replacements: c.replacements, injected: c.injected },
     happyQuad: { replacements: d.replacements, injected: d.injected },
     catchQuad: { replacements: e.replacements, injected: e.injected },
     happyMulSq: { replacements: f.replacements, injected: f.injected },
+    charset: { extracted, prefixOk, stdReject },
   };
 }
 
@@ -837,6 +927,13 @@ function headerBag(rec) {
 
 const foHeaders = firstFo ? headerBag(firstFo) : {};
 const deltas = pcDeltas(ops);
+let iframeHtml = "";
+try {
+  iframeHtml = fs.readFileSync(path.join(outDir, "iframe-1.html"), "utf8");
+} catch {
+  iframeHtml = "";
+}
+const bodyShape = foBodyShape(foNet, xhr, iframeHtml);
 const summary = {
   url,
   headed,
@@ -853,6 +950,7 @@ const summary = {
     headers: headerBag(n),
   })),
   foPostPairs: foPostPairs(foNet),
+  foBodyShape: bodyShape,
   xhrHook: xhr,
   opcodeFetches: ops.slice(0, 128),
   pcDeltas: deltas.slice(0, 96),
@@ -905,6 +1003,12 @@ console.log(
       firstWidths: deltas.slice(0, 12),
       widthHistogram: summary.widthHistogram,
       foPostPairs: summary.foPostPairs,
+      foBodyShape: {
+        charsetLen: bodyShape.charsetLen,
+        prefixesInCharset: bodyShape.prefixesInCharset,
+        charsetMatchesBranchB: bodyShape.charsetMatchesBranchB,
+        rows: bodyShape.rows,
+      },
       headerCompare: summary.headerCompare,
       firstFo: foNet[0]
         ? {

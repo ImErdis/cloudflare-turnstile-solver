@@ -39,7 +39,7 @@
       "note": "first byte of TX5omy48… magic under live fetch; Chrome HTML has case 8"
     }
   ],
-  "note": "XHR setRequestHeader only cf-chl + cf-chl-ra. Content-Type is Chrome's default for xhr.send(string). Operands use post-fetch key: imm = next_key ^ wrapping_sub(byte, 37) ^ extra. First dN tag is 179 (string). Fetch constants and switch IDs rotate mid-day; laterSameDay is the 56907 quadratic snapshot. Re-run scripts/chrome_oracle.mjs.",
+  "note": "XHR setRequestHeader only cf-chl + cf-chl-ra. Content-Type is Chrome's default for xhr.send(string). Operands use post-fetch key: imm = next_key ^ wrapping_sub(byte, 37) ^ extra. First dN tag is 179 (string). Fetch constants and switch IDs rotate mid-day; laterSameDay is the 56907 quadratic snapshot. /fo/ wrapper is live f4 (historical wZ). Re-run scripts/chrome_oracle.mjs.",
   "laterSameDay": {
     "source": "headed Chrome oracle, same SolveGate demo, later 2026-08-21",
     "packedPrefix": "71GxwDchICYfNxik",
@@ -85,6 +85,27 @@
       "cfChlRa": "0",
       "priority": "u=1, i",
       "contentType": "text/plain;charset=UTF-8"
+    },
+    "foBody": {
+      "compressorLiveName": "f4",
+      "compressorHistoricalName": "wZ",
+      "n0BeforeRsa": 2,
+      "n0AfterRsa": 0,
+      "xteaKeyIndex": "pad*9+40",
+      "rsaExp": 65537,
+      "charset": "eoUfnCPsq3FtDYIAyr5hGd18az9ju+HbL-m$KJ0S24BpMQZVlvTkx6gXciW7REONw",
+      "prefixes": [
+        "GIgYSecMoIjsYqQYUIzNB6Eh",
+        "PaPO87+Ak$+AA4D6x2U0syqB",
+        "Fy6Ao6iukOi0Cib7ldoSMI04",
+        "PfBqPj7oouhzs5qq1S6kP41u",
+        "urVvAlNgLoSrQL7rs5MJRmo4",
+        "+6O6m5UJ8$PH0eF1Vh+4QucV"
+      ],
+      "initLens": [3724, 4172, 4183, 3735],
+      "followUpLens": [86882, 86636, 88108],
+      "pairSharesPrefix": true,
+      "note": "N is once per iframe so paired POSTs share the RSA prefix. Wrapper mapped; do not reconstruct plaintext JSON."
     }
   }
 }

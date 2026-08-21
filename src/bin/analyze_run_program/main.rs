@@ -1,6 +1,6 @@
 //! Static unpack / opcode-fetch of a packed `runProgram` blob.
 //!
-//! This does **not** run handlers, reconstruct `wZ`, or talk to Cloudflare
+//! This does **not** run handlers, reconstruct a live `/fo/` body, or talk to Cloudflare
 //! unless you pass a captured file. Pass a ray-decrypted packed string, a
 //! captured `/fo/` body plus `--ray`, and optionally `--decode N` for the
 //! 1-byte naive walk (diverges at the first mapped handler).
@@ -22,7 +22,12 @@ use cf::solver::run_program_vm::{
     FETCH_BRANCH_B, FETCH_LIVE, naive_one_byte_fetches, opcode_def_in, params_for_magic,
     params_from_oracle_fetch, verify_oracle_tuple,
 };
-use cf::{analyze_fo_body, analyze_packed_run_program, compare_chrome_and_crate_fo_post};
+use cf::solver::fo_body::{
+    CHARSET_BRANCH_B, body_chars_in_charset, charset_is_well_formed, classify_fo_body_len,
+};
+use cf::{
+    analyze_fo_body, analyze_packed_run_program, compare_chrome_and_crate_fo_post, LIVE_FO_WRAPPER,
+};
 use serde_json::{Value, json};
 use std::env;
 use std::fs;
@@ -244,6 +249,51 @@ fn verify_oracle_file(path: &PathBuf) -> Result<Value> {
     if first_op == Some(DN_OPCODE) || first_tag.is_some() {
         let _ = first_dn_tag_b(&[0x4d, 0x7e]);
     }
+    let fo_body = v
+        .pointer("/laterSameDay/foBody")
+        .or_else(|| v.get("foBody"))
+        .cloned();
+    let mut fo_prefix_ok = 0usize;
+    if let Some(fo) = &fo_body {
+        let charset = fo
+            .get("charset")
+            .and_then(|x| x.as_str())
+            .unwrap_or(CHARSET_BRANCH_B);
+        if !charset_is_well_formed(charset) {
+            errors.push("foBody.charset is not a 65-char custom alphabet".into());
+        }
+        if fo.get("compressorLiveName").and_then(|x| x.as_str()) != Some("f4") {
+            errors.push("foBody.compressorLiveName should be f4".into());
+        }
+        if let Some(prefs) = fo.get("prefixes").and_then(|x| x.as_array()) {
+            for (i, p) in prefs.iter().enumerate() {
+                let s = p.as_str().unwrap_or("");
+                if body_chars_in_charset(s, charset) {
+                    fo_prefix_ok += 1;
+                } else {
+                    errors.push(format!("foBody prefix {i} not in charset"));
+                }
+            }
+        }
+        if let Some(lens) = fo.get("initLens").and_then(|x| x.as_array()) {
+            for (i, n) in lens.iter().enumerate() {
+                let len = n.as_u64().unwrap_or(0) as usize;
+                if classify_fo_body_len(len) != cf::solver::fo_body::FoBodyLenBand::Init {
+                    errors.push(format!("foBody initLens[{i}]={len} not in init band"));
+                }
+            }
+        }
+        if let Some(lens) = fo.get("followUpLens").and_then(|x| x.as_array()) {
+            for (i, n) in lens.iter().enumerate() {
+                let len = n.as_u64().unwrap_or(0) as usize;
+                if classify_fo_body_len(len) != cf::solver::fo_body::FoBodyLenBand::FollowUp {
+                    errors.push(format!(
+                        "foBody followUpLens[{i}]={len} not in follow-up band"
+                    ));
+                }
+            }
+        }
+    }
     Ok(json!({
         "ok": errors.is_empty(),
         "path": path.display().to_string(),
@@ -254,6 +304,8 @@ fn verify_oracle_file(path: &PathBuf) -> Result<Value> {
         "first_dn_tag": first_tag,
         "errors": errors,
         "header_compare": compare_chrome_and_crate_fo_post(),
+        "fo_wrapper": LIVE_FO_WRAPPER,
+        "fo_prefix_ok": fo_prefix_ok,
         "first": fetches.first(),
     }))
 }

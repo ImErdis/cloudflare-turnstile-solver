@@ -129,7 +129,7 @@ pub fn analyze_packed_run_program(packed: &str) -> RunProgramAnalysis {
     } else if !magic_ok {
         "bytecode_magic_mismatch"
     } else {
-        // Fetch + operand layout are mapped; live /fo/ still needs the wZ body.
+        // Fetch + operand layout + f4 wrapper are mapped; live /fo/ still needs init JSON.
         crate::solver::run_program_vm::NEXT_GAP
     };
 

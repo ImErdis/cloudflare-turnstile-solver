@@ -1,17 +1,17 @@
 //! `/fo/` request shape: iframe XHR (headed Chrome oracle) vs this crate.
 //!
 //! The iframe does `xhr.open("POST", url)`, `setRequestHeader("cf-chl", ch)`,
-//! `setRequestHeader("cf-chl-ra", retryCounter)`, `send(wZ(init))`. It does
-//! **not** set Content-Type; Chrome's XHR default for a string body is
-//! `text/plain;charset=UTF-8`. `cf-chl-ra` is the retry counter (`0` on the
-//! first attempt).
+//! `setRequestHeader("cf-chl-ra", retryCounter)`, `send(f4(init))` (historical
+//! name `wZ`). It does **not** set Content-Type; Chrome's XHR default for a
+//! string body is `text/plain;charset=UTF-8`. `cf-chl-ra` is the retry counter
+//! (`0` on the first attempt).
 //!
 //! Chrome (2026-08-21) POSTs **twice** to the same `/fo/{session}/{ray}/{ch}`
 //! URL. First body ~4k (init) → ~846k packed `runProgram`; second body ~85–90k
 //! (follow-up) → ~2.4k. Both share `cf-chl` / `cf-chl-ra: 0` and the same
 //! compressed-body prefix. `priority` is `u=1, i`. Custom header names/values
-//! match this crate. The remaining live gap is the **body** (`wZ(...)`), not a
-//! missing `cf-chl` header.
+//! match this crate. The compressor wrapper is mapped in `fo_body`; the remaining
+//! live gap is the **plaintext JSON** (randomized keys), not a missing header.
 
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -128,7 +128,7 @@ pub fn compare_chrome_and_crate_fo_post() -> FoHeaderCompare {
     FoHeaderCompare {
         all_match,
         fields,
-        note: "crate matches Chrome XHR header names and priority u=1, i; Chrome POSTs twice to the same /fo/ URL (init ~4k then follow-up ~90k, same body prefix); live 400s without the wZ body",
+        note: "crate matches Chrome XHR header names and priority u=1, i; Chrome POSTs twice to the same /fo/ URL (init ~4k then follow-up ~90k, same body prefix); wrapper is f4, remaining gap is init JSON",
     }
 }
 

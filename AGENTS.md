@@ -55,8 +55,9 @@ There is still an `/orchestrate/chl_api/v1` URL, but the body is bootstrap JS th
 randomized `_cf_chl_opt` fields — not the VM this crate disassembles (no `"lang":"` payload).
 
 The iframe bootstrap then **XHR POSTs** `/fo/{session}/{ray}/{ch}` with headers `cf-chl` /
-`cf-chl-ra` (retry counter, `0` on the first attempt) and a compressed init body (`wZ(...)`).
-A GET or empty POST is expected to 400 with JSON `{"d":"..."}`. A successful POST body is
+`cf-chl-ra` (retry counter, `0` on the first attempt) and a compressed init body
+(live compressor `f4`, historical name `wZ`). A GET or empty POST is expected to 400
+with JSON `{"d":"..."}`. A successful POST body is
 standard base64; `decrypt_cloudflare_response(ray, body)` yields a packed `runProgram` blob
 (prefix `ryrCJzUnLCItNTiVeJ...`), not JS. That packed string is **standard base64** of
 bytecode whose first 13 bytes are a stable magic (`af2ac22735272c222d35389578`). The iframe
@@ -116,12 +117,31 @@ Chrome POSTs twice to the same `/fo/` URL (init ~4k → packed program; follow-u
 ~90k); `Content-Type: text/plain;charset=UTF-8` is XHR's default; `cf-chl-ra`
 is `0` on the first attempt; `priority: u=1, i`. That **header shape did not
 rotate** with the 56907 fetch. Crate POST header names and probe priority
-match. Live `/fo/` still 400s without `wZ(...)`.
+match.
+
+The compressor wrapper (live name `f4`, historical `wZ`) is mapped in
+`src/solver/fo_body.rs`:
+
+```
+N = crypto.getRandomValues(Uint8Array(128))
+N[0] = 2                    // before RSA
+derived = N ** 65537 % PUBKEY
+N[0] = 0                    // after RSA, XTEA key material
+pad = (8 - lz_len % 8) % 8
+key = N[pad*9+40 : pad*9+56]
+body = custom_b64(derived || pad_byte || XTEA(LZ(json), key))
+```
+
+`N` is once per iframe, so both POSTs share the encoded RSA prefix. Charset
+**order** rotates; the **set** is `A–Za–z0–9` plus `+$ -` (no `/` or `=`).
+The crate's orchestrate `encrypt_payload` still zeros `N[0]` *before* RSA —
+leave that. Live `/fo/` still 400s without a valid init JSON. Do **not**
+reconstruct that JSON or POST a live body.
 
 `probe_iframe` / `solve_test` should get iframe HTTP 200 + parsed options, then an honest
 failure: orchestrate is not the VM, live `/fo/` without the init body 400s. `/cmg/1` 404s
-(images moved to `/ci/{ray}/...`) and is skipped. Do **not** reconstruct `wZ(...)` or run
-the opcode handlers as a solver.
+(images moved to `/ci/{ray}/...`) and is skipped. Do **not** reconstruct the init JSON,
+run the opcode handlers as a solver, or hook `TurnstileTask::solve`.
 
 Static unpack + naive fetch: `cargo run --locked --bin analyze_run_program -- --decode 16 --ray <c_ray> <fo-body>`
 

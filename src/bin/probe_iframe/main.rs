@@ -180,7 +180,7 @@ async fn run() -> Result<Value> {
             .await;
             fo = json!({
                 "url": url,
-                "note": "iframe XHR POSTs a compressed init body (wZ) with cf-chl; this probe does not reconstruct that payload",
+                "note": "iframe XHR POSTs a compressed init body (live f4 / historical wZ) with cf-chl; this probe does not reconstruct that payload",
                 "get": get,
                 "get_with_cf_chl": get_chl,
                 "post_empty_with_cf_chl": post_empty,

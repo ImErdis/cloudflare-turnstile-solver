@@ -8,6 +8,10 @@ pub mod solver;
 pub use solver::VersionInfo;
 pub use solver::challenge::CloudflareChallengeOptions;
 pub use solver::fo_blob::{FoBlobAnalysis, analyze_fo_body};
+pub use solver::fo_body::{
+    CHARSET_BRANCH_B, CHARSET_BRANCH_G, CHROME_FO_PREFIXES_B, LIVE_FO_WRAPPER, body_chars_in_charset,
+    classify_fo_body_len, extract_compressor_charset, looks_like_custom_b64, xtea_key_index,
+};
 pub use solver::fo_headers::{CHROME_FO_POST, CRATE_FO_POST, compare_chrome_and_crate_fo_post};
 pub use solver::protocol::{
     DEMO_HREF, DEMO_SITE_KEY, PUBLIC_API_JS, extract_fo_session, parse_turnstile_api_js_url,
