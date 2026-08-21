@@ -195,10 +195,10 @@ mod tests {
             }
             let html = std::fs::read_to_string(&path).unwrap_or_default();
             if let Ok(opt) = crate::solver::challenge::CloudflareChallengeOptions::from_html(&html)
+                && opt.c_ray.len() == 16
+                && !rays.contains(&opt.c_ray)
             {
-                if opt.c_ray.len() == 16 && !rays.contains(&opt.c_ray) {
-                    rays.push(opt.c_ray);
-                }
+                rays.push(opt.c_ray);
             }
         }
         rays

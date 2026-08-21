@@ -302,6 +302,7 @@ impl TaskClient {
         out
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn fo_request(
         &mut self,
         url: &str,

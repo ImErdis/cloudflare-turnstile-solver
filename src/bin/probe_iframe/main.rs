@@ -256,6 +256,7 @@ async fn run() -> Result<Value> {
     }))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn sample_fo(
     client: &Client,
     method: &str,
