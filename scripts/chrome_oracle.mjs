@@ -231,14 +231,16 @@ const PREAMBLE = `(() => {
 
 function fetchSnippet(html) {
   for (const marker of [
-    "8904",
+    "*31579,59205",
+    "I*I*8904",
+    "*8904,",
     "14792",
     "56907",
     "36163)+38392",
     "19663)+36376",
+    "*28814",
     "36163",
     "19663",
-    "28814",
   ]) {
     const idx = html.indexOf(marker);
     if (idx >= 0) {
@@ -271,6 +273,33 @@ function extractFetchQuadratic(html) {
     spelling: sq ? "mix*mix*mul" : "mul*(mix*mix)",
     note: "HTML formula only; init_key needs opcode tuples. Not FETCH_LIVE.",
   };
+}
+
+/** Linear `((key+op)*mul+add)&255`. Same honesty rule as the quadratic extractor. */
+function extractFetchLinear(html) {
+  if (!html) return null;
+  const idx = html.search(/\*\d{4,5},\d{4,5}\)&255|\+\w+,\d{4,5}\),\d{4,5}\)&255/);
+  const window = idx >= 0 ? html.slice(Math.max(0, idx - 280), idx + 360) : html;
+  const mulAdd = window.match(/\*(\d{4,5}),(\d{4,5})\)&255(?:\.\d+)?,(\w+)\)\{case (\d+):/);
+  const addMix = window.match(
+    /\(\w+\+\w+,(\d{4,5})\),(\d{4,5})\)&255(?:\.\d+)?,(\w+)\)\{case (\d+):/,
+  );
+  const biasAdd = window.match(/\[(\w+)\],(\d{2,3})\)\+256&255/);
+  const biasSub = window.match(/\[(\w+)\]-(\d{2,3}),256/);
+  if (!mulAdd && !addMix) return null;
+  return {
+    kind: "linear",
+    keyMul: mulAdd ? Number(mulAdd[1]) : Number(addMix[1]),
+    keyAdd: mulAdd ? Number(mulAdd[2]) : Number(addMix[2]),
+    byteBias: biasAdd ? Number(biasAdd[2]) : biasSub ? Number(biasSub[2]) : null,
+    firstSwitchCase: mulAdd ? Number(mulAdd[4]) : Number(addMix[4]),
+    spelling: mulAdd ? "*mul,add)&255" : "(mix,mul),add)&255",
+    note: "HTML formula only; init_key needs opcode tuples. Not FETCH_LIVE.",
+  };
+}
+
+function extractFetchSchedule(html) {
+  return extractFetchQuadratic(html) || extractFetchLinear(html);
 }
 
 /**
@@ -317,6 +346,14 @@ function injectOpcodeLog(html) {
     (_full, op, st, keySlot, rest, arr) => {
       n++;
       return `${op}=(globalThis.__cfT&&(globalThis.__cfT.key=${st}[${keySlot}]&255,globalThis.__cfT.byte=${arr}[${op}]&255),${st}[${keySlot}])^${rest}`;
+    },
+  );
+  // Helper xor: D=xor(st[key], add(arr[D],113)+256&255)
+  out = out.replace(
+    /(\w+)=(\w+\[[^\]]{0,80}\])\((\w+)\[(\w+)\],(\w+\[[^\]]{0,80}\])\((\w+)\[\1\],(\d{2,3})\)\+256&255\)/g,
+    (_full, op, xorCallee, st, keySlot, addCallee, arr, bias) => {
+      n++;
+      return `${op}=(globalThis.__cfT&&(globalThis.__cfT.key=${st}[${keySlot}]&255,globalThis.__cfT.byte=${arr}[${op}]&255),${xorCallee}(${st}[${keySlot}],${addCallee}(${arr}[${op}],${bias})+256&255))`;
     },
   );
 
@@ -399,6 +436,28 @@ function injectOpcodeLog(html) {
     n++;
     return logAfterKeyUpdate(`*28814+40641&255`, opVar);
   });
+  // Any linear `((key+op)*mul+add)&255` spelled `*mul,add)&255` / `(mix,mul),add)&255`.
+  out = out.replace(
+    /\*(\d{4,5}),(\d{4,5})\)&255(?:\.\d+)?,(\w+)\)/g,
+    (_full, mul, add, opVar) => {
+      n++;
+      return logAfterKeyUpdate(`*${mul},${add})&255`, opVar);
+    },
+  );
+  out = out.replace(
+    /\*(\d{4,5})\+(\d{4,5})&255(?:\.\d+)?,(\w+)\)/g,
+    (_full, mul, add, opVar) => {
+      n++;
+      return logAfterKeyUpdate(`*${mul}+${add}&255`, opVar);
+    },
+  );
+  out = out.replace(
+    /\),(\d{4,5})\)&255(?:\.\d+)?,(\w+)\)\{case/g,
+    (_full, add, opVar) => {
+      n++;
+      return `${logAfterKeyUpdate(`),${add})&255`, opVar)}{case`;
+    },
+  );
 
   // Evening b: opcode = key ^ wrapping_sub(byte, 232)
   // Happy: D=aP[af]^helper(ae[D]-232,256)&255
@@ -409,7 +468,16 @@ function injectOpcodeLog(html) {
       return `${op}=(globalThis.__cfT&&(globalThis.__cfT.key=${st}[${keySlot}]&255,globalThis.__cfT.byte=${arr}[${op}]&255),${st}[${keySlot}])^${rest}`;
     },
   );
-  // Catch: aJ=xor(aP[af], helper(ae[ag]-232,256)&255)
+  // Catch: Qv=xor(key, and(add(arr[pc]-113,256),255))
+  out = out.replace(
+    /(\w+)=(\w+\[[^\]]{0,80}\])\((\w+)\[(\w+)\],(\w+\[[^\]]{0,80}\])\((\w+\[[^\]]{0,80}\])\((\w+)\[(\w+)\]-(\d{2,3}),256\),255\)/g,
+    (_full, op, xorCallee, st, keySlot, andCallee, addCallee, arr, pc, bias) => {
+      n++;
+      return `${op}=(globalThis.__cfT&&(globalThis.__cfT.key=${st}[${keySlot}]&255,globalThis.__cfT.byte=${arr}[${pc}]&255),${xorCallee}(${st}[${keySlot}],${andCallee}(${addCallee}(${arr}[${pc}]-${bias},256),255)))`;
+    },
+  );
+
+  // Catch evening quadratic: aJ=xor(st[key], helper(arr[pc]-232,256)&255)
   out = out.replace(
     /(\w+)=(\w+\[[^\]]{0,80}\])\((\w+)\[(\w+)\],(\w+\[[^\]]{0,80}\])\((\w+)\[(\w+)\]-(\d{2,3}),256\)&255/g,
     (_full, op, xorCallee, st, keySlot, subCallee, arr, pc, bias) => {
@@ -946,6 +1014,10 @@ function selfTestInject() {
     "if(D=aP[aQ],D!==D)return aP[aW];switch(aP[aQ]=D+1,D=aP[af]^au[EO(oV.E)](ae[D]-232,256)&255,I=aP[af]+D,aP[af]=au[EO(oV.D)](au[EO(oV.E)](I*I*8904,au[EO(oV.I)](I,14792))+11229,255),D){case 113:q7[EO(oV.af)](this);break;}";
   const catchEve8904 =
     "if(ag=aP[aQ],ag!==ag)return aP[aW];switch(aP[aQ]=au[EO(oV.E)](ag,1),aJ=au[EO(oV.i)](aP[af],au[EO(oV.E)](ae[ag]-232,256)&255),aO=au[EO(oV.XY)](aP[af],aJ),aP[af]=au[EO(oV.XC)](8904*(aO*aO)+au[EO(oV.I)](aO,14792),11229)&255,aJ){case 113:q7[EO(oV.XK)](this);break;}";
+  const happyLin31579 =
+    "if(D=Qg[QO],D!==D)return Qg[QV];switch(Qg[QO]=Qs[m1(pj.QZ)](D,1),D=Qs[m1(pj.QN)](Qg[QZ],Qs[m1(pj.i)](Qy[D],113)+256&255),Qg[QZ]=Qs[m1(pj.QZ)](Qs[m1(pj.QZ)](Qg[QZ],D)*31579,59205)&255,D){case 104:Yb[m1(pj.Qy)](this);break;}";
+  const catchLin31579 =
+    "if(QK=Qg[QO],QK!==QK)return Qg[QV];switch(Qg[QO]=Qs[m1(pj.QZ)](QK,1),Qv=Qs[m1(pj.Qx)](Qg[QZ],Qs[m1(pj.jW)](Qs[m1(pj.m)](Qy[QK]-113,256),255)),Qg[QZ]=Qs[m1(pj.jd)](Qs[m1(pj.QU)](Qg[QZ]+Qv,31579),59205)&255.46,Qv){case 104:Yb[m1(pj.Qo)](this);break;}";
   const a = injectOpcodeLog(happyOld);
   const b = injectOpcodeLog(happyLive);
   const c = injectOpcodeLog(catchLive);
@@ -956,6 +1028,9 @@ function selfTestInject() {
   const linCatch = injectOpcodeLog(catchLin28814);
   const eveHappy = injectOpcodeLog(happyEve8904);
   const eveCatch = injectOpcodeLog(catchEve8904);
+  const lin31579H = injectOpcodeLog(happyLin31579);
+  const lin31579C = injectOpcodeLog(catchLin31579);
+  const lin31579F = extractFetchLinear(happyLin31579);
   const eveFormula = extractFetchQuadratic(happyEve8904);
   let liveEveOk = true;
   let liveEve = null;
@@ -973,6 +1048,23 @@ function selfTestInject() {
       liveEve.formula &&
       liveEve.formula.keyMul === 8904 &&
       liveEve.formula.byteBias === 232;
+  }
+  let liveLinOk = true;
+  let liveLin = null;
+  const liveLinPath = "artifacts/re-out/chrome-oracle-eve8904/iframe-1.html";
+  if (fs.existsSync(liveLinPath)) {
+    const liveHtml = fs.readFileSync(liveLinPath, "utf8");
+    const liveInj = injectOpcodeLog(liveHtml);
+    liveLin = {
+      replacements: liveInj.replacements,
+      pushed: liveInj.html.includes("__cfOp.push"),
+      formula: extractFetchSchedule(liveHtml),
+    };
+    liveLinOk =
+      liveLin.pushed &&
+      liveLin.formula &&
+      liveLin.formula.keyMul === 31579 &&
+      liveLin.formula.keyAdd === 59205;
   }
   const charsetHtml = `i=\`${CHARSET_BRANCH_B}\`,D=BigInt`;
   const extracted = extractCompressorCharset(charsetHtml);
@@ -1082,7 +1174,17 @@ function selfTestInject() {
       eveFormula.keyAdd === 11229 &&
       eveFormula.byteBias === 232 &&
       eveFormula.firstSwitchCase === 113 &&
+      lin31579H.html.includes("__cfOp.push") &&
+      lin31579C.html.includes("__cfOp.push") &&
+      lin31579H.html.includes("pc:D") &&
+      lin31579C.html.includes("pc:QK") &&
+      lin31579F &&
+      lin31579F.keyMul === 31579 &&
+      lin31579F.keyAdd === 59205 &&
+      lin31579F.byteBias === 113 &&
+      lin31579F.firstSwitchCase === 104 &&
       liveEveOk &&
+      liveLinOk &&
       extracted === CHARSET_BRANCH_B &&
       prefixOk &&
       stdReject &&
@@ -1128,6 +1230,12 @@ function selfTestInject() {
       formula: eveFormula,
     },
     liveEve8904: liveEve,
+    lin31579: {
+      happy: { replacements: lin31579H.replacements, injected: lin31579H.injected },
+      catch: { replacements: lin31579C.replacements, injected: lin31579C.injected },
+      formula: lin31579F,
+    },
+    liveLin31579: liveLin,
     charset: { extracted, prefixOk, stdReject },
     initJson: initGot && { keyCount: initGot.keyCount },
     foPlaintext: {
@@ -1231,7 +1339,7 @@ async function onFetchPaused(session, evt) {
         has56907: text.includes("56907"),
         has8904: text.includes("8904"),
         has232: text.includes("-232"),
-        fetchSchedule: extractFetchQuadratic(text),
+        fetchSchedule: extractFetchSchedule(text),
         has36376: text.includes("36376"),
         has38392: text.includes("38392"),
         hasRunProgram: text.includes("runProgram"),
@@ -1330,29 +1438,54 @@ async function attachSession(session, targetInfo, waitingForDebugger) {
         const idx = scriptSource.indexOf("36163");
         const idxG = scriptSource.indexOf("19663");
         const idxLin = scriptSource.indexOf("28814");
-        const hasFetch = idxQ >= 0 || idx >= 0 || idxG >= 0 || idxLin >= 0;
+        const idxEveQ = scriptSource.indexOf("I*I*8904") >= 0
+          ? scriptSource.indexOf("I*I*8904")
+          : scriptSource.indexOf("*8904,");
+        const idx31579 = scriptSource.indexOf("31579");
+        const idx59205 = scriptSource.indexOf("59205");
+        const schedule = extractFetchSchedule(scriptSource);
+        const hasFetch =
+          idxQ >= 0 ||
+          idx >= 0 ||
+          idxG >= 0 ||
+          idxLin >= 0 ||
+          idxEveQ >= 0 ||
+          idx31579 >= 0 ||
+          idx59205 >= 0 ||
+          !!schedule;
         const compressor = compressorBreakpointAt(scriptSource);
         const sendHelper = sendHelperBreakpointAt(scriptSource);
         if (!hasFetch && !compressor && !sendHelper) return;
         const hasInject = scriptSource.includes("__cfOp.push");
         if (hasFetch) {
           const marker =
-            idxQ >= 0 ? "56907" : idx >= 0 ? "36163" : idxG >= 0 ? "19663" : "28814";
-          const at =
-            idxQ >= 0 ? idxQ : idx >= 0 ? idx : idxG >= 0 ? idxG : idxLin;
+            idx31579 >= 0
+              ? "31579"
+              : idx59205 >= 0
+                ? "59205"
+                : idxEveQ >= 0
+                  ? (scriptSource.includes("I*I*8904") ? "I*I*8904" : "*8904,")
+                  : idxQ >= 0
+                    ? "56907"
+                    : idx >= 0
+                      ? "36163"
+                      : idxG >= 0
+                        ? "19663"
+                        : "28814";
+          const at = scriptSource.indexOf(marker);
           note("scriptFetchConst", {
             url: (s.url || "").slice(0, 140),
             len: scriptSource.length,
             hasInject,
             idx: at,
             marker,
+            fetchSchedule: schedule,
           });
           const { lineNumber, columnNumber } = sourceLineCol(scriptSource, at);
-          if (!hasInject) {
-            await session.send("Debugger.setBreakpoint", {
-              location: { scriptId: s.scriptId, lineNumber, columnNumber },
-            });
-          }
+          // Break even when Fetch rewrite injected — OOPIF often runs the original.
+          await session.send("Debugger.setBreakpoint", {
+            location: { scriptId: s.scriptId, lineNumber, columnNumber },
+          });
         }
         for (const bpInfo of [compressor, sendHelper]) {
           if (!bpInfo) continue;
@@ -1669,7 +1802,7 @@ try {
 const bodyShape = foBodyShape(foNet, xhr, iframeHtml);
 const followUpShape = foFollowUpShape(foNet, xhr);
 const initJson = extractInitJsonKeys(iframeHtml);
-const fetchSchedule = extractFetchQuadratic(iframeHtml);
+const fetchSchedule = extractFetchSchedule(iframeHtml);
 const followUpJson = pickFollowUpShape(foShapes, initJson?.keys || []);
 const foPlaintextRows = foShapes.map((s) =>
   classifyFoPlaintext(s, initJson?.keys || []),
