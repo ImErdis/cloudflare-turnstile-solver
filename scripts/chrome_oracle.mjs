@@ -469,6 +469,9 @@ function extractFetchQuadratic(html) {
   const mulSqPlusBmix = window.match(
     /(\d{4,5})\*\((\w+)\*\2\)\+(\d{4,5})\*\2,(\d{4,5})\)/,
   );
+  const helperPairCommaBmix = window.match(
+    /\((\w+),\1\)\*(\d{4,5}),(\d{4,5})\*\1\)\+(\d{4,5}),255/,
+  );
   const helperPairTimesMul = window.match(
     /(\w+),\1\)\*(\d{4,5})\+[\s\S]{0,96}?\(\1,(\d{4,5})\)\+(\d{4,5})&255/,
   );
@@ -521,6 +524,7 @@ function extractFetchQuadratic(html) {
     mulCommaBmixAmp ||
     nestSqCommaBmix ||
     sqBareMulBCommaAdd ||
+    helperPairCommaBmix ||
     helperPairTimesMul ||
     helperPairCommaAdd ||
     mulCommaHelper ||
@@ -612,6 +616,11 @@ function extractFetchQuadratic(html) {
     keyQuadB = Number(sqBareMulBCommaAdd[3]);
     keyAdd = Number(sqBareMulBCommaAdd[4]);
     spelling = "mix*mix*mul+b*mix,add)&255";
+  } else if (helperPairCommaBmix) {
+    keyMul = Number(helperPairCommaBmix[2]);
+    keyQuadB = Number(helperPairCommaBmix[3]);
+    keyAdd = Number(helperPairCommaBmix[4]);
+    spelling = "helper(mix,mix)*mul,b*mix)+add,255";
   } else if (helperPairTimesMul) {
     keyMul = Number(helperPairTimesMul[2]);
     keyQuadB = Number(helperPairTimesMul[3]);
@@ -2877,6 +2886,9 @@ function selfTestInject() {
       live5886Mark.marker === "5886" &&
       live5886Mark.schedule &&
       live5886Mark.schedule.initKeyCandidate === 176 &&
+      extractFetchQuadratic(
+        "HJ[Hj]=HT[Xp(Nf.Hu)](HT[Xp(Nf.HP)](HT[Xp(Nf.HS)](HS,HS)*5886,50261*HS)+1243,255),X){case 135:",
+      )?.keyMul === 5886 &&
       switchKwSites.length === 1 &&
       live54260NestHappy.slice(switchKwSites[0].idx, switchKwSites[0].idx + 6) === "switch" &&
       caseCallSw.length === 1 &&
