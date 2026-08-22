@@ -2165,7 +2165,12 @@ function caseOpAt(src, idx) {
 
 function isPerfLogger(scriptSource, brace) {
   const head = String(scriptSource).slice(brace, brace + 800);
-  return /performance\[/.test(head);
+  if (/performance\[/.test(head)) return true;
+  // Opcode handlers also use `function wZ(` — not the historical compressor.
+  if (/this\.g/.test(head) && /this\.j/.test(head) && /this\.l/.test(head)) {
+    return true;
+  }
+  return false;
 }
 
 function functionBraceAt(scriptSource, pat) {
@@ -2417,6 +2422,64 @@ const FO_SHAPE_EXPR = `(() => {
   return null;
 })()`;
 
+/** Condition is `false` so Chrome does not pause. Records /fo/ plaintext shape only. */
+const ENCODER_LOGPOINT_CONDITION = `(function(){
+  try {
+    var cand = [];
+    try {
+      if (arguments && arguments.length) {
+        for (var ai = 0; ai < Math.min(arguments.length, 4); ai++) cand.push(arguments[ai]);
+      }
+    } catch (e0) {}
+    if (typeof X !== "undefined") cand.push(X);
+    if (typeof a !== "undefined") cand.push(a);
+    var obj = null;
+    var best = 0;
+    for (var ci = 0; ci < cand.length; ci++) {
+      var o = cand[ci];
+      if (!o || typeof o !== "object" || Array.isArray(o)) continue;
+      var n = Object.keys(o).length;
+      if (n > best) { best = n; obj = o; }
+    }
+    if (!obj || typeof obj !== "object" || Array.isArray(obj)) return false;
+    var keys = Object.keys(obj);
+    if (keys.length < 40 || keys.length > 250) return false;
+    if (keys.indexOf("alignContent") >= 0) return false;
+    var ident = [];
+    var numeric = 0;
+    var nMin = null;
+    var nMax = null;
+    var kinds = {};
+    for (var i = 0; i < keys.length; i++) {
+      var k = keys[i];
+      var v = obj[k];
+      var t = v === null ? "null" : Array.isArray(v) ? "array:" + v.length : typeof v;
+      if (t === "string") t = "string:" + v.length;
+      else if (t === "object" && v) t = "object:" + Object.keys(v).length;
+      kinds[k] = t;
+      if (/^\\d+$/.test(k)) {
+        numeric++;
+        var n = Number(k);
+        if (nMin === null || n < nMin) nMin = n;
+        if (nMax === null || n > nMax) nMax = n;
+      } else ident.push(k);
+    }
+    globalThis.__cfFo = globalThis.__cfFo || [];
+    if (globalThis.__cfFo.length < 12) {
+      globalThis.__cfFo.push({
+        via: "encoder",
+        keyCount: keys.length,
+        identKeys: ident,
+        numericKeyCount: numeric,
+        numericKeyMin: nMin,
+        numericKeyMax: nMax,
+        kinds: kinds
+      });
+    }
+  } catch (e) {}
+  return false;
+})()`;
+
 function foPostPairs(foNet) {
   const byUrl = new Map();
   for (const n of foNet) {
@@ -2645,6 +2708,9 @@ function selfTestInject() {
   const leftoverInferred = leftoverProbeSummary([], ["zzNew1"]);
   const wzPerf = compressorBreakpointAt(
     "void 0;function wZ(wq,lo){if(lo=lS,Mq[x])return;Mq[y]++,Mq[z]=performance[k](),wf()}",
+  );
+  const wzVm = compressorBreakpointAt(
+    "void 0;function wZ(gn){J=this.g,P=this.h,H=this.j,A=J[H],J[this.l][A++]}",
   );
   const encSrc =
     "MO(setTimeout,c,100,k,MS);function c(M,X){typeof Mq===k&&Mq(X,c);return Mt(X)}Mt=function(X){return X}";
@@ -3052,6 +3118,9 @@ function selfTestInject() {
       leftoverInferred.status === "f4-inferred" &&
       leftoverInferred.extraIdentNow[0] === "zzNew1" &&
       wzPerf == null &&
+      wzVm == null &&
+      ENCODER_LOGPOINT_CONDITION.includes("return false") &&
+      ENCODER_LOGPOINT_CONDITION.includes("__cfFo") &&
       encBp &&
       encBp.role === "encoder" &&
       encBp.name === "Mt" &&
@@ -4407,24 +4476,30 @@ async function attachSession(session, targetInfo, waitingForDebugger) {
               const tag = `${s.scriptId}:${bpInfo.pat}`;
               if (compressorScripts.has(tag)) continue;
               compressorScripts.add(tag);
+              const logpoint =
+                bpInfo.role === "encoder" || !!bpInfo.name;
               const bp = await session.send("Debugger.setBreakpoint", {
                 location: {
                   scriptId: s.scriptId,
                   lineNumber: bpInfo.lineNumber,
                   columnNumber: bpInfo.columnNumber,
                 },
+                ...(logpoint ? { condition: ENCODER_LOGPOINT_CONDITION } : {}),
               });
-              if (bp?.breakpointId) compressorBreakpoints.add(bp.breakpointId);
+              if (bp?.breakpointId && !logpoint) {
+                compressorBreakpoints.add(bp.breakpointId);
+              }
               const kind =
                 bpInfo.role === "encoder"
-                  ? "encoderBp"
+                  ? "encoderLogpoint"
                   : bpInfo.name
-                    ? "sendHelperBp"
+                    ? "sendHelperLogpoint"
                     : "compressorBp";
               note(kind, {
                 url: (s.url || "").slice(0, 140),
                 pat: bpInfo.pat,
                 name: bpInfo.name || null,
+                logpoint,
                 lineNumber: bpInfo.lineNumber,
                 columnNumber: bpInfo.columnNumber,
                 breakpointId: bp?.breakpointId || null,
@@ -4452,7 +4527,7 @@ async function attachSession(session, targetInfo, waitingForDebugger) {
               returnByValue: true,
             });
             const v = got.result?.value;
-            if (v && v.keyCount >= 20) {
+            if (v && (v.keyCount >= 40 || (v.numericKeyCount || 0) > 0)) {
               liveFo.push(v);
               if (Array.isArray(v.writes)) {
                 for (const w of v.writes) {
