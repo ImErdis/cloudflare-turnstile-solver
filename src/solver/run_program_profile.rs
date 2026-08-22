@@ -59,6 +59,18 @@ impl VmProfileFetch {
             && self.key_add == params.key_add
             && self.key_quad_b == params.key_quad_b
     }
+
+    pub const fn to_params(self, label: &'static str) -> FetchParams {
+        FetchParams {
+            label,
+            init_pc: self.init_pc,
+            init_key: self.init_key,
+            byte_bias: self.byte_bias,
+            key_mul: self.key_mul,
+            key_add: self.key_add,
+            key_quad_b: self.key_quad_b,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -377,7 +389,16 @@ fn validate_spec(opcode: u8, spec: &VmSkipSpec) -> Result<(), VmProfileValidatio
                 )));
             }
             let mut seen = BTreeSet::new();
+            let mut last_tag = None;
             for tag in tags {
+                if let Some(last) = last_tag
+                    && tag.tag <= last
+                {
+                    return Err(VmProfileValidationError::new(format!(
+                        "opcode {opcode} tags must be strictly sorted"
+                    )));
+                }
+                last_tag = Some(tag.tag);
                 if !seen.insert(tag.tag) {
                     return Err(VmProfileValidationError::new(format!(
                         "opcode {opcode} has duplicate tag {}",
@@ -419,7 +440,9 @@ fn validate_reason(opcode: u8, reason: &str) -> Result<(), VmProfileValidationEr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::solver::run_program_vm::FETCH_HTML_40954_UNVERIFIED;
+    use crate::solver::run_program_vm::{
+        FETCH_CHROME_2026_08_22_B_5886, FETCH_HTML_40954_UNVERIFIED, FETCH_LIVE,
+    };
 
     fn unknown_profile() -> VmSkipProfile {
         let source = source_sha256_hex(b"synthetic executed JS");
@@ -479,6 +502,18 @@ mod tests {
                 .unwrap_err()
                 .reason
                 .contains("fetch parameters")
+        );
+        assert!(
+            profile
+                .validate_for(FETCH_LIVE, &profile.source_sha256)
+                .is_err(),
+            "56907 must not validate as 40954"
+        );
+        assert!(
+            profile
+                .validate_for(FETCH_CHROME_2026_08_22_B_5886, &profile.source_sha256)
+                .is_err(),
+            "5886 must not validate as 40954"
         );
 
         let mut wrong_semantics = profile.clone();
