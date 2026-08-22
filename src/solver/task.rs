@@ -5,7 +5,7 @@ use crate::disassembler::instructions::{
 };
 use crate::parser::payload::PayloadKeyExtractor;
 use crate::reverse::compress::Compressor;
-use crate::reverse::encryption::{decrypt_cloudflare_response, CloudflareXorEncryption};
+use crate::reverse::encryption::{CloudflareXorEncryption, decrypt_cloudflare_response};
 use crate::solver::challenge::CloudflareChallengeOptions;
 use crate::solver::keys::InitPayloadKeys;
 use crate::solver::performance::{Performance, PerformanceEntry, PerformanceVisibilityStateEntry};
@@ -13,7 +13,7 @@ use crate::solver::task_client::TaskClient;
 use crate::solver::user_fingerprint::{Fingerprint, FloatWithoutZeros};
 use crate::solver::utils::{diff, imprecise_performance_now_value, random_time};
 use crate::solver::vm_parser::{ParsedVM, TurnstileTaskEntryContext, VMFingerprintParser};
-use anyhow::{anyhow, bail, Context};
+use anyhow::{Context, anyhow, bail};
 use oxc_allocator::Allocator;
 use rand::{random_range, rng};
 use rustc_hash::FxHashMap;
@@ -52,10 +52,7 @@ impl<'a> TurnstileTask<'a> {
         page_data: Option<String>,
         fingerprint: &'a Fingerprint,
     ) -> Result<Self, anyhow::Error> {
-        let task_client = TaskClient::new(
-            referrer.clone(),
-            fingerprint.headers.clone(),
-        )?;
+        let task_client = TaskClient::new(referrer.clone(), fingerprint.headers.clone())?;
 
         Ok(Self {
             task_client,
@@ -85,7 +82,7 @@ impl<'a> TurnstileTask<'a> {
         let allocator = Allocator::new();
         let timezone = self.task_client.get_timezone().await?;
         let turnstile_load_init_time_ms = SystemTime::now();
-        
+
         let version_info = self.task_client.get_api().await?;
 
         let (solve_url, _, challenge_data) =
@@ -94,19 +91,41 @@ impl<'a> TurnstileTask<'a> {
         self.query_selector_calls
             .extend(repeat_n("window.frameElement".to_string(), 3));
 
-        self.performance.add_entry(
-            self.task_client
-                .get_random_image(&challenge_data.zone)
-                .await?,
-        );
+        if let Some(entry) = self
+            .task_client
+            .get_random_image(&challenge_data.zone)
+            .await?
+        {
+            self.performance.add_entry(entry);
+        }
 
-        let (orchestrate_perf, orchestrate_js) = self
+        let (orchestrate_perf, orchestrate_js) = match self
             .task_client
             .get_orchestrate(&challenge_data.zone, &challenge_data.c_ray)
-            .await?;
+            .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                let mut hint = challenge_data.missing_orchestrate_hint();
+                if !challenge_data.fo_session.is_empty() {
+                    let samples = self
+                        .task_client
+                        .probe_fo_blob(
+                            &challenge_data.zone,
+                            &challenge_data.fo_session,
+                            &challenge_data.c_ray,
+                            &challenge_data.ch,
+                        )
+                        .await;
+                    for (label, status, analysis) in samples {
+                        hint.push_str(&format!("; {label} HTTP {status}: {}", analysis.summary()));
+                    }
+                }
+                return Err(e.context(hint));
+            }
+        };
 
         self.performance.add_entry(orchestrate_perf);
-        
 
         let solve_language = orchestrate_js
             .split("\"lang\":\"")
@@ -134,11 +153,7 @@ impl<'a> TurnstileTask<'a> {
             extracted_keys.browser_keys_key.to_string(),
         ]);
 
-        let compressor = Compressor::new(
-            extracted_script
-                .compressor_charset
-                .unwrap()
-        );
+        let compressor = Compressor::new(extracted_script.compressor_charset.unwrap());
 
         let init_keys = InitPayloadKeys::new(extracted_keys.initial_keys.clone());
         let init_payload = self.build_init_payload(
@@ -376,7 +391,6 @@ impl<'a> TurnstileTask<'a> {
 
         let mut last_entry_strings = parsed_vm.last_entry_strings.clone();
         for (i, string) in last_entry_strings.iter().enumerate() {
-
             if string == "terminate" {
                 worker_blob_object = Some(last_entry_strings[i - 1].clone());
             }
@@ -498,16 +512,26 @@ impl<'a> TurnstileTask<'a> {
         ))
     }
 
-    fn find_worker_blob_key(&self, functions: &FxHashMap<usize, RegisteredFunction>) -> Option<String> {
+    fn find_worker_blob_key(
+        &self,
+        functions: &FxHashMap<usize, RegisteredFunction>,
+    ) -> Option<String> {
         for f in functions.values() {
-            if !f.values.contains(&Value::String("script error".to_string())) {
+            if !f
+                .values
+                .contains(&Value::String("script error".to_string()))
+            {
                 continue;
             }
 
-            let pos = f.values.iter().position(|k| k == &Value::String("revokeObjectURL".to_string())).map(|i| match &f.values[i+1] {
-                Value::String(s) => s.clone(),
-                _ => unreachable!(),
-            });
+            let pos = f
+                .values
+                .iter()
+                .position(|k| k == &Value::String("revokeObjectURL".to_string()))
+                .map(|i| match &f.values[i + 1] {
+                    Value::String(s) => s.clone(),
+                    _ => unreachable!(),
+                });
 
             return pos;
         }
@@ -527,7 +551,10 @@ impl<'a> TurnstileTask<'a> {
     ) -> Result<(), anyhow::Error> {
         let build_function = functions
             .iter()
-            .find(|(_, k)| k.values.contains(&Value::String("chlApiSitekey".to_string())))
+            .find(|(_, k)| {
+                k.values
+                    .contains(&Value::String("chlApiSitekey".to_string()))
+            })
             .context("could not find the function that sets init entries")?
             .1;
         let mut index_map: FxHashMap<String, usize> = FxHashMap::default();

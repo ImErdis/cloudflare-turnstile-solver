@@ -1,17 +1,21 @@
 use crate::reverse::encryption::decrypt_cloudflare_response;
+use crate::solver::VersionInfo;
 use crate::solver::challenge::CloudflareChallengeOptions;
+use crate::solver::fo_blob::{FoBlobAnalysis, analyze_fo_body};
 use crate::solver::performance::{PerformanceEntry, PerformanceResourceEntry};
+use crate::solver::protocol::{
+    PUBLIC_API_JS, fo_blob_url, generate_widget_id, looks_like_orchestrate_vm, orchestrate_url,
+    parse_turnstile_api_js_response, turnstile_iframe_url,
+};
 use crate::solver::timezone::get_timezone;
 use crate::solver::user_fingerprint::Headers;
 use crate::solver::utils::imprecise_performance_now_value;
-use crate::solver::VersionInfo;
-use anyhow::{bail};
-use rand::Rng;
+use anyhow::{Context, bail};
 use rquest::header::{HeaderMap, HeaderName, HeaderValue};
 use rquest::{Client, EmulationProviderFactory, Version};
 use rquest_util::Emulation::Chrome136;
 use rquest_util::EmulationOS::Windows;
-use rquest_util::{EmulationOption};
+use rquest_util::EmulationOption;
 use std::io::Read;
 use std::time::{Duration, Instant};
 use url::Url;
@@ -25,10 +29,7 @@ pub struct TaskClient {
 }
 
 impl TaskClient {
-    pub(crate) fn new(
-        referrer: String,
-        headers: Headers,
-    ) -> Result<TaskClient, anyhow::Error> {
+    pub(crate) fn new(referrer: String, headers: Headers) -> Result<TaskClient, anyhow::Error> {
         let emulation = EmulationOption::builder()
             .emulation(Chrome136)
             .emulation_os(Windows)
@@ -38,27 +39,54 @@ impl TaskClient {
         Ok(Self {
             host: get_referrer_host(referrer.as_str())?,
             client,
-            branch: "b".to_string(),
+            branch: "g".to_string(),
             solve_url: None,
         })
     }
 
     pub(crate) async fn get_api(&mut self) -> Result<VersionInfo, anyhow::Error> {
-        self.branch = "b".to_string();
-        Ok(VersionInfo {
-            branch: "b".to_string(),
-            version: "8359bcf47b68".to_string(),
-        })
+        let response = self
+            .client
+            .get(PUBLIC_API_JS)
+            .header("Accept", "*/*")
+            .header("Sec-Fetch-Site", "cross-site")
+            .header("Sec-Fetch-Mode", "no-cors")
+            .header("Sec-Fetch-Dest", "script")
+            .header("Referer", &self.host)
+            .redirect(rquest::redirect::Policy::limited(10))
+            .send()
+            .await
+            .context("fetch turnstile api.js")?;
+
+        if !response.status().is_success() && !response.status().is_redirection() {
+            bail!(
+                "turnstile api.js returned HTTP {} for {}",
+                response.status(),
+                PUBLIC_API_JS
+            );
+        }
+
+        let location = response
+            .headers()
+            .get("location")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
+        let final_url = response.url().to_string();
+        let info = parse_turnstile_api_js_response(&final_url, location.as_deref()).with_context(
+            || format!("redirected api.js url was not branch/versioned: {final_url}"),
+        )?;
+        self.branch = info.branch.clone();
+        Ok(info)
     }
 
     pub(crate) async fn get_random_image(
         &mut self,
         zone: &str,
-    ) -> Result<PerformanceEntry, anyhow::Error> {
+    ) -> Result<Option<PerformanceEntry>, anyhow::Error> {
         self.set_get_headers_order();
         let url = format!(
             "https://{}/cdn-cgi/challenge-platform/h/{}/cmg/1",
-            zone, &self.branch
+            zone, self.branch
         );
 
         let response = self
@@ -76,6 +104,11 @@ impl TaskClient {
             .send()
             .await?;
 
+        // Live Turnstile serves challenge images at /ci/{ray}/..., not /cmg/1.
+        if response.status() == 404 {
+            return Ok(None);
+        }
+
         if response.status() != 200 {
             bail!(
                 "received invalid status code when getting random image: {}",
@@ -83,7 +116,7 @@ impl TaskClient {
             );
         }
 
-        Ok(PerformanceEntry::Resource(PerformanceResourceEntry {
+        Ok(Some(PerformanceEntry::Resource(PerformanceResourceEntry {
             r#type: "r".to_string(),
             time_taken: imprecise_performance_now_value(510.0),
             initiator_type: "link".to_string(),
@@ -91,7 +124,7 @@ impl TaskClient {
             next_hop_protocol: "h2".to_string(),
             transfer_size: 386,
             encoded_body_size: 61,
-        }))
+        })))
     }
 
     pub(crate) async fn get_timezone(&mut self) -> Result<String, anyhow::Error> {
@@ -119,7 +152,7 @@ impl TaskClient {
         site_key: &str,
     ) -> Result<(String, String, CloudflareChallengeOptions), anyhow::Error> {
         self.set_get_html_headers_order();
-        let solve_url = generate_solve_url(self.branch.as_str(), site_key);
+        let solve_url = turnstile_iframe_url(self.branch.as_str(), site_key, &generate_widget_id());
 
         let response = self
             .client
@@ -134,6 +167,7 @@ impl TaskClient {
             .send()
             .await?;
 
+        let status = response.status();
         let content_encoding = response
             .headers()
             .get("Content-Encoding")
@@ -145,7 +179,19 @@ impl TaskClient {
         let decompressed = decompress_body(bytes.as_ref(), &content_encoding).unwrap();
         let text = String::from_utf8(decompressed)?;
 
+        if status != 200 {
+            bail!(
+                "turnstile iframe returned HTTP {} for {} ({} bytes)",
+                status,
+                solve_url,
+                text.len()
+            );
+        }
+
         let challenge = CloudflareChallengeOptions::from_html(text.as_str())?;
+        if !challenge.branch.is_empty() {
+            self.branch = challenge.branch.clone();
+        }
         self.solve_url = Some(solve_url.clone());
 
         Ok((solve_url, text, challenge))
@@ -159,10 +205,7 @@ impl TaskClient {
         self.set_get_headers_order();
         let t = Instant::now();
 
-        let url = format!(
-            "https://{}/cdn-cgi/challenge-platform/h/{}/orchestrate/chl_api/v1?ray={}&lang=auto",
-            zone, self.branch, c_ray
-        );
+        let url = orchestrate_url(zone, self.branch.as_str(), c_ray);
 
         let response = self
             .client
@@ -177,6 +220,7 @@ impl TaskClient {
             .send()
             .await?;
 
+        let status = response.status();
         let content_encoding = response
             .headers()
             .get("Content-Encoding")
@@ -186,7 +230,24 @@ impl TaskClient {
             .to_string();
         let bytes = response.bytes().await?;
         let decompressed = decompress_body(bytes.as_ref(), &content_encoding).unwrap();
-        let text = String::from_utf8(decompressed)?;
+        let text = String::from_utf8_lossy(&decompressed).into_owned();
+
+        if status != 200 {
+            bail!(
+                "orchestrate returned HTTP {} for {} ({} bytes)",
+                status,
+                url,
+                text.len()
+            );
+        }
+        if !looks_like_orchestrate_vm(&text) {
+            bail!(
+                "orchestrate URL returned HTTP {} ({} bytes) but not the VM this crate disassembles (missing \"lang\":) for {}",
+                status,
+                text.len(),
+                url
+            );
+        }
         Ok((
             PerformanceEntry::Resource(PerformanceResourceEntry {
                 r#type: "r".to_string(),
@@ -201,6 +262,104 @@ impl TaskClient {
             }),
             text,
         ))
+    }
+
+    /// GET/empty-POST `/fo/{session}/{ray}/{ch}` the way the iframe's XHR does
+    /// (`cf-chl`, `cf-chl-ra`), without reconstructing the compressed init body.
+    pub(crate) async fn probe_fo_blob(
+        &mut self,
+        zone: &str,
+        session: &str,
+        c_ray: &str,
+        ch: &str,
+    ) -> Vec<(String, u16, FoBlobAnalysis)> {
+        let url = fo_blob_url(zone, self.branch.as_str(), session, c_ray, ch);
+        let referer = self.solve_url.clone().unwrap_or_default();
+        let origin = format!("https://{zone}");
+        let mut out = Vec::new();
+        for (label, method, with_cf_chl, body) in [
+            ("GET", "GET", false, None),
+            ("GET+cf-chl", "GET", true, None),
+            ("POST+cf-chl+empty", "POST", true, Some("")),
+        ] {
+            match self
+                .fo_request(
+                    &url,
+                    &referer,
+                    &origin,
+                    method,
+                    with_cf_chl,
+                    ch,
+                    c_ray,
+                    body,
+                )
+                .await
+            {
+                Ok((status, analysis)) => out.push((label.to_string(), status, analysis)),
+                Err(e) => out.push((format!("{label} error: {e}"), 0, analyze_fo_body(c_ray, ""))),
+            }
+        }
+        out
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn fo_request(
+        &mut self,
+        url: &str,
+        referer: &str,
+        origin: &str,
+        method: &str,
+        with_cf_chl: bool,
+        ch: &str,
+        c_ray: &str,
+        body: Option<&str>,
+    ) -> Result<(u16, FoBlobAnalysis), anyhow::Error> {
+        if method == "POST" {
+            self.set_post_headers_order();
+        } else {
+            self.set_get_headers_order();
+        }
+
+        let mut req = match method {
+            "POST" => self.client.post(url),
+            _ => self.client.get(url),
+        };
+        req = req
+            .header("Accept", "*/*")
+            .header("Sec-Fetch-Site", "same-origin")
+            .header("Sec-Fetch-Mode", "cors")
+            .header("Sec-Fetch-Dest", "empty")
+            .header("Referer", referer)
+            .header("Priority", "u=2");
+
+        if method == "POST" {
+            req = req
+                .header("Content-Type", "text/plain;charset=UTF-8")
+                .header("Origin", origin);
+        }
+        if with_cf_chl {
+            req = req.header("cf-chl", ch).header("cf-chl-ra", "0");
+        }
+        if let Some(b) = body {
+            req = req
+                .header("Content-Length", b.len().to_string())
+                .body(b.to_string());
+        }
+
+        let response = req.send().await?;
+        let status = response.status().as_u16();
+        let content_encoding = response
+            .headers()
+            .get("Content-Encoding")
+            .cloned()
+            .unwrap_or_else(|| HeaderValue::from_str("").unwrap())
+            .to_str()?
+            .to_string();
+        let bytes = response.bytes().await?;
+        let decompressed =
+            decompress_body(bytes.as_ref(), &content_encoding).unwrap_or_else(|_| bytes.to_vec());
+        let text = String::from_utf8_lossy(&decompressed).into_owned();
+        Ok((status, analyze_fo_body(c_ray, &text)))
     }
 
     pub async fn get_image(
@@ -511,37 +670,6 @@ fn get_referrer_host(referrer: &str) -> Result<String, anyhow::Error> {
     Ok(parsed.origin().ascii_serialization() + "/")
 }
 
-const ENABLE_FEEDBACK: bool = true;
-const THEME: &str = "auto";
-const LANGUAGE: &str = "auto";
-
-fn generate_solve_url(branch: &str, site_key: &str) -> String {
-    let feedback_param = if ENABLE_FEEDBACK { "fbE" } else { "fbD" };
-
-    format!(
-        "https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/{}/turnstile/if/ov2/av0/rcv/{}/{}/{}/{}/new/normal/{}/",
-        branch,
-        generate_widget_id(),
-        site_key,
-        THEME,
-        feedback_param,
-        LANGUAGE,
-    )
-}
-
-fn generate_widget_id() -> String {
-    let chars: Vec<char> = "abcdefghijklmnopqrstuvwxyz0123456789".chars().collect();
-    let mut rng = rand::rng();
-    let mut r = String::new();
-
-    for _ in 0..5 {
-        let idx = rng.random_range(0..chars.len());
-        r.push(chars[idx]);
-    }
-
-    r
-}
-
 fn build_client<P>(
     emulation: P,
     proxy: Option<String>,
@@ -574,6 +702,7 @@ where
         .brotli(false)
         .deflate(false)
         .zstd(false)
+        .cookie_store(true)
         .timeout(Duration::from_secs(15))
         .pool_idle_timeout(Some(Duration::from_millis(30000)))
         .default_headers(header_map);

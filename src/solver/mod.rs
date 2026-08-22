@@ -1,18 +1,20 @@
 use crate::solver::task::TurnstileTask;
 use crate::solver::user_fingerprint::Fingerprint;
-use rand::{rng, Rng};
+use rand::{Rng, rng};
 use std::fs;
 
-pub(crate) mod challenge;
+pub mod challenge;
 pub mod entries;
+pub mod fo_blob;
 pub mod keys;
 mod performance;
+pub mod protocol;
 pub mod task;
 mod task_client;
+mod timezone;
 pub mod user_fingerprint;
 mod utils;
 pub mod vm_parser;
-mod timezone;
 
 #[derive(Debug, Clone)]
 pub struct VersionInfo {
@@ -26,7 +28,9 @@ pub struct TurnstileSolver {
 
 impl TurnstileSolver {
     pub async fn new() -> Self {
-        let fp_str = fs::read("workspace/cloudflare_test.json").unwrap();
+        let fp_str = fs::read("workspace/cloudflare_test.json").expect(
+            "workspace/cloudflare_test.json is missing; collect it with scripts/collect_fingerprint.mjs (see AGENTS.md)",
+        );
 
         let raw_values: Vec<serde_json::Value> = serde_json::from_slice(&fp_str).unwrap();
 
@@ -37,9 +41,7 @@ impl TurnstileSolver {
             }
         }
 
-        Self {
-            fingerprints: fps,
-        }
+        Self { fingerprints: fps }
     }
 
     pub async fn create_task(
@@ -52,14 +54,7 @@ impl TurnstileSolver {
         let fingerprint = self.get_fingerprint();
         let site_key = site_key.into();
 
-        let task = TurnstileTask::new(
-            site_key,
-            href.into(),
-            action,
-            c_data,
-            None,
-            fingerprint,
-        )?;
+        let task = TurnstileTask::new(site_key, href.into(), action, c_data, None, fingerprint)?;
 
         Ok(task)
     }
