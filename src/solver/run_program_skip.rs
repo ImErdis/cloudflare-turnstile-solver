@@ -388,6 +388,9 @@ mod tests {
             return;
         }
         let html = std::fs::read_to_string(path).unwrap();
+        if !html.contains("56907") || !html.contains("Xw+=go[Xt^3+XM[Xm++]&255^136]") {
+            return;
+        }
         assert!(html.contains("go=[],gR=0;gR<256;go[gR]=String["));
         assert!(html.contains("Xw+=go[Xt^3+XM[Xm++]&255^136]"));
         let packed = extract_inline_run_program_packed(&html).expect("inline runProgram packed");

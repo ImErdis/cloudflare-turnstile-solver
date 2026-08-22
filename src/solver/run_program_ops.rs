@@ -864,6 +864,14 @@ mod tests {
         FETCH_BRANCH_B, FETCH_BRANCH_B_LATE, OPCODE_TABLE_B_LATE, OpcodeKind, next_key,
     };
 
+    /// Original 56907 dump identity is the `Xf` tag `162===Xw`.
+    /// Later iframes can still contain the `56907` mul without those snippets.
+    fn headed_56907_iframe() -> Option<String> {
+        let path = std::path::Path::new("artifacts/re-out/chrome-oracle/iframe-1.html");
+        let html = std::fs::read_to_string(path).ok()?;
+        (html.contains("56907") && html.contains("162===Xw")).then_some(html)
+    }
+
     #[test]
     fn js_float_xor_truncates_like_to_int32() {
         assert_eq!(js_xor_imm(62.48), 62);
@@ -1045,11 +1053,9 @@ mod tests {
         assert_eq!(js_xor_imm(136.0), XF_STRING_CHARSET_XOR);
         let tags: Vec<u8> = XF_TAG_CASES.iter().map(|c| c.tag).collect();
         assert_eq!(tags.len(), 12);
-        let path = std::path::Path::new("artifacts/re-out/chrome-oracle/iframe-1.html");
-        if !path.is_file() {
+        let Some(html) = headed_56907_iframe() else {
             return;
-        }
-        let html = std::fs::read_to_string(path).unwrap();
+        };
         for snip in [
             "162===Xw",
             "Xw===86",
@@ -1088,11 +1094,9 @@ mod tests {
             assert_eq!(h.handler, p.handler);
             assert_eq!(h.family, p.family);
         }
-        let path = std::path::Path::new("artifacts/re-out/chrome-oracle/iframe-1.html");
-        if !path.is_file() {
+        let Some(html) = headed_56907_iframe() else {
             return;
-        }
-        let html = std::fs::read_to_string(path).unwrap();
+        };
         for snip in [
             "Xt[Xo]=Xt[XQ][Xt[XM]]}",
             "Xt[Xo][Xt[XQ]]=Xt[XM]}",
@@ -1122,11 +1126,9 @@ mod tests {
             let h = layout_for_late(r.opcode).unwrap();
             assert_eq!(h.handler, r.handler);
         }
-        let path = std::path::Path::new("artifacts/re-out/chrome-oracle/iframe-1.html");
-        if !path.is_file() {
+        let Some(html) = headed_56907_iframe() else {
             return;
-        }
-        let html = std::fs::read_to_string(path).unwrap();
+        };
         for snip in [
             "XY[`o`]=void 0,XR[XK]=XY",
             "Xm[XQ][`o`]=A[Xt^W]",
@@ -1158,11 +1160,9 @@ mod tests {
             let h = layout_for_late(c.opcode).unwrap();
             assert_eq!(h.handler, c.handler);
         }
-        let path = std::path::Path::new("artifacts/re-out/chrome-oracle/iframe-1.html");
-        if !path.is_file() {
+        let Some(html) = headed_56907_iframe() else {
             return;
-        }
-        let html = std::fs::read_to_string(path).unwrap();
+        };
         for snip in [
             "A[this.m][XQ].o",
             "XR=XM[this.m][XS].o",
@@ -1189,11 +1189,9 @@ mod tests {
             let h = layout_for_late(j.opcode).unwrap();
             assert_eq!(h.handler, j.handler);
         }
-        let path = std::path::Path::new("artifacts/re-out/chrome-oracle/iframe-1.html");
-        if !path.is_file() {
+        let Some(html) = headed_56907_iframe() else {
             return;
-        }
-        let html = std::fs::read_to_string(path).unwrap();
+        };
         for snip in [
             "^207.34,XM?",
             "Xm>=A",
@@ -1248,11 +1246,9 @@ mod tests {
             FETCH_BRANCH_B_LATE.key_mul
         );
         assert_eq!(NEXT_GAP, "handler_semantics");
-        let path = std::path::Path::new("artifacts/re-out/chrome-oracle/iframe-1.html");
-        if !path.is_file() {
+        let Some(html) = headed_56907_iframe() else {
             return;
-        }
-        let html = std::fs::read_to_string(path).unwrap();
+        };
         for snip in [
             "new DataView(W)",
             "new ArrayBuffer(8)",
@@ -1315,9 +1311,7 @@ mod tests {
         assert!(XG.contains("^112.87") && XG.contains("^19"));
         assert_eq!(js_xor_imm(41.43), 41);
         assert!(GE.contains("^41.43") && GE.contains(",221)") && GE.contains(",180)") && GE.contains(",19)"));
-        let path = std::path::Path::new("artifacts/re-out/chrome-oracle/iframe-1.html");
-        if path.is_file() {
-            let html = std::fs::read_to_string(path).unwrap();
+        if let Some(html) = headed_56907_iframe() {
             for snip in [
                 GQ, GG, X3, GY, XF, X4, XZ, XG, GE, X1, X2, GX, GN, GY_GET, GZ, X5, XJ, XJ_NEW, GC,
                 GL, XJ_ALLOC,

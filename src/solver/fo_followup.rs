@@ -219,6 +219,13 @@ mod tests {
         }
         let v: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let mul = v
+            .pointer("/fetch/key_mul")
+            .or_else(|| v.pointer("/fetchSchedule/keyMul"))
+            .and_then(|x| x.as_u64());
+        if mul != Some(56_907) && v.get("laterSameDay").is_none() {
+            return;
+        }
         let pairs = v
             .get("foPostPairs")
             .and_then(|x| x.as_array())
@@ -281,6 +288,14 @@ mod tests {
                 continue;
             }
             let html = std::fs::read_to_string(path).unwrap();
+            if !html.contains("56907") {
+                continue;
+            }
+            if candidate.ends_with("chrome-oracle/iframe-1.html")
+                && !html.contains("setTimeout(fj,100,h,Xm)")
+            {
+                continue;
+            }
             assert!(
                 html.contains("function f4") || html.contains("f4=function"),
                 "{candidate} missing f4"

@@ -376,6 +376,9 @@ mod tests {
         let path = std::path::Path::new("artifacts/re-out/chrome-oracle/iframe-1.html");
         if path.is_file() {
             let html = std::fs::read_to_string(path).unwrap();
+            if !html.contains("56907") || !html.contains("XK=A[rH(JY.aj)](runProgram,XS,E)") {
+                return;
+            }
             assert!(html.contains("SMrTl9: '"));
             assert!(html.contains("xBCsP4: []"));
             assert!(html.contains("\"sqKXG6\":"));

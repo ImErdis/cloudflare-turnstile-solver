@@ -402,9 +402,15 @@ function fetchSnippet(html) {
 /** HTML fetch schedule. `init_key` is not here — that needs opcode tuples. */
 function extractFetchQuadratic(html) {
   if (!html) return null;
-  const idx = html.search(
-    /(\w+)\*\1\*\d{4,5}|\d{4,5}\*\((\w+)\*\2\)|,\d{4,5}\),[\s\S]{0,48}\(\w+,\d{4,5}\)/,
-  );
+  // Prefer mix² * mul over later helper constants (8696 is key_quad_b, not key_mul).
+  let idx = html.search(/\d{4,5}\*\(([A-Za-z_$][\w$]*)\*\1\)/);
+  if (idx < 0) idx = html.search(/([A-Za-z_$][\w$]*)\*\1\*\d{4,5}/);
+  if (idx < 0) idx = html.search(/([A-Za-z_$][\w$]*),\1\)\*\d{4,5}/);
+  if (idx < 0) {
+    idx = html.search(
+      /(\w+)\*\1\*\d{4,5}|,\d{4,5}\),[\s\S]{0,48}\(\w+,\d{4,5}\)/,
+    );
+  }
   const window = idx >= 0 ? html.slice(Math.max(0, idx - 240), idx + 420) : html;
   const sq = window.match(
     /(\w+)\*\1\*(\d{4,5}),[\s\S]{0,96}?\(\1,(\d{4,5})\)\)\+(\d{4,5}),255/,
@@ -433,6 +439,9 @@ function extractFetchQuadratic(html) {
   const mulSqPlusBmix = window.match(
     /(\d{4,5})\*\((\w+)\*\2\)\+(\d{4,5})\*\2,(\d{4,5})\)/,
   );
+  const helperPairTimesMul = window.match(
+    /(\w+),\1\)\*(\d{4,5})\+[\s\S]{0,96}?\(\1,(\d{4,5})\)\+(\d{4,5})&255/,
+  );
   const mulCommaHelper = window.match(
     /(\d{4,5})\*\((\w+)\*\2\),[\s\S]{0,120}?\(\2,(\d{4,5})\)\),(\d{4,5})\)&255/,
   );
@@ -452,6 +461,7 @@ function extractFetchQuadratic(html) {
     starMix ||
     mulTimesSq ||
     mulSqPlusBmix ||
+    helperPairTimesMul ||
     mulCommaHelper ||
     sqCommaHelper ||
     alt ||
@@ -496,6 +506,11 @@ function extractFetchQuadratic(html) {
     keyQuadB = Number(mulSqPlusBmix[3]);
     keyAdd = Number(mulSqPlusBmix[4]);
     spelling = "mul*(mix*mix)+b*mix,add";
+  } else if (helperPairTimesMul) {
+    keyMul = Number(helperPairTimesMul[2]);
+    keyQuadB = Number(helperPairTimesMul[3]);
+    keyAdd = Number(helperPairTimesMul[4]);
+    spelling = "helper(mix,mix)*mul+helper(mix,b)+add";
   } else if (mulCommaHelper) {
     keyMul = Number(mulCommaHelper[1]);
     keyQuadB = Number(mulCommaHelper[3]);
@@ -518,6 +533,7 @@ function extractFetchQuadratic(html) {
     spelling = "mul*(mix*mix)";
   }
   return {
+    kind: "quadratic",
     keyMul,
     keyQuadB,
     keyAdd,
@@ -601,6 +617,7 @@ const FETCH_SOURCE_MARKERS = [
   "28814",
   "31579",
   "59205",
+  "55067",
   "I*I*8904",
   "*8904,",
 ];
@@ -1092,7 +1109,16 @@ function finalizeFetchLoopRows(rows) {
       bcLen: r.bcLen,
       pcSlot,
       caseOp: Number.isFinite(r.caseOp) ? r.caseOp & 255 : undefined,
-      opFrom: fromCase ? "caseLabel" : r.opFrom,
+      opFrom:
+        r.bpWhy === "pausedFn"
+          ? "pausedFn"
+          : fromCase
+            ? "caseLabel"
+            : r.opFrom,
+      fn: r.fn,
+      bpWhy: r.bpWhy,
+      bpCaseOp: Number.isFinite(r.bpCaseOp) ? r.bpCaseOp & 255 : undefined,
+      vmFrom: r.vmFrom,
       byteVia: Number.isFinite(byte) ? "vm" : undefined,
     };
     out.push(row);
@@ -1998,6 +2024,13 @@ function selfTestInject() {
     "j=tL[rn(f9.ts)](173+tV[j],255),G=tB[tz]+j,tB[tz]=tL[rn(f9.tD)](tL[rn(f9.tv)](55067*(G*G)+8696*G,44379),255),j){case 143:e7[rn(f9.tx)](this);break;}";
   const live55067BmixF = extractFetchQuadratic(live55067Bmix);
   const live55067BmixMark = fetchMarkerInSource(live55067Bmix);
+  const live55067HelperPair =
+    "tB[tz]=tL[rn(f9.ZM)](tR,tR)*55067+tL[rn(f9.ZT)](tR,8696)+44379&255,tx){case 143:e7";
+  const live55067HelperPairF = extractFetchQuadratic(live55067HelperPair);
+  const falseLinFirst =
+    "x=8696)+44379&255,j){case 143:zz();}" + live55067Bmix;
+  const falseLinFirstF = extractFetchQuadratic(falseLinFirst);
+  const falseLinFirstS = extractFetchSchedule(falseLinFirst);
   const svg8904 = fetchMarkerInSource('width="8904" height="12"');
   const fin = finalizeFetchLoopRows([
     {
@@ -2050,7 +2083,7 @@ function selfTestInject() {
     },
   ]);
   const handlerSrc =
-    "switch(Q){case 220:Jj[Hq](this);break;case 151:JY[Hq](this);break;} function Jj(a){return a} function JY(a){return a}";
+    "switch(Q){case 220:Jj[Hq](this);break;case 151:JY[Hq](this);break;case 1:L[Hq](this);break;case 2:L[Hq](this);break;} function Jj(a){return a} function JY(a){return a} function L(a){return a}";
   const handlerSites = fetchLoopHandlerSites(handlerSrc, handlerSrc.indexOf("switch"));
   return {
     ok:
@@ -2186,6 +2219,15 @@ function selfTestInject() {
       live55067BmixF.keyAdd === 44379 &&
       live55067BmixMark &&
       live55067BmixMark.marker === "55067" &&
+      live55067HelperPairF &&
+      live55067HelperPairF.keyMul === 55067 &&
+      live55067HelperPairF.keyQuadB === 8696 &&
+      live55067HelperPairF.keyAdd === 44379 &&
+      falseLinFirstF &&
+      falseLinFirstF.keyMul === 55067 &&
+      falseLinFirstS &&
+      falseLinFirstS.keyMul === 55067 &&
+      falseLinFirstS.kind === "quadratic" &&
       live23196H.html.includes("__cfOp.push") &&
       live23196C.html.includes("__cfOp.push") &&
       live23196F &&
@@ -2207,6 +2249,7 @@ function selfTestInject() {
       live23196Sites.some((x) => x.why === "case" && x.caseOp === 220) &&
       handlerSites.some((x) => x.why === "handlerFn" && x.caseOp === 220 && x.name === "Jj") &&
       handlerSites.some((x) => x.why === "handlerFn" && x.caseOp === 151 && x.name === "JY") &&
+      handlerSites.every((x) => x.name !== "L") &&
       svg8904 == null &&
       fin[0] &&
       fin[0].pc === 0 &&
@@ -2309,6 +2352,7 @@ const fetchLoopBreakpoints = new Set();
 const fetchLoopBpRows = [];
 const fetchLoopBpMeta = new Map();
 const handlerNameToOp = new Map();
+const ambiguousHandlerNames = new Set();
 const scriptSources = new Map();
 const scriptNotes = [];
 let iframeRewrites = 0;
@@ -2609,10 +2653,10 @@ function fetchLoopBreakpointSites(src, markerIdx) {
   return sites;
 }
 
-function fetchLoopHandlerSites(src, markerIdx) {
-  if (!src || markerIdx == null || markerIdx < 0) return [];
-  const window = src.slice(Math.max(0, markerIdx - 400), markerIdx + 25000);
+function collectHandlerCaseOps(src, markerIdx) {
   const byName = new Map();
+  if (!src || markerIdx == null || markerIdx < 0) return byName;
+  const window = src.slice(Math.max(0, markerIdx - 400), markerIdx + 25000);
   const re = /case (\d+):(\w+)[\[(]/g;
   let m;
   while ((m = re.exec(window))) {
@@ -2621,6 +2665,23 @@ function fetchLoopHandlerSites(src, markerIdx) {
     if (!byName.has(name)) byName.set(name, new Set());
     byName.get(name).add(op);
   }
+  return byName;
+}
+
+function recordAmbiguousHandlerNames(src, markerIdx) {
+  const byName = collectHandlerCaseOps(src, markerIdx);
+  for (const [name, ops] of byName) {
+    if (ops.size !== 1) {
+      ambiguousHandlerNames.add(name);
+      handlerNameToOp.delete(name);
+    }
+  }
+  return byName;
+}
+
+function fetchLoopHandlerSites(src, markerIdx) {
+  if (!src || markerIdx == null || markerIdx < 0) return [];
+  const byName = collectHandlerCaseOps(src, markerIdx);
   const sites = [];
   const seenIdx = new Set();
   for (const [name, ops] of byName) {
@@ -2753,6 +2814,7 @@ async function trySetFetchLoopBp(session, s, scriptSource, loc) {
 
 async function setFetchLoopBreakpointNear(session, s, scriptSource, idx) {
   scriptSources.set(s.scriptId, scriptSource);
+  recordAmbiguousHandlerNames(scriptSource, idx);
   const sites = fetchLoopBreakpointSites(scriptSource, idx);
   const handlers = fetchLoopHandlerSites(scriptSource, idx);
   const { lineNumber, columnNumber } = sourceLineCol(scriptSource, idx);
@@ -2951,6 +3013,10 @@ async function attachSession(session, targetInfo, waitingForDebugger) {
         }
         const fetchHit = hit.some((id) => fetchLoopBreakpoints.has(id));
         if (fetchHit && frame && liveFetchRaw.length < fetchTupleCap) {
+          if (fname && ambiguousHandlerNames.has(fname)) {
+            note("fetchLoopSkipAmbiguous", { fn: fname });
+            return;
+          }
           const row = { via: "fetchLoop", fn: fname };
           const frames = (evt.callFrames || []).slice(0, 6);
           row.frameNames = frames.map((f) => f.functionName || "");
@@ -3415,7 +3481,20 @@ try {
 const bodyShape = foBodyShape(foNet, xhr, iframeHtml);
 const followUpShape = foFollowUpShape(foNet, xhr);
 const initJson = extractInitJsonKeys(iframeHtml);
-const fetchSchedule = extractFetchSchedule(iframeHtml);
+function fetchScheduleFromCapture(iframeHtml) {
+  const fromIframe = extractFetchSchedule(iframeHtml);
+  try {
+    for (const n of fs.readdirSync(outDir)) {
+      if (!n.startsWith("executed-fetch-") || !n.endsWith(".js")) continue;
+      const s = extractFetchSchedule(
+        fs.readFileSync(path.join(outDir, n), "utf8"),
+      );
+      if (s && s.keyMul && s.keyQuadB) return s;
+    }
+  } catch {}
+  return fromIframe;
+}
+const fetchSchedule = fetchScheduleFromCapture(iframeHtml);
 const followUpJson = pickFollowUpShape(foShapes, initJson?.keys || []);
 const foPlaintextRows = foShapes.map((s) =>
   classifyFoPlaintext(s, initJson?.keys || []),
