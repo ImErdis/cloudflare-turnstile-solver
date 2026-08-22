@@ -1,4 +1,5 @@
-/workspace
+/workspace/*
+!/workspace/cloudflare_test.json
 /target
 /.idea
 /.vscode

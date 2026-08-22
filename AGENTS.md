@@ -33,6 +33,7 @@ may not fully work end-to-end against live Cloudflare.
 - Unpack a captured packed `runProgram` blob (no network): `cargo run --locked --bin analyze_run_program`
 - Naive opcode-fetch walk: `cargo run --locked --bin analyze_run_program -- --decode 16 <packed>`
 - Headed Chrome oracle: `cd scripts && npm install && DISPLAY=:1 node chrome_oracle.mjs`
+- Collect a local fingerprint JSON: `cd scripts && npm install && node collect_fingerprint.mjs`
 - Run the solver against the SolveGate demo: `cargo run --locked --bin solve_test`
 - Analyze a captured JS file with the in-tree oxc pipeline:
   `cargo run --locked --bin analyze_js -- path/to/script.js --write-deobfuscated artifacts/re-out/deob.js`
@@ -219,7 +220,15 @@ longer ships that VM on `/orchestrate/` (see protocol notes above: iframe `/fo/`
 scripts into git (`artifacts/` is gitignored).
 
 ### Running the `solve_test` binary
-- `TurnstileSolver::new()` reads a private fingerprint dataset from `./workspace/cloudflare_test.json`
-  (relative to the current dir). That file is gitignored (`/workspace` in `.gitignore`, i.e. the
-  `workspace/` subdirectory) and is **not** included in the repo, so the binary panics until that
-  dataset is supplied. Building, linting, `probe_iframe`, and unit tests do not need it.
+- `TurnstileSolver::new()` reads `./workspace/cloudflare_test.json` (relative to the repo root).
+  The original author's dump was never published. A collected fingerprint that matches the
+  `Fingerprint` serde schema is tracked at that path (other files under `workspace/` stay
+  gitignored). A collector is in `scripts/collect_fingerprint.mjs`.
+- Regenerate it with Google Chrome + puppeteer-core:
+  `cd scripts && npm install && node collect_fingerprint.mjs`
+- The collector records real navigator/WebGL/Intl/audio surfaces from this VM's Chrome. It does
+  **not** reproduce Cloudflare Turnstile's private VM hashes. The hashes are SHA-256 of local
+  surfaces so the JSON deserializes; they will not match a live Turnstile script.
+- Building, linting, `probe_iframe`, and unit tests do not need a live match. `solve_test`
+  should get iframe HTTP 200 + parsed options, then an honest failure: live `/fo/` without a
+  valid init body 400s. Do **not** fill or POST the init JSON.
