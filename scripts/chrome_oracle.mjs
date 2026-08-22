@@ -2120,6 +2120,7 @@ function selfTestInject() {
     handlerThisGSrc,
     handlerThisGSrc.indexOf("switch"),
   );
+  const braceSites = fetchLoopUniqueBraceSites(handlerThisGSrc, handlerThisGSrc.indexOf("switch"));
   return {
     ok:
       a.injected &&
@@ -2298,7 +2299,13 @@ function selfTestInject() {
       uniqueCalls.some((x) => x.why === "handlerCall" && x.caseOp === 151 && x.name === "JY") &&
       uniqueCalls.every((x) => x.name !== "L") &&
       jjCall &&
-      handlerSrc.slice(jjCall.idx, jjCall.idx + 2) === "Jj" &&
+      handlerSrc.slice(jjCall.idx, jjCall.idx + 8) === "case 220" &&
+      braceSites.some(
+        (x) =>
+          x.why === "handlerFn" &&
+          x.name === "Jj" &&
+          handlerThisGSrc.slice(x.idx, x.idx + 1) === "{",
+      ) &&
       handlerThisGSites.some(
         (x) =>
           x.why === "handlerFn" &&
@@ -2770,14 +2777,14 @@ function uniqueHandlerEntryIdx(src, name) {
   return brace;
 }
 
-/** Unique `case N:name[` call in the fetch switch — after decode, before handler PW++. */
+/** Unique `case N:name[` in the fetch switch (after decode, before handler). */
 function fetchLoopUniqueCallSites(src, markerIdx) {
   if (!src || markerIdx == null || markerIdx < 0) return [];
   const byName = collectHandlerCaseOps(src, markerIdx);
   const winStart = Math.max(0, markerIdx - 400);
   const window = src.slice(winStart, markerIdx + 25000);
   const sites = [];
-  const seenIdx = new Set();
+  const seenOp = new Set();
   const re = /case (\d+):(\w+)[\[(]/g;
   let m;
   while ((m = re.exec(window))) {
@@ -2786,16 +2793,65 @@ function fetchLoopUniqueCallSites(src, markerIdx) {
     const ops = byName.get(name);
     if (!ops || ops.size !== 1 || [...ops][0] !== op) continue;
     if (uniqueNamedFunctionIdx(src, name) == null) continue;
-    let idx = winStart + m.index + m[0].indexOf(":") + 1;
-    while (idx < src.length && src[idx] === " ") idx++;
-    if (seenIdx.has(idx)) continue;
-    seenIdx.add(idx);
+    if (seenOp.has(op)) continue;
+    seenOp.add(op);
+    const idx = winStart + m.index;
     sites.push({
       idx,
       why: "handlerCall",
       caseOp: op,
       name,
       ...sourceLineCol(src, idx),
+    });
+  }
+  return sites;
+}
+
+function matchingBraceIdx(src, brace) {
+  if (brace == null || brace < 0) return -1;
+  let depth = 0;
+  for (let i = brace; i < src.length; i++) {
+    const c = src[i];
+    if (c === "{") depth++;
+    else if (c === "}") {
+      depth--;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
+}
+
+function handlerImmediateBound(src, name) {
+  const first = uniqueNamedFunctionIdx(src, name);
+  if (first == null) return null;
+  const brace = src.indexOf("{", first);
+  if (brace < 0) return null;
+  const end = matchingBraceIdx(src, brace);
+  const thisG = src.indexOf("this.g", brace);
+  const plus =
+    thisG >= 0 && (end < 0 || thisG < end) ? src.indexOf("++", thisG) : -1;
+  return { brace, end, thisG, plus };
+}
+
+/** Function `{` for unique handlers — VM slots are post-fetch, body has not run PW++. */
+function fetchLoopUniqueBraceSites(src, markerIdx) {
+  if (!src || markerIdx == null || markerIdx < 0) return [];
+  const byName = collectHandlerCaseOps(src, markerIdx);
+  const sites = [];
+  const seenIdx = new Set();
+  for (const [name, ops] of byName) {
+    if (ops.size !== 1) continue;
+    if (uniqueNamedFunctionIdx(src, name) == null) continue;
+    const first = uniqueNamedFunctionIdx(src, name);
+    const brace = src.indexOf("{", first);
+    if (brace < 0 || seenIdx.has(brace)) continue;
+    seenIdx.add(brace);
+    sites.push({
+      idx: brace,
+      why: "handlerFn",
+      caseOp: [...ops][0],
+      name,
+      ...sourceLineCol(src, brace),
     });
   }
   return sites;
@@ -2857,7 +2913,7 @@ async function trySetFetchLoopBp(session, s, scriptSource, loc) {
   const resolved = await resolveBreakpointLocation(session, loc);
   const attempts = [];
   const seenAttempt = new Set();
-  for (const attempt of [resolved, loc]) {
+  for (const attempt of [loc, resolved]) {
     if (!attempt) continue;
     const k = `${attempt.lineNumber}:${attempt.columnNumber}`;
     if (seenAttempt.has(k)) continue;
@@ -2886,11 +2942,17 @@ async function trySetFetchLoopBp(session, s, scriptSource, loc) {
         actual && typeof actual.columnNumber === "number"
           ? indexFromLineCol(scriptSource, actual.lineNumber, actual.columnNumber)
           : reqIdx;
-      if (
-        reqIdx != null &&
+      const bound = loc.name ? handlerImmediateBound(scriptSource, loc.name) : null;
+      const snappedPastImm =
+        bound &&
+        bound.plus >= 0 &&
         actIdx != null &&
-        Math.abs(actIdx - reqIdx) > 120
-      ) {
+        actIdx >= bound.plus;
+      const snappedOutside =
+        bound &&
+        actIdx != null &&
+        (actIdx < bound.brace || (bound.end >= 0 && actIdx > bound.end));
+      if (snappedPastImm || snappedOutside) {
         await session
           .send("Debugger.removeBreakpoint", { breakpointId: bp.breakpointId })
           .catch(() => {});
@@ -2901,7 +2963,10 @@ async function trySetFetchLoopBp(session, s, scriptSource, loc) {
           caseOp: loc.caseOp ?? null,
           req: reqIdx,
           act: actIdx,
-          delta: actIdx - reqIdx,
+          plus: bound && bound.plus,
+          brace: bound && bound.brace,
+          pastImm: !!snappedPastImm,
+          outside: !!snappedOutside,
         });
         continue;
       }
@@ -2962,6 +3027,7 @@ async function setFetchLoopBreakpointNear(session, s, scriptSource, idx) {
   recordAmbiguousHandlerNames(scriptSource, idx);
   const sites = fetchLoopBreakpointSites(scriptSource, idx);
   const uniqueCalls = fetchLoopUniqueCallSites(scriptSource, idx);
+  const braces = fetchLoopUniqueBraceSites(scriptSource, idx);
   const handlers = fetchLoopHandlerSites(scriptSource, idx);
   const { lineNumber, columnNumber } = sourceLineCol(scriptSource, idx);
   const caseCalls = sites.filter((x) => x.why === "caseCall");
@@ -2973,7 +3039,7 @@ async function setFetchLoopBreakpointNear(session, s, scriptSource, idx) {
     { scriptId: s.scriptId, lineNumber, columnNumber, why: "marker", caseOp: null },
     ...rest,
   ];
-  const preferred = uniqueCalls.length ? uniqueCalls : handlers;
+  const preferred = braces.length ? braces : uniqueCalls.length ? uniqueCalls : handlers;
   const tries = (preferred.length ? preferred : fallback).map((site) => ({
     scriptId: s.scriptId,
     lineNumber: site.lineNumber,
@@ -2985,6 +3051,7 @@ async function setFetchLoopBreakpointNear(session, s, scriptSource, idx) {
   note("fetchLoopSites", {
     n: sites.length,
     uniqueCalls: uniqueCalls.length,
+    braces: braces.length,
     handlers: handlers.length,
     handlerOps: preferred.map((h) => h.caseOp).slice(0, 12),
     whys: tries.map((x) => x.why).slice(0, 8),
