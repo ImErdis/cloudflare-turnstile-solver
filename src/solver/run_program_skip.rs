@@ -103,6 +103,42 @@ pub const HK_LEB_5886_OPCODE: u8 = 70;
 pub const HK_LEB_5886_DST_XOR: u8 = 17;
 pub const HK_LEB_5886_KEY_XOR: u8 = 88;
 
+/// tuples27 `HG` (`case 227:`): outer LEB count, then that many inner LEBs. No alloc.
+pub const HG_TABLE_5886_OPCODE: u8 = 227;
+
+/// tuples27 `HF`/`Hi`: LEB slot then extra 240.
+pub const HF_5886_OPCODE: u8 = 212;
+pub const HI_5886_OPCODE: u8 = 221;
+pub const HF_HI_5886_XOR: u8 = 240;
+
+/// tuples27 `HX` (`case 67:`): dst^17, this^46, arity^75, args^161. No invoke.
+pub const HX_CALL_5886_OPCODE: u8 = 67;
+pub const HX_CALL_5886_DST_XOR: u8 = 17;
+pub const HX_CALL_5886_THIS_XOR: u8 = 46;
+pub const HX_CALL_5886_ARITY_XOR: u8 = 75;
+pub const HX_CALL_5886_ARG_XOR: u8 = 161;
+
+/// tuples27 `HO` (`case 33:`): dst^56, LEB obj, flags^178, args^62. No invoke.
+pub const HO_5886_OPCODE: u8 = 33;
+pub const HO_5886_DST_XOR: u8 = 56;
+pub const HO_5886_FLAGS_XOR: u8 = 178;
+pub const HO_5886_ARG_XOR: u8 = 62;
+
+/// tuples27 `Ht` (`case 219:`): dst^176, ctor^90, arity^216, args^132. No `new`.
+pub const HT_NEW_5886_OPCODE: u8 = 219;
+pub const HT_NEW_5886_DST_XOR: u8 = 176;
+pub const HT_NEW_5886_CTOR_XOR: u8 = 90;
+pub const HT_NEW_5886_ARITY_XOR: u8 = 216;
+pub const HT_NEW_5886_ARG_XOR: u8 = 132;
+
+/// tuples27 `HE` (`case 119:`): XU analogue. dst^229, u24, key^82, flags^240, arity^37, args^33. No apply.
+pub const HE_5886_OPCODE: u8 = 119;
+pub const HE_5886_DST_XOR: u8 = 229;
+pub const HE_5886_KEY_XOR: u8 = 82;
+pub const HE_5886_FLAGS_XOR: u8 = 240;
+pub const HE_5886_ARITY_XOR: u8 = 37;
+pub const HE_5886_ARG_XOR: u8 = 33;
+
 /// Shared `qZ` ALU (`case N:qZ.call(this, variant)`): always 3 imms.
 pub const QZ_5886_OPCODES: &[u8] = &[
     4, 24, 30, 80, 86, 96, 104, 108, 116, 127, 137, 149, 151, 155, 163, 197, 203, 234,
@@ -453,6 +489,67 @@ fn skip_hk_5886(cur: &mut Cursor<'_>) -> Result<(), &'static str> {
     Ok(())
 }
 
+fn skip_hg_table_5886(cur: &mut Cursor<'_>) -> Result<(), &'static str> {
+    let n = cur.leb()? as usize;
+    if n > 1_048_576 {
+        return Err("string_too_long");
+    }
+    for _ in 0..n {
+        let _ = cur.leb()?;
+    }
+    Ok(())
+}
+
+fn skip_hf_hi_5886(cur: &mut Cursor<'_>) -> Result<(), &'static str> {
+    let _ = cur.leb()?;
+    let _ = cur.imm(HF_HI_5886_XOR)?;
+    Ok(())
+}
+
+fn skip_hx_call_5886(cur: &mut Cursor<'_>) -> Result<(), &'static str> {
+    let _ = cur.imm(HX_CALL_5886_DST_XOR)?;
+    let _ = cur.imm(HX_CALL_5886_THIS_XOR)?;
+    let arity = cur.imm(HX_CALL_5886_ARITY_XOR)?;
+    for _ in 0..arity {
+        let _ = cur.imm(HX_CALL_5886_ARG_XOR)?;
+    }
+    Ok(())
+}
+
+fn skip_ho_5886(cur: &mut Cursor<'_>) -> Result<(), &'static str> {
+    let _ = cur.imm(HO_5886_DST_XOR)?;
+    let _ = cur.leb()?;
+    let flags = cur.imm(HO_5886_FLAGS_XOR)?;
+    for _ in 0..flags {
+        let _ = cur.imm(HO_5886_ARG_XOR)?;
+    }
+    Ok(())
+}
+
+fn skip_ht_new_5886(cur: &mut Cursor<'_>) -> Result<(), &'static str> {
+    let _ = cur.imm(HT_NEW_5886_DST_XOR)?;
+    let _ = cur.imm(HT_NEW_5886_CTOR_XOR)?;
+    let arity = cur.imm(HT_NEW_5886_ARITY_XOR)?;
+    for _ in 0..arity {
+        let _ = cur.imm(HT_NEW_5886_ARG_XOR)?;
+    }
+    Ok(())
+}
+
+fn skip_he_5886(cur: &mut Cursor<'_>) -> Result<(), &'static str> {
+    let _ = cur.imm(HE_5886_DST_XOR)?;
+    let _ = cur.imm(0)?;
+    let _ = cur.imm(0)?;
+    let _ = cur.imm(0)?;
+    let _ = cur.imm(HE_5886_KEY_XOR)?;
+    let _ = cur.imm(HE_5886_FLAGS_XOR)?;
+    let arity = cur.imm(HE_5886_ARITY_XOR)?;
+    for _ in 0..arity {
+        let _ = cur.imm(HE_5886_ARG_XOR)?;
+    }
+    Ok(())
+}
+
 fn uses_5886_skip(params: FetchParams) -> bool {
     params.key_mul == FETCH_CHROME_2026_08_22_B_5886.key_mul
         && params.key_quad_b == FETCH_CHROME_2026_08_22_B_5886.key_quad_b
@@ -468,7 +565,7 @@ fn fixed_width_5886(op: u8) -> Option<u8> {
         return Some(3);
     }
     match op {
-        41 | 215 | 250 => Some(2),
+        41 | 215 | 250 | 76 => Some(2),
         87 | 91 | 217 | 81 | 101 => Some(3),
         162 | 154 => Some(4),
         113 | 251 | 59 => Some(5),
@@ -494,6 +591,12 @@ fn skip_mapped_5886(
         HV_5886_OPCODE => skip_hv_5886(cur, start_pc, strings),
         QC_5886_OPCODE => skip_qc_5886(cur, start_pc, strings),
         HK_LEB_5886_OPCODE => skip_hk_5886(cur),
+        HG_TABLE_5886_OPCODE => skip_hg_table_5886(cur),
+        HF_5886_OPCODE | HI_5886_OPCODE => skip_hf_hi_5886(cur),
+        HX_CALL_5886_OPCODE => skip_hx_call_5886(cur),
+        HO_5886_OPCODE => skip_ho_5886(cur),
+        HT_NEW_5886_OPCODE => skip_ht_new_5886(cur),
+        HE_5886_OPCODE => skip_he_5886(cur),
         _ => match fixed_width_5886(op) {
             Some(w) => cur.skip_fixed(w),
             None => Err("unmapped_opcode"),
