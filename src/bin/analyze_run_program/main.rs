@@ -15,9 +15,11 @@ use anyhow::{Context, Result, bail};
 use cf::reverse::encryption::decrypt_cloudflare_response;
 use cf::solver::run_program::unpack_packed_run_program;
 use cf::solver::run_program_ops::{
-    DN_OPCODE, DN_TAG_STRING, HANDLER_LAYOUT_B_LATE, LATE_DIRECT_HANDLER_COUNT,
-    PROPERTY_IMM_ROLES_B_LATE, XF_TAG_CASES, XF_TAG_STRING, classify_pc_delta,
-    classify_pc_delta_late, first_dn_tag_b, first_xf_tag_late, operand_from_byte,
+    CALL_IMM_ROLES_B_LATE, DN_OPCODE, DN_TAG_STRING, HANDLER_LAYOUT_B_LATE, JUMP_IMM_ROLES_B_LATE,
+    LATE_DIRECT_HANDLER_COUNT, LEB_OBJECT_ROLES_B_LATE, PROPERTY_IMM_ROLES_B_LATE, S1_CASES_B_LATE,
+    S1_HTML_HANDLER, S2_CASES_B_LATE, S2_HTML_HANDLER, XD_MIX_SEED, XD_SLOT_XOR, XF_TAG_CASES,
+    XF_TAG_STRING, XI_TYPE_CASES, XP_TAG_CASES, classify_pc_delta, classify_pc_delta_late,
+    first_dn_tag_b, first_xf_tag_late, operand_from_byte,
 };
 use cf::solver::run_program_vm::{
     FETCH_BRANCH_B, FETCH_LIVE, naive_one_byte_fetches, opcode_def_in, params_for_magic,
@@ -297,6 +299,105 @@ fn verify_oracle_file(path: &PathBuf) -> Result<Value> {
                         errors.push(format!("propertyImmRoles.{} assign mismatch", p.handler));
                     }
                 }
+            }
+            if let Some(leb) = late.get("lebObjectRoles").and_then(|x| x.as_array()) {
+                if leb.len() != LEB_OBJECT_ROLES_B_LATE.len() {
+                    errors.push("laterSameDay.lebObjectRoles length mismatch".into());
+                }
+                for (r, row) in LEB_OBJECT_ROLES_B_LATE.iter().zip(leb) {
+                    if row.get("role").and_then(|x| x.as_str()) != Some(r.role)
+                        || row.get("assign").and_then(|x| x.as_str()) != Some(r.assign)
+                    {
+                        errors.push(format!("lebObjectRoles.{} mismatch", r.handler));
+                    }
+                }
+            }
+            if let Some(xp) = late.get("xpTagCases") {
+                let cases = xp.get("cases").and_then(|x| x.as_array());
+                if cases.map(|c| c.len()) != Some(XP_TAG_CASES.len()) {
+                    errors.push("laterSameDay.xpTagCases.cases length mismatch".into());
+                } else if let Some(cases) = cases {
+                    for (c, row) in XP_TAG_CASES.iter().zip(cases) {
+                        if row.get("tag").and_then(|x| x.as_u64()) != Some(u64::from(c.tag))
+                            || row.get("kind").and_then(|x| x.as_str()) != Some(c.kind)
+                        {
+                            errors.push(format!("xpTagCases mismatch at {}", c.kind));
+                        }
+                    }
+                }
+            }
+            if let Some(calls) = late.get("callImmRoles").and_then(|x| x.as_array()) {
+                if calls.len() != CALL_IMM_ROLES_B_LATE.len() {
+                    errors.push("laterSameDay.callImmRoles length mismatch".into());
+                }
+                for (c, row) in CALL_IMM_ROLES_B_LATE.iter().zip(calls) {
+                    if row.get("callee").and_then(|x| x.as_str()) != Some(c.callee)
+                        || row.get("arity").and_then(|x| x.as_str()) != Some(c.arity)
+                    {
+                        errors.push(format!("callImmRoles.{} mismatch", c.handler));
+                    }
+                }
+            }
+            if let Some(jumps) = late.get("jumpImmRoles").and_then(|x| x.as_array()) {
+                if jumps.len() != JUMP_IMM_ROLES_B_LATE.len() {
+                    errors.push("laterSameDay.jumpImmRoles length mismatch".into());
+                }
+                for (j, row) in JUMP_IMM_ROLES_B_LATE.iter().zip(jumps) {
+                    if row.get("condition").and_then(|x| x.as_str()) != Some(j.condition)
+                        || row.get("paths").and_then(|x| x.as_str()) != Some(j.paths)
+                    {
+                        errors.push(format!("jumpImmRoles.{} mismatch", j.handler));
+                    }
+                }
+            }
+            if let Some(xi) = late.get("xiTypeCases") {
+                let cases = xi.get("cases").and_then(|x| x.as_array());
+                if cases.map(|c| c.len()) != Some(XI_TYPE_CASES.len()) {
+                    errors.push("laterSameDay.xiTypeCases.cases length mismatch".into());
+                } else if let Some(cases) = cases {
+                    for (c, row) in XI_TYPE_CASES.iter().zip(cases) {
+                        if row.get("kind").and_then(|x| x.as_str()) != Some(c.kind) {
+                            errors.push(format!("xiTypeCases mismatch at {}", c.kind));
+                        }
+                    }
+                }
+            }
+            if let Some(xd) = late.get("xdMix") {
+                if xd.get("seed").and_then(|x| x.as_u64()) != Some(u64::from(XD_MIX_SEED))
+                    || xd.get("slotXor").and_then(|x| x.as_u64()) != Some(u64::from(XD_SLOT_XOR))
+                {
+                    errors.push("laterSameDay.xdMix mismatch".into());
+                }
+            }
+            if let Some(s1) = late.get("s1Cases").and_then(|x| x.as_array()) {
+                if s1.len() != S1_CASES_B_LATE.len() {
+                    errors.push("laterSameDay.s1Cases length mismatch".into());
+                }
+                for (c, row) in S1_CASES_B_LATE.iter().zip(s1) {
+                    if row.get("imm").and_then(|x| x.as_u64()) != Some(u64::from(c.imm))
+                        || row.get("kind").and_then(|x| x.as_str()) != Some(c.kind)
+                    {
+                        errors.push(format!("s1Cases opcode {} mismatch", c.opcode));
+                    }
+                }
+            }
+            if let Some(s2) = late.get("s2Cases").and_then(|x| x.as_array()) {
+                if s2.len() != S2_CASES_B_LATE.len() {
+                    errors.push("laterSameDay.s2Cases length mismatch".into());
+                }
+                for (c, row) in S2_CASES_B_LATE.iter().zip(s2) {
+                    if row.get("imm").and_then(|x| x.as_u64()) != Some(u64::from(c.imm))
+                        || row.get("kind").and_then(|x| x.as_str()) != Some(c.kind)
+                    {
+                        errors.push(format!("s2Cases opcode {} mismatch", c.opcode));
+                    }
+                }
+            }
+            if late.get("s1HtmlHandler").and_then(|x| x.as_str()) != Some(S1_HTML_HANDLER) {
+                errors.push("laterSameDay.s1HtmlHandler should be gS".into());
+            }
+            if late.get("s2HtmlHandler").and_then(|x| x.as_str()) != Some(S2_HTML_HANDLER) {
+                errors.push("laterSameDay.s2HtmlHandler should be gK".into());
             }
             if let Some(fu) = late.get("foFollowUp") {
                 if fu.get("plaintextKind").and_then(|x| x.as_str())

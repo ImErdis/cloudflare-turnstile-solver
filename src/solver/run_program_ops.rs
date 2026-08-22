@@ -17,6 +17,8 @@
 //! `Fixed`; jumps, LEB, `new`/`call` arity, and tagged load are `Variable`.
 //! Minified names rotate; opcode numbers, `ToInt32` extras, and family tags
 //! did not on the same-day HTML. s1/s2 (`gS`/`gK`) stay case-immediate families.
+//! Remaining Direct families (LEB/`this.m[].o`, call/`new`, jumps, typed store,
+//! binary mix) are shape-snapshotted from the same 56907 HTML — still not a VM.
 //!
 //! This module does **not** execute handlers or produce a token.
 
@@ -233,6 +235,411 @@ pub fn property_roles_for_late(opcode: u8) -> Option<&'static PropertyImmRoles> 
     PROPERTY_IMM_ROLES_B_LATE.iter().find(|p| p.opcode == opcode)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct LebObjectRole {
+    pub opcode: u8,
+    pub handler: &'static str,
+    pub role: &'static str,
+    pub assign: &'static str,
+    pub note: &'static str,
+}
+
+/// `this.m[].o` table on the 56907 iframe. Alloc writes `{o: undefined}`; bind
+/// stores a register into `.o`; load reads `.o` back. Later calls use `.o` as a
+/// callee — that is a different family ([`CALL_IMM_ROLES_B_LATE`]). `.o` is also
+/// added as a number (`Xk`, `XB` case 9). Do not execute.
+pub const LEB_OBJECT_ROLES_B_LATE: &[LebObjectRole] = &[
+    LebObjectRole {
+        opcode: 201,
+        handler: "Xj",
+        role: "alloc",
+        assign: "for n in leb_count { this.m[leb] = {o: undefined} }",
+        note: "LEB count has no extra xor; per-slot LEB index. XY[`o`]=void 0",
+    },
+    LebObjectRole {
+        opcode: 52,
+        handler: "Xz",
+        role: "bind",
+        assign: "this.m[leb].o = regs[slot^132]",
+        note: "Chrome-stable width 3 (1-byte LEB). Xm[XQ][`o`]=A[Xt^W]",
+    },
+    LebObjectRole {
+        opcode: 230,
+        handler: "Xv",
+        role: "bind_then_noarg",
+        assign: "this.m[leb].o = src; dst = other[obf]()",
+        note: "extras 132, 209, 199; 0-arg call is a register method, not .o",
+    },
+    LebObjectRole {
+        opcode: 94,
+        handler: "XH",
+        role: "load",
+        assign: "regs[slot^132] = this.m[leb].o",
+        note: "same extra as Xz; variable LEB width",
+    },
+    LebObjectRole {
+        opcode: 73,
+        handler: "Xk",
+        role: "bind_add",
+        assign: "this.m[leb].o += imm^223; dst^15 = this.m[leb].o",
+        note: "add helper shares string-table id 417 with byte-253+256 wrapping add",
+    },
+    LebObjectRole {
+        opcode: 113,
+        handler: "XP",
+        role: "tagged_leb",
+        assign: "tag^52 then LEB; bind / load / alloc",
+        note: "tag 227 bind, 78 load, 1 alloc; see XP_TAG_CASES",
+    },
+    LebObjectRole {
+        opcode: 27,
+        handler: "XB",
+        role: "state_machine",
+        assign: "mixed bind/load/add/call on this.m[n].o",
+        note: "20 CFF cases; bind `2`, load `14`, add `9`, apply `4`. Do not execute",
+    },
+    LebObjectRole {
+        opcode: 55,
+        handler: "XT",
+        role: "load_then_cond_jump",
+        assign: "dst = this.m[leb].o; if loaded===imm { pc=u24 key^=207 } else alt-or-fall",
+        note: "also in JUMP_IMM_ROLES_B_LATE; extras 132, 112, 19, 207",
+    },
+];
+
+pub fn leb_role_for_late(opcode: u8) -> Option<&'static LebObjectRole> {
+    LEB_OBJECT_ROLES_B_LATE.iter().find(|r| r.opcode == opcode)
+}
+
+/// `XP`/113 first-imm tag after extra 52.
+pub const XP_TAG_XOR: u8 = 52;
+pub const XP_TAG_BIND: u8 = 227;
+pub const XP_TAG_LOAD: u8 = 78;
+pub const XP_TAG_ALLOC: u8 = 1;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct XpTagCase {
+    pub tag: u8,
+    pub kind: &'static str,
+    pub note: &'static str,
+}
+
+pub const XP_TAG_CASES: &[XpTagCase] = &[
+    XpTagCase { tag: XP_TAG_BIND, kind: "bind", note: "XR===227: table[n].o = regs[slot^132]" },
+    XpTagCase { tag: XP_TAG_LOAD, kind: "load", note: "XR===78: regs[slot^132] = table[n].o" },
+    XpTagCase { tag: XP_TAG_ALLOC, kind: "alloc", note: "1===XR: loop {o:undefined} like Xj" },
+];
+
+pub fn xp_tag_kind(tag: u8) -> Option<&'static str> {
+    XP_TAG_CASES.iter().find(|c| c.tag == tag).map(|c| c.kind)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct CallImmRoles {
+    pub opcode: u8,
+    pub handler: &'static str,
+    pub callee: &'static str,
+    pub arity: &'static str,
+    pub assign: &'static str,
+    pub note: &'static str,
+}
+
+/// Call / `apply` / `new` / named-call on the 56907 iframe. Arity `switch(N)` is
+/// layout, not “run N times in Rust”. Callee is a register, `this.m[n].o`, a
+/// bytecode LEB string, or host `XI`. Do not execute.
+pub const CALL_IMM_ROLES_B_LATE: &[CallImmRoles] = &[
+    CallImmRoles {
+        opcode: 165,
+        handler: "XA",
+        callee: "table_o",
+        arity: "n_switch",
+        assign: "dst^90 = this.m[leb].o(...args^36)",
+        note: "arity^154.7; 0/1/2-arg specials then switch 3..7 else apply",
+    },
+    CallImmRoles {
+        opcode: 126,
+        handler: "XW",
+        callee: "table_o",
+        arity: "1",
+        assign: "dst^176.88 = this.m[leb].o(arg^104.03)",
+        note: "CFF; load .o then one register arg then call",
+    },
+    CallImmRoles {
+        opcode: 181,
+        handler: "Xh",
+        callee: "table_o",
+        arity: "2",
+        assign: "dst^19 = this.m[leb].o(a^30, b^30)",
+        note: "CFF 7 cases; XK(Xy,Xu)",
+    },
+    CallImmRoles {
+        opcode: 119,
+        handler: "Xd",
+        callee: "register",
+        arity: "n_switch",
+        assign: "dst^47.63 = callee^191(...args^194)",
+        note: "arity^129; same 0/1/2 + switch 3..7 pattern as XA",
+    },
+    CallImmRoles {
+        opcode: 208,
+        handler: "Xn",
+        callee: "register_method",
+        arity: "n_switch",
+        assign: "dst^77.5 = thisArg===undefined ? fn(...args) : fn.apply(thisArg, args)",
+        note: "obj^27 key^246 arity^22 args^217; void 0 thisArg uses call",
+    },
+    CallImmRoles {
+        opcode: 168,
+        handler: "Xb",
+        callee: "register_method",
+        arity: "1",
+        assign: "dst^77.07 = thisArg===undefined ? fn(arg) : fn.call(thisArg, arg)",
+        note: "CFF; extras 27, 246.12, 217.37",
+    },
+    CallImmRoles {
+        opcode: 161,
+        handler: "Xr",
+        callee: "register_method",
+        arity: "2",
+        assign: "dst^77 = thisArg===undefined ? fn(a,b) : fn.call(thisArg, a, b)",
+        note: "CFF; extras 27, 246.93, 217.37",
+    },
+    CallImmRoles {
+        opcode: 103,
+        handler: "X0",
+        callee: "register",
+        arity: "0",
+        assign: "dst^199 = callee^209.39()",
+        note: "store 0-arg result",
+    },
+    CallImmRoles {
+        opcode: 134,
+        handler: "gO",
+        callee: "register",
+        arity: "1",
+        assign: "callee^125(arg^131)",
+        note: "no result store; obfuscated property call",
+    },
+    CallImmRoles {
+        opcode: 127,
+        handler: "gc",
+        callee: "register_frame",
+        arity: "4tuple",
+        assign: "callee^131([u24, key^207, this.m[obf](), regs[154^h][obf]])",
+        note: "Chrome deltas are jumps; frame includes the object table",
+    },
+    CallImmRoles {
+        opcode: 177,
+        handler: "XU",
+        callee: "host_xi",
+        arity: "n_plus_flags",
+        assign: "dst = XI.apply(null, this, [u24, key^207, this.m, args^37, flags])",
+        note: "flags from imm^68: 15&x, bit7, bit6. Host apply — do not execute",
+    },
+    CallImmRoles {
+        opcode: 11,
+        handler: "XJ",
+        callee: "register_ctor",
+        arity: "n_switch",
+        assign: "dst^16.51 = new ctor^206(...args^87.86)",
+        note: "arity^108; switch 0..7 else Function.prototype.bind.apply",
+    },
+    CallImmRoles {
+        opcode: 176,
+        handler: "XE",
+        callee: "named_string",
+        arity: "n_switch",
+        assign: "dst^44 = (obj^10===undefined ? name : obj[name])(...args^37)",
+        note: "LEB string charset extra 206.24; arity^25.01",
+    },
+    CallImmRoles {
+        opcode: 98,
+        handler: "XV",
+        callee: "table_o_named",
+        arity: "n_switch",
+        assign: "dst^51 = this.m[leb].o[leb_string](...args^56)",
+        note: "string charset extra 17.26; arity^141; sibling of XE via .o",
+    },
+];
+
+pub fn call_roles_for_late(opcode: u8) -> Option<&'static CallImmRoles> {
+    CALL_IMM_ROLES_B_LATE.iter().find(|c| c.opcode == opcode)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct JumpImmRoles {
+    pub opcode: u8,
+    pub handler: &'static str,
+    pub condition: &'static str,
+    pub paths: &'static str,
+    pub key_extra: u8,
+    pub note: &'static str,
+}
+
+/// Control-flow on the 56907 iframe. `pc = u24` is not an encoding width.
+/// Taken / else-jump paths xor the fetch **key** with extra 207. Fall-through
+/// leaves the key as the post-fetch value. Do not execute.
+pub const JUMP_KEY_XOR: u8 = 207;
+
+pub const JUMP_IMM_ROLES_B_LATE: &[JumpImmRoles] = &[
+    JumpImmRoles {
+        opcode: 187,
+        handler: "XX",
+        condition: "always",
+        paths: "jump",
+        key_extra: JUMP_KEY_XOR,
+        note: "unconditional pc=u24; key byte at destination ^207 (no ++ on that read)",
+    },
+    JumpImmRoles {
+        opcode: 153,
+        handler: "X5",
+        condition: "reg_truthy",
+        paths: "taken_or_fall",
+        key_extra: JUMP_KEY_XOR,
+        note: "slot^96; taken pc=u24 key^207.34, else pc=fall-through (key unchanged)",
+    },
+    JumpImmRoles {
+        opcode: 38,
+        handler: "X6",
+        condition: "regs_eq",
+        paths: "taken_alt_or_fall",
+        key_extra: JUMP_KEY_XOR,
+        note: "two-reg === (extras 21, 200); taken u24, else if flag alt u24, else fall",
+    },
+    JumpImmRoles {
+        opcode: 34,
+        handler: "X8",
+        condition: "regs_eq",
+        paths: "taken_or_else",
+        key_extra: JUMP_KEY_XOR,
+        note: "two-reg === (extras 21, 200.95); both paths pc=u24 key^207 — no fall-through",
+    },
+    JumpImmRoles {
+        opcode: 26,
+        handler: "X7",
+        condition: "stored_eq_reg",
+        paths: "taken_alt_or_fall",
+        key_extra: JUMP_KEY_XOR,
+        note: "store imm^19 to slot^112.88, then stored===regs[^21.07]; 3-way like X6",
+    },
+    JumpImmRoles {
+        opcode: 122,
+        handler: "X9",
+        condition: "regs_ge",
+        paths: "taken_alt_or_fall",
+        key_extra: JUMP_KEY_XOR,
+        note: "store (a>=b) to slot^120; a^252 b^54; jump if true; 3-way",
+    },
+    JumpImmRoles {
+        opcode: 55,
+        handler: "XT",
+        condition: "loaded_eq_imm",
+        paths: "taken_alt_or_fall",
+        key_extra: JUMP_KEY_XOR,
+        note: "load this.m[leb].o then compare to imm^19; also in LEB_OBJECT_ROLES_B_LATE",
+    },
+];
+
+pub fn jump_roles_for_late(opcode: u8) -> Option<&'static JumpImmRoles> {
+    JUMP_IMM_ROLES_B_LATE.iter().find(|j| j.opcode == opcode)
+}
+
+/// `Xi`/135 type-tag cases after extra 164.29 (store into regs[198^h] buffer).
+/// Do not execute.
+pub const XI_OPCODE: u8 = 135;
+pub const XI_TYPE_XOR: u8 = 164;
+pub const XI_BUFFER_SLOT_XOR: u8 = 198;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct XiTypeCase {
+    pub tag: u8,
+    pub kind: &'static str,
+    pub note: &'static str,
+}
+
+pub const XI_TYPE_CASES: &[XiTypeCase] = &[
+    XiTypeCase { tag: 0, kind: "u8", note: "push Number(val)&255" },
+    XiTypeCase { tag: 1, kind: "u16", note: "low then (Number>>8)&255" },
+    XiTypeCase { tag: 2, kind: "i32", note: "Xp(buf, Number(val)|0)" },
+    XiTypeCase { tag: 3, kind: "i64", note: "8-byte BigInt walk or two 32-bit Xp" },
+    XiTypeCase { tag: 4, kind: "i32_or", note: "Xp(buf, Number(val)|0) again" },
+    XiTypeCase { tag: 5, kind: "f64", note: "DataView setFloat64 little-endian, 8 bytes" },
+    XiTypeCase { tag: 6, kind: "bool", note: "push 1 or 0" },
+    XiTypeCase { tag: 7, kind: "len_prefixed", note: "u16 length then bytes" },
+    XiTypeCase { tag: 8, kind: "leb_prefixed", note: "LEB length then bytes" },
+];
+
+pub fn xi_type_kind(tag: u8) -> Option<&'static str> {
+    XI_TYPE_CASES.iter().find(|c| c.tag == tag).map(|c| c.kind)
+}
+
+/// `XD`/219 mix constants from the 56907 HTML. Host/binary arithmetic — do not execute.
+pub const XD_OPCODE: u8 = 219;
+pub const XD_SLOT_XOR: u8 = 77;
+pub const XD_MIX_SEED: u32 = 854_423_113;
+pub const XD_MIX_A: u32 = 11_095;
+pub const XD_MIX_B: u32 = 49_971;
+
+/// Late-`b` s1 HTML handler (`gS`). Many opcodes, one function; kind is the case immediate.
+pub const S1_HTML_HANDLER: &str = "gS";
+/// Late-`b` s2 HTML handler (`gK`). Unary typeof/- /+ /! /~.
+pub const S2_HTML_HANDLER: &str = "gK";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct S1Case {
+    pub opcode: u8,
+    pub imm: u8,
+    pub kind: &'static str,
+    pub note: &'static str,
+}
+
+/// `gS` switch immediates from [`OPCODE_TABLE_B_LATE`] plus the HTML operator.
+/// Do not invent a Direct handler per case.
+pub const S1_CASES_B_LATE: &[S1Case] = &[
+    S1Case { opcode: 194, imm: 66, kind: "add", note: "Xm+A" },
+    S1Case { opcode: 221, imm: 18, kind: "sub", note: "A-Xm (CFF)" },
+    S1Case { opcode: 66, imm: 241, kind: "mul", note: "XS*A" },
+    S1Case { opcode: 157, imm: 65, kind: "div", note: "Xm/XS (helper XK/Xy)" },
+    S1Case { opcode: 203, imm: 3, kind: "mod", note: "Xm%A" },
+    S1Case { opcode: 10, imm: 22, kind: "and", note: "XS&&A" },
+    S1Case { opcode: 43, imm: 214, kind: "or", note: "XS||Xm" },
+    S1Case { opcode: 15, imm: 88, kind: "bitand", note: "XS&Xm" },
+    S1Case { opcode: 137, imm: 149, kind: "bitor", note: "Xm|A (helper Xy|XK)" },
+    S1Case { opcode: 214, imm: 131, kind: "xor", note: "XS^Xm (helper Xy^XK)" },
+    S1Case { opcode: 108, imm: 150, kind: "shl", note: "A<<XS" },
+    S1Case { opcode: 0, imm: 55, kind: "shr", note: "XS>>A" },
+    S1Case { opcode: 19, imm: 62, kind: "ushr", note: "XS>>>A" },
+    S1Case { opcode: 90, imm: 249, kind: "eq", note: "A==Xm" },
+    S1Case { opcode: 93, imm: 27, kind: "seq", note: "Xm===XS" },
+    S1Case { opcode: 234, imm: 21, kind: "gt", note: "Xm>XS" },
+    S1Case { opcode: 4, imm: 198, kind: "ge", note: "Xm>=A" },
+    S1Case { opcode: 31, imm: 220, kind: "instanceof", note: "XS instanceof A" },
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct S2Case {
+    pub opcode: u8,
+    pub imm: u8,
+    pub kind: &'static str,
+    pub note: &'static str,
+}
+
+pub const S2_CASES_B_LATE: &[S2Case] = &[
+    S2Case { opcode: 97, imm: 139, kind: "typeof", note: "typeof A" },
+    S2Case { opcode: 22, imm: 234, kind: "neg", note: "-Xs" },
+    S2Case { opcode: 87, imm: 133, kind: "plus", note: "+Xs" },
+    S2Case { opcode: 148, imm: 119, kind: "not", note: "!A" },
+    S2Case { opcode: 241, imm: 144, kind: "bitnot", note: "~Xs" },
+];
+
+pub fn s1_kind_for_imm(imm: u8) -> Option<&'static str> {
+    S1_CASES_B_LATE.iter().find(|c| c.imm == imm).map(|c| c.kind)
+}
+
+pub fn s2_kind_for_imm(imm: u8) -> Option<&'static str> {
+    S2_CASES_B_LATE.iter().find(|c| c.imm == imm).map(|c| c.kind)
+}
+
 /// Fixed-width handlers recovered from the headed-Chrome iframe (branch `b`).
 /// Operand extras are `ToInt32` of the floats in the handler source.
 pub const HANDLER_LAYOUT_B: &[HandlerLayout] = &[
@@ -277,17 +684,17 @@ pub const LATE_DIRECT_HANDLER_COUNT: usize = 46;
 
 pub const HANDLER_LAYOUT_B_LATE: &[HandlerLayout] = &[
     h(187, "XX", InstrWidth::Variable, &[207], "jump_u24",
-        "unconditional pc=u24; extra 207 on the key byte at post-increment pc. Chrome deltas are jumps."),
+        "unconditional pc=u24; extra 207 on the key byte at destination. Chrome deltas are jumps."),
     h(153, "X5", InstrWidth::Variable, &[96, 207], "cond_jump",
-        "if reg then pc=u24 and key^=207 else fall through (js ^96, ^207.34)"),
+        "if regs[slot^96] then pc=u24 key^207.34 else fall (key unchanged)"),
     h(38, "X6", InstrWidth::Variable, &[21, 200, 207], "cond_jump",
-        "compare two regs (extras 21, 200); taken path pc=u24 key^207 (else also ^207)"),
+        "two-reg === (extras 21, 200); taken u24 key^207, else if flag alt u24, else fall"),
     h(34, "X8", InstrWidth::Variable, &[21, 200, 207], "cond_jump",
-        "compare two regs (js ,21 ^200.95 ^207); taken/else u24 like X6"),
+        "two-reg === (extras 21, 200.95); both paths pc=u24 key^207 (no fall-through)"),
     h(26, "X7", InstrWidth::Variable, &[112, 19, 21, 207], "cond_jump",
-        "2-imm store-like (112.88, 19) then cond (21.07) then u24 key^207"),
+        "store imm^19 to slot^112.88 then stored===regs[^21]; 3-way jump like X6"),
     h(122, "X9", InstrWidth::Variable, &[120, 252, 54, 207], "cond_jump",
-        "compare >= (js 120, 252, 54) then u24 key^207.37"),
+        "store (a>=b) to slot^120 (a^252 b^54); jump if true; 3-way"),
     h(196, "X2", InstrWidth::Fixed(2), &[131], "number_helper",
         "1-imm (js 131.21); Number host helper, not bytecode arithmetic"),
     h(45, "X1", InstrWidth::Fixed(2), &[144], "throw_register",
@@ -301,7 +708,7 @@ pub const HANDLER_LAYOUT_B_LATE: &[HandlerLayout] = &[
     h(XG_OPCODE, "Xg", InstrWidth::Fixed(3), &[112, 19], "register_store",
         "2-imm store (js 112.87, 19). Later HTML: XX."),
     h(113, "XP", InstrWidth::Variable, &[52, 132], "leb_object_slot",
-        "tag^52 then LEB; branch loads table[n].o or slot^132. Later HTML name rotates."),
+        "tag^52 then LEB: 227 bind, 78 load, 1 alloc. Later HTML name rotates."),
     h(201, "Xj", InstrWidth::Variable, &[], "leb_alloc_objects",
         "LEB count then per-slot LEB; allocates {o: undefined} into this.m. No extra xor on the count."),
     h(XZ_OPCODE, "Xz", InstrWidth::Fixed(3), &[132], "leb_object_slot",
@@ -701,6 +1108,176 @@ mod tests {
     }
 
     #[test]
+    fn leb_object_roles_match_56907_html() {
+        assert_eq!(LEB_OBJECT_ROLES_B_LATE.len(), 8);
+        assert_eq!(leb_role_for_late(201).unwrap().role, "alloc");
+        assert_eq!(leb_role_for_late(52).unwrap().role, "bind");
+        assert_eq!(leb_role_for_late(94).unwrap().role, "load");
+        assert_eq!(leb_role_for_late(73).unwrap().role, "bind_add");
+        assert_eq!(xp_tag_kind(XP_TAG_BIND), Some("bind"));
+        assert_eq!(xp_tag_kind(XP_TAG_LOAD), Some("load"));
+        assert_eq!(xp_tag_kind(XP_TAG_ALLOC), Some("alloc"));
+        assert_eq!(xp_tag_kind(0), None);
+        for r in LEB_OBJECT_ROLES_B_LATE {
+            let h = layout_for_late(r.opcode).unwrap();
+            assert_eq!(h.handler, r.handler);
+        }
+        let path = std::path::Path::new("artifacts/re-out/chrome-oracle/iframe-1.html");
+        if !path.is_file() {
+            return;
+        }
+        let html = std::fs::read_to_string(path).unwrap();
+        for snip in [
+            "XY[`o`]=void 0,XR[XK]=XY",
+            "Xm[XQ][`o`]=A[Xt^W]",
+            "]=Xu[XR].o}",
+            "Xm[XQ][`o`]=Xs,A[Xu^W]=Xs",
+            "XM[Xs^Xm]=XQ[XK].o",
+            "XQ[XK][`o`]=XM[",
+            "XS[XY][`o`]=XZ",
+            "XR=XS[XY].o",
+            "Xo[XK].o",
+            "XR!==227",
+            "1===XR",
+            "(XR,78)",
+        ] {
+            assert!(html.contains(snip), "leb html missing {snip}");
+        }
+    }
+
+    #[test]
+    fn call_imm_roles_match_56907_html() {
+        assert_eq!(CALL_IMM_ROLES_B_LATE.len(), 14);
+        assert_eq!(call_roles_for_late(165).unwrap().callee, "table_o");
+        assert_eq!(call_roles_for_late(119).unwrap().callee, "register");
+        assert_eq!(call_roles_for_late(11).unwrap().callee, "register_ctor");
+        assert_eq!(call_roles_for_late(176).unwrap().callee, "named_string");
+        assert_eq!(call_roles_for_late(98).unwrap().callee, "table_o_named");
+        assert_eq!(call_roles_for_late(177).unwrap().callee, "host_xi");
+        for c in CALL_IMM_ROLES_B_LATE {
+            let h = layout_for_late(c.opcode).unwrap();
+            assert_eq!(h.handler, c.handler);
+        }
+        let path = std::path::Path::new("artifacts/re-out/chrome-oracle/iframe-1.html");
+        if !path.is_file() {
+            return;
+        }
+        let html = std::fs::read_to_string(path).unwrap();
+        for snip in [
+            "A[this.m][XQ].o",
+            "XR=XM[this.m][XS].o",
+            "W[this.m][Xo].o",
+            "XK=Xm[this.m][Xy].o",
+            "new Xt;",
+            "new Xt(Xs[0])",
+            "XK(Xy,Xu)",
+        ] {
+            assert!(html.contains(snip), "call html missing {snip}");
+        }
+    }
+
+    #[test]
+    fn jump_imm_roles_match_56907_html() {
+        assert_eq!(JUMP_IMM_ROLES_B_LATE.len(), 7);
+        assert_eq!(jump_roles_for_late(187).unwrap().paths, "jump");
+        assert_eq!(jump_roles_for_late(153).unwrap().paths, "taken_or_fall");
+        assert_eq!(jump_roles_for_late(34).unwrap().paths, "taken_or_else");
+        assert_eq!(jump_roles_for_late(38).unwrap().condition, "regs_eq");
+        assert_eq!(jump_roles_for_late(122).unwrap().condition, "regs_ge");
+        for j in JUMP_IMM_ROLES_B_LATE {
+            assert_eq!(j.key_extra, JUMP_KEY_XOR);
+            let h = layout_for_late(j.opcode).unwrap();
+            assert_eq!(h.handler, j.handler);
+        }
+        let path = std::path::Path::new("artifacts/re-out/chrome-oracle/iframe-1.html");
+        if !path.is_file() {
+            return;
+        }
+        let html = std::fs::read_to_string(path).unwrap();
+        for snip in [
+            "^207.34,XM?",
+            "Xm>=A",
+            "XS=XS>=XK",
+            "Xw^=W[d0(Hf.Xe)](Xu[XQ++]-253,256)&255^207,Xt[Xs]=Xo,Xt[Xm]=Xw)}",
+        ] {
+            assert!(html.contains(snip), "jump html missing {snip}");
+        }
+        // X5/X6 fall through by writing the post-instr pc; X8's else path jumps (snippet above).
+        assert!(html.contains("XM?(Xt[Xs]=Xo,Xt[Xm]=Xw):Xt[Xs]=XQ}"));
+    }
+
+    #[test]
+    fn typed_store_and_s1s2_match_56907_html() {
+        assert_eq!(xi_type_kind(5), Some("f64"));
+        assert_eq!(XI_TYPE_CASES.len(), 9);
+        assert_eq!(js_xor_imm(164.29), XI_TYPE_XOR);
+        assert_eq!(js_xor_imm(77.98), XD_SLOT_XOR);
+        assert_eq!(S1_CASES_B_LATE.len(), 18);
+        assert_eq!(S2_CASES_B_LATE.len(), 5);
+        assert_eq!(s1_kind_for_imm(66), Some("add"));
+        assert_eq!(s1_kind_for_imm(220), Some("instanceof"));
+        assert_eq!(s2_kind_for_imm(139), Some("typeof"));
+        assert_eq!(s2_kind_for_imm(144), Some("bitnot"));
+        let mut s1_ops = std::collections::BTreeSet::new();
+        let mut s2_ops = std::collections::BTreeSet::new();
+        for def in OPCODE_TABLE_B_LATE {
+            match def.kind {
+                OpcodeKind::S1 => {
+                    let c = S1_CASES_B_LATE
+                        .iter()
+                        .find(|c| c.opcode == def.opcode)
+                        .unwrap_or_else(|| panic!("s1 opcode {}", def.opcode));
+                    assert_eq!(Some(c.imm), def.imm, "s1 opcode {}", def.opcode);
+                    assert!(s1_ops.insert(def.opcode));
+                }
+                OpcodeKind::S2 => {
+                    let c = S2_CASES_B_LATE
+                        .iter()
+                        .find(|c| c.opcode == def.opcode)
+                        .unwrap_or_else(|| panic!("s2 opcode {}", def.opcode));
+                    assert_eq!(Some(c.imm), def.imm, "s2 opcode {}", def.opcode);
+                    assert!(s2_ops.insert(def.opcode));
+                }
+                OpcodeKind::Direct => {}
+            }
+        }
+        assert_eq!(s1_ops.len(), S1_CASES_B_LATE.len());
+        assert_eq!(s2_ops.len(), S2_CASES_B_LATE.len());
+        assert_eq!(
+            crate::solver::run_program_vm::FETCH_LIVE.key_mul,
+            FETCH_BRANCH_B_LATE.key_mul
+        );
+        assert_eq!(NEXT_GAP, "handler_semantics");
+        let path = std::path::Path::new("artifacts/re-out/chrome-oracle/iframe-1.html");
+        if !path.is_file() {
+            return;
+        }
+        let html = std::fs::read_to_string(path).unwrap();
+        for snip in [
+            "new DataView(W)",
+            "new ArrayBuffer(8)",
+            "854423113",
+            "Xt[XM^Xs]=typeof A",
+            "Xt[XM^A]=~Xs",
+            "Xt[XM^Xs]=!A",
+            "XS instanceof A",
+            "Xm>=A",
+            "A==Xm",
+            "Xm===XS",
+            "A<<XS",
+            "Xm%A",
+            "XS>>>A",
+            "XS||Xm",
+            "XS*A",
+            "Xm+A",
+            "XS&Xm",
+            "A-Xm",
+        ] {
+            assert!(html.contains(snip), "arith/s1s2 html missing {snip}");
+        }
+    }
+
+    #[test]
     fn late_b_handler_snippets_carry_documented_floats() {
         // Headed Chrome iframe (chrome-oracle, names gq/gG/X3/gY/Xf).
         const GQ: &str = "^123.64,XM=h[XM^W[bY(zZ.W)](Xs[Xw++],253)+256&255^148^Xt]";
@@ -816,6 +1393,58 @@ mod tests {
                 .collect();
             assert_eq!(roles, p.roles);
         }
+        let leb = late["lebObjectRoles"].as_array().expect("lebObjectRoles");
+        assert_eq!(leb.len(), LEB_OBJECT_ROLES_B_LATE.len());
+        for (r, row) in LEB_OBJECT_ROLES_B_LATE.iter().zip(leb) {
+            assert_eq!(row["opcode"].as_u64(), Some(u64::from(r.opcode)));
+            assert_eq!(row["role"].as_str(), Some(r.role));
+            assert_eq!(row["assign"].as_str(), Some(r.assign));
+        }
+        let xp = late["xpTagCases"]["cases"].as_array().expect("xpTagCases.cases");
+        assert_eq!(xp.len(), XP_TAG_CASES.len());
+        for (c, row) in XP_TAG_CASES.iter().zip(xp) {
+            assert_eq!(row["tag"].as_u64(), Some(u64::from(c.tag)));
+            assert_eq!(row["kind"].as_str(), Some(c.kind));
+        }
+        let calls = late["callImmRoles"].as_array().expect("callImmRoles");
+        assert_eq!(calls.len(), CALL_IMM_ROLES_B_LATE.len());
+        for (c, row) in CALL_IMM_ROLES_B_LATE.iter().zip(calls) {
+            assert_eq!(row["opcode"].as_u64(), Some(u64::from(c.opcode)));
+            assert_eq!(row["callee"].as_str(), Some(c.callee));
+            assert_eq!(row["arity"].as_str(), Some(c.arity));
+        }
+        let jumps = late["jumpImmRoles"].as_array().expect("jumpImmRoles");
+        assert_eq!(jumps.len(), JUMP_IMM_ROLES_B_LATE.len());
+        for (j, row) in JUMP_IMM_ROLES_B_LATE.iter().zip(jumps) {
+            assert_eq!(row["opcode"].as_u64(), Some(u64::from(j.opcode)));
+            assert_eq!(row["condition"].as_str(), Some(j.condition));
+            assert_eq!(row["paths"].as_str(), Some(j.paths));
+            assert_eq!(row["keyExtra"].as_u64(), Some(u64::from(j.key_extra)));
+        }
+        let xi = late["xiTypeCases"]["cases"].as_array().expect("xiTypeCases.cases");
+        assert_eq!(xi.len(), XI_TYPE_CASES.len());
+        for (c, row) in XI_TYPE_CASES.iter().zip(xi) {
+            assert_eq!(row["tag"].as_u64(), Some(u64::from(c.tag)));
+            assert_eq!(row["kind"].as_str(), Some(c.kind));
+        }
+        assert_eq!(late["xdMix"]["seed"].as_u64(), Some(u64::from(XD_MIX_SEED)));
+        assert_eq!(late["xdMix"]["slotXor"].as_u64(), Some(u64::from(XD_SLOT_XOR)));
+        let s1 = late["s1Cases"].as_array().expect("s1Cases");
+        assert_eq!(s1.len(), S1_CASES_B_LATE.len());
+        for (c, row) in S1_CASES_B_LATE.iter().zip(s1) {
+            assert_eq!(row["opcode"].as_u64(), Some(u64::from(c.opcode)));
+            assert_eq!(row["imm"].as_u64(), Some(u64::from(c.imm)));
+            assert_eq!(row["kind"].as_str(), Some(c.kind));
+        }
+        let s2 = late["s2Cases"].as_array().expect("s2Cases");
+        assert_eq!(s2.len(), S2_CASES_B_LATE.len());
+        for (c, row) in S2_CASES_B_LATE.iter().zip(s2) {
+            assert_eq!(row["opcode"].as_u64(), Some(u64::from(c.opcode)));
+            assert_eq!(row["imm"].as_u64(), Some(u64::from(c.imm)));
+            assert_eq!(row["kind"].as_str(), Some(c.kind));
+        }
+        assert_eq!(late["s1HtmlHandler"].as_str(), Some(S1_HTML_HANDLER));
+        assert_eq!(late["s2HtmlHandler"].as_str(), Some(S2_HTML_HANDLER));
     }
 
     #[test]

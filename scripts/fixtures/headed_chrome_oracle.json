@@ -167,6 +167,103 @@
       { "opcode": 226, "handler": "gC", "family": "string_key_set", "roles": ["obj", "src"], "assign": "obj[leb_string] = src" },
       { "opcode": 140, "handler": "gl", "family": "string_key_get", "roles": ["obj", "dst"], "assign": "dst = obj[leb_string]" }
     ],
+    "lebObjectRoles": [
+      { "opcode": 201, "handler": "Xj", "role": "alloc", "assign": "for n in leb_count { this.m[leb] = {o: undefined} }" },
+      { "opcode": 52, "handler": "Xz", "role": "bind", "assign": "this.m[leb].o = regs[slot^132]" },
+      { "opcode": 230, "handler": "Xv", "role": "bind_then_noarg", "assign": "this.m[leb].o = src; dst = other[obf]()" },
+      { "opcode": 94, "handler": "XH", "role": "load", "assign": "regs[slot^132] = this.m[leb].o" },
+      { "opcode": 73, "handler": "Xk", "role": "bind_add", "assign": "this.m[leb].o += imm^223; dst^15 = this.m[leb].o" },
+      { "opcode": 113, "handler": "XP", "role": "tagged_leb", "assign": "tag^52 then LEB; bind / load / alloc" },
+      { "opcode": 27, "handler": "XB", "role": "state_machine", "assign": "mixed bind/load/add/call on this.m[n].o" },
+      { "opcode": 55, "handler": "XT", "role": "load_then_cond_jump", "assign": "dst = this.m[leb].o; if loaded===imm { pc=u24 key^=207 } else alt-or-fall" }
+    ],
+    "xpTagCases": {
+      "note": "XP/113 first-imm tag after extra 52. Other tags after the LEB do nothing.",
+      "tagXor": 52,
+      "cases": [
+        { "tag": 227, "kind": "bind" },
+        { "tag": 78, "kind": "load" },
+        { "tag": 1, "kind": "alloc" }
+      ]
+    },
+    "callImmRoles": [
+      { "opcode": 165, "handler": "XA", "callee": "table_o", "arity": "n_switch" },
+      { "opcode": 126, "handler": "XW", "callee": "table_o", "arity": "1" },
+      { "opcode": 181, "handler": "Xh", "callee": "table_o", "arity": "2" },
+      { "opcode": 119, "handler": "Xd", "callee": "register", "arity": "n_switch" },
+      { "opcode": 208, "handler": "Xn", "callee": "register_method", "arity": "n_switch" },
+      { "opcode": 168, "handler": "Xb", "callee": "register_method", "arity": "1" },
+      { "opcode": 161, "handler": "Xr", "callee": "register_method", "arity": "2" },
+      { "opcode": 103, "handler": "X0", "callee": "register", "arity": "0" },
+      { "opcode": 134, "handler": "gO", "callee": "register", "arity": "1" },
+      { "opcode": 127, "handler": "gc", "callee": "register_frame", "arity": "4tuple" },
+      { "opcode": 177, "handler": "XU", "callee": "host_xi", "arity": "n_plus_flags" },
+      { "opcode": 11, "handler": "XJ", "callee": "register_ctor", "arity": "n_switch" },
+      { "opcode": 176, "handler": "XE", "callee": "named_string", "arity": "n_switch" },
+      { "opcode": 98, "handler": "XV", "callee": "table_o_named", "arity": "n_switch" }
+    ],
+    "jumpImmRoles": [
+      { "opcode": 187, "handler": "XX", "condition": "always", "paths": "jump", "keyExtra": 207 },
+      { "opcode": 153, "handler": "X5", "condition": "reg_truthy", "paths": "taken_or_fall", "keyExtra": 207 },
+      { "opcode": 38, "handler": "X6", "condition": "regs_eq", "paths": "taken_alt_or_fall", "keyExtra": 207 },
+      { "opcode": 34, "handler": "X8", "condition": "regs_eq", "paths": "taken_or_else", "keyExtra": 207 },
+      { "opcode": 26, "handler": "X7", "condition": "stored_eq_reg", "paths": "taken_alt_or_fall", "keyExtra": 207 },
+      { "opcode": 122, "handler": "X9", "condition": "regs_ge", "paths": "taken_alt_or_fall", "keyExtra": 207 },
+      { "opcode": 55, "handler": "XT", "condition": "loaded_eq_imm", "paths": "taken_alt_or_fall", "keyExtra": 207 }
+    ],
+    "xiTypeCases": {
+      "note": "Xi/135 type-tag switch after extra 164.29. Writes into regs[198^h]. Do not execute.",
+      "typeXor": 164,
+      "bufferSlotXor": 198,
+      "cases": [
+        { "tag": 0, "kind": "u8" },
+        { "tag": 1, "kind": "u16" },
+        { "tag": 2, "kind": "i32" },
+        { "tag": 3, "kind": "i64" },
+        { "tag": 4, "kind": "i32_or" },
+        { "tag": 5, "kind": "f64" },
+        { "tag": 6, "kind": "bool" },
+        { "tag": 7, "kind": "len_prefixed" },
+        { "tag": 8, "kind": "leb_prefixed" }
+      ]
+    },
+    "xdMix": {
+      "note": "XD/219 packed u32 mix. Host/binary arithmetic — do not execute.",
+      "opcode": 219,
+      "slotXor": 77,
+      "seed": 854423113,
+      "mixA": 11095,
+      "mixB": 49971
+    },
+    "s1HtmlHandler": "gS",
+    "s2HtmlHandler": "gK",
+    "s1Cases": [
+      { "opcode": 194, "imm": 66, "kind": "add" },
+      { "opcode": 221, "imm": 18, "kind": "sub" },
+      { "opcode": 66, "imm": 241, "kind": "mul" },
+      { "opcode": 157, "imm": 65, "kind": "div" },
+      { "opcode": 203, "imm": 3, "kind": "mod" },
+      { "opcode": 10, "imm": 22, "kind": "and" },
+      { "opcode": 43, "imm": 214, "kind": "or" },
+      { "opcode": 15, "imm": 88, "kind": "bitand" },
+      { "opcode": 137, "imm": 149, "kind": "bitor" },
+      { "opcode": 214, "imm": 131, "kind": "xor" },
+      { "opcode": 108, "imm": 150, "kind": "shl" },
+      { "opcode": 0, "imm": 55, "kind": "shr" },
+      { "opcode": 19, "imm": 62, "kind": "ushr" },
+      { "opcode": 90, "imm": 249, "kind": "eq" },
+      { "opcode": 93, "imm": 27, "kind": "seq" },
+      { "opcode": 234, "imm": 21, "kind": "gt" },
+      { "opcode": 4, "imm": 198, "kind": "ge" },
+      { "opcode": 31, "imm": 220, "kind": "instanceof" }
+    ],
+    "s2Cases": [
+      { "opcode": 97, "imm": 139, "kind": "typeof" },
+      { "opcode": 22, "imm": 234, "kind": "neg" },
+      { "opcode": 87, "imm": 133, "kind": "plus" },
+      { "opcode": 148, "imm": 119, "kind": "not" },
+      { "opcode": 241, "imm": 144, "kind": "bitnot" }
+    ],
     "foUnchanged": {
       "postsPerChallenge": 2,
       "cfChlRa": "0",
