@@ -1337,9 +1337,37 @@ function fetchLoopCalleeOnStack(
   return null;
 }
 
-function pickSwitchDiscriminant(evals, keySlot, preferOp) {
+function decodeFetchOp(key, byte, bias) {
+  return (key ^ ((byte - bias) & 255)) & 255;
+}
+
+function switchEvalDecodes(e, byte, bias) {
+  if (!e || typeof e.op !== "number" || typeof e.mix !== "number") return false;
+  if (typeof byte !== "number" || typeof bias !== "number") return false;
+  const key = (e.mix - e.op) & 255;
+  return decodeFetchOp(key, byte, bias) === (e.op & 255);
+}
+
+function pickSwitchDiscriminant(evals, keySlot, preferOp, byte, bias) {
   const good = (evals || []).filter((e) => e && typeof e.op === "number");
   if (!good.length) return null;
+  if (typeof byte === "number" && typeof bias === "number") {
+    const decoded = good.filter((e) => switchEvalDecodes(e, byte, bias));
+    if (decoded.length) {
+      if (preferOp != null) {
+        const hit = decoded.filter((e) => e.op === preferOp);
+        if (hit.length) {
+          return (
+            hit.find((e) => e.mix >= 256 && e.mix <= 510) || hit[0]
+          );
+        }
+      }
+      return (
+        decoded.find((e) => e.mix >= 256 && e.mix <= 510) || decoded[0]
+      );
+    }
+    return null;
+  }
   if (preferOp != null) {
     const hit = good.filter((e) => e.op === preferOp);
     if (hit.length) {
@@ -2708,6 +2736,16 @@ function selfTestInject() {
     ],
     134,
   );
+  const discDec = pickSwitchDiscriminant(
+    [
+      { op: 5, mix: 116 },
+      { op: 176, mix: 228 },
+    ],
+    111,
+    null,
+    63,
+    187,
+  );
   handlerNameToOp.set("s4", 51);
   const finBpNotStack = finalizeFetchLoopRows([
     {
@@ -3027,6 +3065,9 @@ function selfTestInject() {
       discWide &&
       discWide.op === 229 &&
       discWide.mix === 345 &&
+      discDec &&
+      discDec.op === 176 &&
+      discDec.mix === 228 &&
       finBpNotStack[0] &&
       finBpNotStack[0].op === 33 &&
       finBpNotStack[0].fn === "s0" &&
@@ -3132,6 +3173,7 @@ const fetchLoopBreakpoints = new Set();
 const fetchLoopBpRows = [];
 const fetchLoopBpMeta = new Map();
 const scriptSwitchVars = new Map();
+const scriptFetchSchedule = new Map();
 const scriptSources = new Map();
 const scriptNotes = [];
 let iframeRewrites = 0;
@@ -3139,6 +3181,7 @@ let foInitResponse = null;
 let fetchLoopCleared = false;
 let fetchLoopBpPlaced = 0;
 let fetchLoopBpFailed = 0;
+let packedBytecodeDump = false;
 
 async function removeFetchLoopBreakpoint(session, breakpointId) {
   await session
@@ -3862,12 +3905,56 @@ async function evaluateSwitchLocals(session, frame, switchVars) {
   return out;
 }
 
+async function dumpPackedBytecode(session, callFrameId, bcLen) {
+  if (packedBytecodeDump || selfTest || !callFrameId) return false;
+  if ((bcLen || 0) <= 10000) return false;
+  try {
+    const got = await session.send("Debugger.evaluateOnCallFrame", {
+      callFrameId,
+      expression: `(function(){
+        function pick(obj){
+          if(!obj||!obj.g)return null;
+          var g=obj.g,bc;
+          if(typeof obj.l==="number"&&g[obj.l]&&g[obj.l].length>10000)bc=g[obj.l];
+          if(!bc){for(var i=0;i<Math.min(g.length||0,64);i++){var v=g[i];if(v&&v.length>10000&&typeof v[0]==="number"){bc=v;break;}}}
+          return bc;
+        }
+        var bc=pick(this);
+        if(!bc)return null;
+        var n=bc.length,s="",i=0;
+        while(i<n){
+          var e=Math.min(n,i+8192),ch="";
+          for(var j=i;j<e;j++)ch+=String.fromCharCode(bc[j]&255);
+          s+=ch;i=e;
+        }
+        return {len:n,b64:btoa(s)};
+      })()`,
+      returnByValue: true,
+    });
+    const v = got.result?.value;
+    if (!v || !v.b64 || !(v.len > 10000)) return false;
+    const buf = Buffer.from(v.b64, "base64");
+    if (buf.length !== v.len) {
+      note("packedDumpLenMismatch", { jsonLen: v.len, bufLen: buf.length });
+    }
+    fs.writeFileSync(path.join(outDir, "packed-bytecode.bin"), buf);
+    packedBytecodeDump = true;
+    note("packedDump", { len: buf.length, path: "packed-bytecode.bin" });
+    return true;
+  } catch (e) {
+    note("packedDumpErr", { error: String(e).slice(0, 180) });
+    return false;
+  }
+}
+
 async function setFetchLoopBreakpointNear(session, s, scriptSource, idx) {
   scriptSources.set(s.scriptId, scriptSource);
   recordAmbiguousHandlerNames(scriptSource, idx);
   if (fetchTuples) {
     const switchSites = fetchLoopSwitchLogSites(scriptSource, idx);
     rememberSwitchVars(s.scriptId, switchSites);
+    const sched = extractFetchSchedule(scriptSource);
+    if (sched && sched.byteBias != null) scriptFetchSchedule.set(s.scriptId, sched);
     note("fetchLoopSwitchSites", {
       n: switchSites.length,
       sites: switchSites.map((x) => ({
@@ -4273,6 +4360,7 @@ async function attachSession(session, targetInfo, waitingForDebugger) {
               if (v && typeof v === "object" && (v.hasG || v.gLen || v.pcSlot != null)) {
                 Object.assign(row, v);
                 row.fn = harvestName || fname || frName || row.fn;
+                row.vmCallFrameId = fr.callFrameId;
                 break;
               }
               if (v && typeof v === "object" && row.thisType == null) {
@@ -4349,10 +4437,20 @@ async function attachSession(session, targetInfo, waitingForDebugger) {
               for (const e of got) parentEvals.push(e);
             }
             if (parentEvals.length) row.parentSwitch = parentEvals.slice(0, 8);
+            const sched =
+              scriptFetchSchedule.get(row.scriptId) ||
+              scriptFetchSchedule.get(String(row.scriptId));
+            const bias =
+              sched && typeof sched.byteBias === "number" ? sched.byteBias : null;
+            const byte = Number.isFinite(row.byteAtPcMinus1)
+              ? row.byteAtPcMinus1
+              : row.byteAtPc;
             const disc = pickSwitchDiscriminant(
               parentEvals,
               row.keySlot,
               calleeFn ? null : caseOp,
+              byte,
+              bias,
             );
             if (disc && typeof disc.op === "number") {
               row.bpCaseOp = caseOp;
@@ -4366,6 +4464,14 @@ async function attachSession(session, targetInfo, waitingForDebugger) {
               }
               row.switchFn = disc.fn;
               row.switchOpVar = disc.opVar;
+            } else if (bias != null && Number.isFinite(byte)) {
+              note("fetchLoopSkipDecode", {
+                fn: fname,
+                byte,
+                bias,
+                parentOps: parentEvals.map((e) => e.op).slice(0, 8),
+              });
+              return;
             } else if (calleeFn) {
               note("fetchLoopSkipCallee", {
                 fn: fname,
@@ -4414,6 +4520,9 @@ async function attachSession(session, targetInfo, waitingForDebugger) {
           row.locals = locals;
           if (Number.isFinite(row.keySlot)) row.nextKey = row.keySlot & 255;
           liveFetchRaw.push(row);
+          if (row.vmCallFrameId) {
+            await dumpPackedBytecode(session, row.vmCallFrameId, row.bcLen);
+          }
           const removeOp =
             row.bpCaseOp != null
               ? row.bpCaseOp
