@@ -40,7 +40,7 @@ pub use solver::run_program_ops::{
     operand_from_byte, xf_tag_kind,
 };
 pub use solver::run_program_vm::{
-    FETCH_LIVE, INIT_KEY, INIT_PC, OPCODE_TABLE, decode_opcode, naive_one_byte_fetches, next_key,
-    opcode_def, opcode_def_in, params_for_magic, recover_fetch_key, verify_oracle_tuple,
-    verify_oracle_tuple_next_key,
+    FETCH_CHROME_2026_08_22_B_5886, FETCH_LIVE, INIT_KEY, INIT_PC, OPCODE_TABLE, decode_opcode,
+    naive_one_byte_fetches, next_key, opcode_def, opcode_def_in, params_for_magic, recover_fetch_key,
+    verify_oracle_tuple, verify_oracle_tuple_next_key,
 };

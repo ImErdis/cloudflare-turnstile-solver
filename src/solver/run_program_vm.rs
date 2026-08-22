@@ -85,6 +85,21 @@ pub const FETCH_BRANCH_B_LATE: FetchParams = FetchParams {
 /// Latest headed-Chrome snapshot. Earlier same-day linear `b` is [`FETCH_BRANCH_B`].
 pub const FETCH_LIVE: FetchParams = FETCH_BRANCH_B_LATE;
 
+/// Headed Chrome 2026-08-22 SolveGate (`mix²*5886 + mix*50261 + 1243`, bias 187).
+/// Verified by `--verify-case-tuples` on `chrome-oracle-tuples27` (9/9 decode).
+/// `init_pc`/`init_key` are the earliest verified harvest row. HTML `(0,176,[])`
+/// is **not** used: there was no verified pc=0 row.
+/// **Not** [`FETCH_LIVE`] (still 56907).
+pub const FETCH_CHROME_2026_08_22_B_5886: FetchParams = FetchParams {
+    label: "chrome-oracle-2026-08-22-b-5886",
+    init_pc: 175,
+    init_key: 166,
+    byte_bias: 187,
+    key_mul: 5_886,
+    key_add: 1_243,
+    key_quad_b: 50_261,
+};
+
 /// Live entry (Chrome). Historical g-branch used key 100.
 pub const INIT_PC: u32 = FETCH_LIVE.init_pc;
 pub const INIT_KEY: u8 = FETCH_LIVE.init_key;
@@ -740,6 +755,15 @@ mod tests {
             verify_oracle_tuple_next_key(FETCH_BRANCH_B_LATE, 0, 222, 0xef, nk).unwrap(),
             44
         );
+        assert_eq!(FETCH_LIVE.key_mul, 56_907);
+        assert_eq!(FETCH_CHROME_2026_08_22_B_5886.key_mul, 5_886);
+        assert_eq!(FETCH_CHROME_2026_08_22_B_5886.key_quad_b, 50_261);
+        assert_eq!(FETCH_CHROME_2026_08_22_B_5886.key_add, 1_243);
+        assert_eq!(FETCH_CHROME_2026_08_22_B_5886.byte_bias, 187);
+        assert!(verify_oracle_tuple(FETCH_CHROME_2026_08_22_B_5886, 175, 166, 94, 5).is_ok());
+        assert_eq!(next_key(FETCH_CHROME_2026_08_22_B_5886, 166, 5), 48);
+        assert!(verify_oracle_tuple(FETCH_LIVE, 175, 166, 94, 5).is_err());
+        assert_ne!(FETCH_LIVE.key_mul, FETCH_CHROME_2026_08_22_B_5886.key_mul);
     }
 
     #[test]

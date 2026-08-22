@@ -311,7 +311,10 @@ mod tests {
     use crate::solver::fo_followup_json::{FOLLOWUP_EXTRA_IDENT_B, FOLLOWUP_UNSEEN_EXTRA_IDENT_B};
     use crate::solver::run_program::unpack_packed_run_program;
     use crate::solver::run_program_ops::XF_TAG_XOR;
-    use crate::solver::run_program_vm::{FETCH_BRANCH_B_LATE, FetchParams, encode_byte, next_key};
+    use crate::solver::run_program_vm::{
+        FETCH_BRANCH_B_LATE, FETCH_CHROME_2026_08_22_B_5886, FETCH_LIVE, FetchParams, encode_byte,
+        next_key, verify_oracle_tuple,
+    };
 
     fn push_op(buf: &mut Vec<u8>, key: &mut u8, opcode: u8) {
         buf.push(encode_byte(FETCH_BRANCH_B_LATE, *key, opcode));
@@ -472,5 +475,143 @@ mod tests {
                 h.strings.len()
             );
         }
+    }
+
+    #[test]
+    fn tuples27_5886_bytes_match_and_skip_harvest_if_dump_present() {
+        let oracle_path =
+            std::path::Path::new("artifacts/re-out/chrome-oracle-tuples27/oracle.json");
+        let resp_path =
+            std::path::Path::new("artifacts/re-out/chrome-oracle-tuples27/fo-init-response.txt");
+        let ray_path =
+            std::path::Path::new("artifacts/re-out/chrome-oracle-tuples27/fo-init-ray.txt");
+        if !oracle_path.is_file() || !resp_path.is_file() || !ray_path.is_file() {
+            return;
+        }
+        assert_eq!(FETCH_LIVE.key_mul, 56_907);
+        assert_eq!(
+            crate::solver::run_program_ops::NEXT_GAP,
+            "handler_semantics"
+        );
+        let oracle: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(oracle_path).unwrap()).unwrap();
+        let rows = oracle
+            .get("fetchLoopTuples")
+            .and_then(|x| x.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(rows.len(), 9, "tuples27 harvest row count");
+        for f in &rows {
+            let pc = f.get("pc").and_then(|x| x.as_u64()).unwrap() as u32;
+            let key = f.get("key").and_then(|x| x.as_u64()).unwrap() as u8;
+            let byte = f.get("byte").and_then(|x| x.as_u64()).unwrap() as u8;
+            let op = f.get("op").and_then(|x| x.as_u64()).unwrap() as u8;
+            verify_oracle_tuple(FETCH_CHROME_2026_08_22_B_5886, pc, key, byte, op)
+                .unwrap_or_else(|e| panic!("{e}"));
+            assert!(
+                verify_oracle_tuple(FETCH_LIVE, pc, key, byte, op).is_err(),
+                "FETCH_LIVE must not decode tuples27 pc={pc}"
+            );
+        }
+        let ray = std::fs::read_to_string(ray_path).unwrap();
+        let ray = ray.trim();
+        let body = std::fs::read_to_string(resp_path).unwrap();
+        let compact: String = body.chars().filter(|c| !c.is_whitespace()).collect();
+        let padded = match compact.len() % 4 {
+            2 => format!("{compact}=="),
+            3 => format!("{compact}="),
+            _ => compact,
+        };
+        let packed = crate::reverse::encryption::decrypt_cloudflare_response(ray, &padded).unwrap();
+        let bc = unpack_packed_run_program(&packed).unwrap();
+        assert_eq!(
+            bc.len(),
+            476_051,
+            "unpacked /fo/ bytecode len vs live harvest bcLen"
+        );
+        for f in &rows {
+            let pc = f.get("pc").and_then(|x| x.as_u64()).unwrap() as usize;
+            let byte = f.get("byte").and_then(|x| x.as_u64()).unwrap() as u8;
+            assert!(
+                pc < bc.len(),
+                "harvest pc {pc} past unpacked len {}",
+                bc.len()
+            );
+            assert_eq!(
+                bc[pc], byte,
+                "unpacked bytecode[pc={pc}] = {} harvest byte={byte}",
+                bc[pc]
+            );
+        }
+        let h = skip_harvest_strings(&bc, FETCH_CHROME_2026_08_22_B_5886);
+        assert_eq!(h.params_label, FETCH_CHROME_2026_08_22_B_5886.label);
+        let leftover_hits: Vec<&str> = FOLLOWUP_UNSEEN_EXTRA_IDENT_B
+            .iter()
+            .copied()
+            .filter(|n| h.contains_ident(n))
+            .collect();
+        let extra_hits: Vec<&str> = FOLLOWUP_EXTRA_IDENT_B
+            .iter()
+            .copied()
+            .filter(|n| h.contains_ident(n))
+            .collect();
+        let packed_leftover: Vec<&str> = FOLLOWUP_UNSEEN_EXTRA_IDENT_B
+            .iter()
+            .copied()
+            .filter(|n| packed.contains(n))
+            .collect();
+        assert!(
+            matches!(
+                h.stopped,
+                "unmapped_opcode"
+                    | "unparsed_jump"
+                    | "unparsed_variable"
+                    | "end_of_bytecode"
+                    | "xf_unskipped_tag"
+                    | "eof_imm"
+                    | "eof_fixed"
+                    | "limit"
+            ),
+            "5886 skip-harvest stopped={} last_pc={} last_op={:?} instr={} strings={} leftover={leftover_hits:?} extra={extra_hits:?} packed_leftover={packed_leftover:?}",
+            h.stopped,
+            h.last_pc,
+            h.last_opcode,
+            h.instructions,
+            h.strings.len()
+        );
+        let html_entry = FetchParams {
+            label: "html-candidate-176-unverified",
+            init_pc: 0,
+            init_key: 176,
+            byte_bias: FETCH_CHROME_2026_08_22_B_5886.byte_bias,
+            key_mul: FETCH_CHROME_2026_08_22_B_5886.key_mul,
+            key_add: FETCH_CHROME_2026_08_22_B_5886.key_add,
+            key_quad_b: FETCH_CHROME_2026_08_22_B_5886.key_quad_b,
+        };
+        let from_zero = skip_harvest_strings(&bc, html_entry);
+        assert_ne!(
+            from_zero.params_label, FETCH_LIVE.label,
+            "HTML 176 start must not be labeled FETCH_LIVE"
+        );
+        assert_eq!(h.stopped, "unmapped_opcode");
+        assert_eq!(h.last_pc, 175);
+        assert_eq!(h.last_opcode, Some(5));
+        assert_eq!(h.instructions, 1);
+        assert_eq!(h.strings.len(), 0);
+        assert!(
+            leftover_hits.is_empty(),
+            "5886 skip-harvest leftover hits {leftover_hits:?}"
+        );
+        assert!(
+            extra_hits.is_empty(),
+            "5886 skip-harvest extra ident hits {extra_hits:?}"
+        );
+        assert!(
+            packed_leftover.is_empty(),
+            "leftover names in tuples27 packed plaintext {packed_leftover:?}"
+        );
+        assert_eq!(from_zero.stopped, "unmapped_opcode");
+        assert_eq!(from_zero.last_pc, 0);
+        assert_eq!(from_zero.instructions, 1);
     }
 }

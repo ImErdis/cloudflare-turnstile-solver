@@ -1480,18 +1480,25 @@ function finalizeFetchLoopRows(rows) {
     const adjust = Number.isFinite(pcSlot) && pcSlot >= 1;
     const pc = Number.isFinite(pcSlot) ? (adjust ? pcSlot - 1 : pcSlot) : r.pc;
     const stackH = pausedUniqueHandler(r.frameNames);
-    const fromCase = r.opFrom === "caseLabel" || Number.isFinite(r.caseOp);
-    let op = fromCase && Number.isFinite(r.caseOp)
-      ? r.caseOp
-      : stackH
-        ? stackH.op
-        : r.op;
+    const keepDisc =
+      r.opFrom === "switchParent" || r.opFrom === "switchLocal";
+    const fromCase =
+      !keepDisc && (r.opFrom === "caseLabel" || Number.isFinite(r.caseOp));
+    let op = keepDisc && Number.isFinite(r.op)
+      ? r.op
+      : fromCase && Number.isFinite(r.caseOp)
+        ? r.caseOp
+        : stackH
+          ? stackH.op
+          : r.op;
     const fn = r.bpName || r.fn || (stackH && stackH.name);
-    const opFrom = fromCase
-      ? "caseLabel"
-      : stackH
-        ? "pausedFn"
-        : r.opFrom;
+    const opFrom = keepDisc
+      ? r.opFrom
+      : fromCase
+        ? "caseLabel"
+        : stackH
+          ? "pausedFn"
+          : r.opFrom;
     const bpCaseOp = Number.isFinite(r.bpCaseOp) ? r.bpCaseOp & 255 : undefined;
     let mix = r.mixLocal != null ? r.mixLocal : r.mix;
     let key = r.key;
@@ -2832,6 +2839,19 @@ function selfTestInject() {
     187,
   );
   handlerNameToOp.set("s4", 51);
+  const finSwitchParent = finalizeFetchLoopRows([
+    {
+      via: "fetchLoop",
+      pcSlot: 176,
+      caseOp: 5,
+      op: 5,
+      opFrom: "switchParent",
+      key: 166,
+      nextKey: 48,
+      byteAtPcMinus1: 94,
+      bcLen: 50000,
+    },
+  ]);
   const finBpNotStack = finalizeFetchLoopRows([
     {
       via: "fetchLoop",
@@ -3107,6 +3127,8 @@ function selfTestInject() {
       live5886Iframe26Sw[0].mixVar === "N" &&
       live5886Iframe26Sw[0].caseOp === 135 &&
       live5886Iframe26FileOk &&
+      packedBytecodeDumpExpr(null).includes(".call(this)") &&
+      packedBytecodeDumpExpr(0, 8).includes("a.push") &&
       extractFetchQuadratic(
         "HJ[Hj]=HT[Xp(Nf.Hu)](HT[Xp(Nf.HP)](HT[Xp(Nf.HS)](HS,HS)*5886,50261*HS)+1243,255),X){case 135:",
       )?.keyMul === 5886 &&
@@ -3181,6 +3203,10 @@ function selfTestInject() {
       discDec &&
       discDec.op === 176 &&
       discDec.mix === 228 &&
+      finSwitchParent[0] &&
+      finSwitchParent[0].op === 5 &&
+      finSwitchParent[0].key === 166 &&
+      finSwitchParent[0].opFrom === "switchParent" &&
       finBpNotStack[0] &&
       finBpNotStack[0].op === 33 &&
       finBpNotStack[0].fn === "s0" &&
@@ -4022,24 +4048,33 @@ async function evaluateSwitchLocals(session, frame, switchVars) {
   return out;
 }
 
+function packedBytecodeDumpExpr(off, end) {
+  const range =
+    off == null
+      ? `if(!bc)return {err:"no-bc"}; return {len:bc.length};`
+      : `if(!bc)return null; var a=[]; for(var i=${off};i<${end};i++)a.push(bc[i]&255); return a;`;
+  return (
+    `(function(){` +
+    `function pick(obj){` +
+    `if(!obj||!obj.g)return null;` +
+    `var g=obj.g,bc;` +
+    `if(typeof obj.l==="number"&&g[obj.l]&&g[obj.l].length>10000)bc=g[obj.l];` +
+    `if(!bc){for(var i=0;i<Math.min(g.length||0,64);i++){var v=g[i];if(v&&v.length>10000&&typeof v[0]==="number"){bc=v;break;}}}` +
+    `return bc;` +
+    `}` +
+    `var bc=pick(this);` +
+    range +
+    `}).call(this)`
+  );
+}
+
 async function dumpPackedBytecode(session, callFrameId, bcLen) {
   if (packedBytecodeDump || selfTest || !callFrameId) return false;
   if ((bcLen || 0) <= 10000) return false;
   try {
     const got = await session.send("Debugger.evaluateOnCallFrame", {
       callFrameId,
-      expression: `(function(){
-        function pick(obj){
-          if(!obj||!obj.g)return null;
-          var g=obj.g,bc;
-          if(typeof obj.l==="number"&&g[obj.l]&&g[obj.l].length>10000)bc=g[obj.l];
-          if(!bc){for(var i=0;i<Math.min(g.length||0,64);i++){var v=g[i];if(v&&v.length>10000&&typeof v[0]==="number"){bc=v;break;}}}
-          return bc;
-        }
-        var bc=pick(this);
-        if(!bc)return {err:"no-bc"};
-        return {len:bc.length};
-      })()`,
+      expression: packedBytecodeDumpExpr(null),
       returnByValue: true,
     });
     if (got.exceptionDetails) {
@@ -4059,20 +4094,7 @@ async function dumpPackedBytecode(session, callFrameId, bcLen) {
       const end = Math.min(meta.len, off + step);
       const part = await session.send("Debugger.evaluateOnCallFrame", {
         callFrameId,
-        expression: `(function(){
-          function pick(obj){
-            if(!obj||!obj.g)return null;
-            var g=obj.g,bc;
-            if(typeof obj.l==="number"&&g[obj.l]&&g[obj.l].length>10000)bc=g[obj.l];
-            if(!bc){for(var i=0;i<Math.min(g.length||0,64);i++){var v=g[i];if(v&&v.length>10000&&typeof v[0]==="number"){bc=v;break;}}}
-            return bc;
-          }
-          var bc=pick(this);
-          if(!bc)return null;
-          var a=[];
-          for(var i=${off};i<${end};i++)a.push(bc[i]&255);
-          return a;
-        })()`,
+        expression: packedBytecodeDumpExpr(off, end),
         returnByValue: true,
       });
       const arr = part.result?.value;
