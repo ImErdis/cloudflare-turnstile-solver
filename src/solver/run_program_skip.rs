@@ -139,6 +139,14 @@ pub const HE_5886_FLAGS_XOR: u8 = 240;
 pub const HE_5886_ARITY_XOR: u8 = 37;
 pub const HE_5886_ARG_XOR: u8 = 33;
 
+/// tuples27 `Hb` (`case 249:`): tag^117, LEB, then extra 240 or N inner LEBs.
+pub const HB_5886_OPCODE: u8 = 249;
+pub const HB_5886_TAG_XOR: u8 = 117;
+pub const HB_5886_XOR: u8 = 240;
+pub const HB_5886_TAG_STORE: u8 = 95;
+pub const HB_5886_TAG_LOAD: u8 = 120;
+pub const HB_5886_TAG_ALLOC: u8 = 35;
+
 /// Shared `qZ` ALU (`case N:qZ.call(this, variant)`): always 3 imms.
 pub const QZ_5886_OPCODES: &[u8] = &[
     4, 24, 30, 80, 86, 96, 104, 108, 116, 127, 137, 149, 151, 155, 163, 197, 203, 234,
@@ -146,6 +154,15 @@ pub const QZ_5886_OPCODES: &[u8] = &[
 
 /// Shared `qu` unary (`case N:qu.call(this, variant)`): always 2 imms.
 pub const QU_5886_OPCODES: &[u8] = &[27, 84, 142, 229, 240];
+
+/// Unique `case N:` arms on the tuples27 fetch switch (69 handlers). Opcodes
+/// **not** in this list have no case; the fetch loop already consumed that byte.
+pub const SWITCH_OPCODES_5886: &[u8] = &[
+    4, 5, 7, 13, 24, 27, 30, 33, 39, 41, 51, 52, 59, 67, 70, 76, 80, 81, 84, 86, 87, 89, 90, 91,
+    95, 96, 101, 104, 108, 112, 113, 116, 119, 127, 129, 135, 137, 142, 148, 149, 151, 154, 155,
+    156, 162, 163, 168, 176, 184, 190, 191, 197, 203, 212, 213, 215, 217, 219, 221, 224, 227, 229,
+    230, 234, 239, 240, 249, 250, 251,
+];
 
 /// tuples27 unique handlers that assign `this.j` from a u24 as control transfer.
 /// Skip-harvest does not take these. `HW`/156 and `qw`/112 are not jumps.
@@ -168,6 +185,12 @@ pub struct SkipHarvest {
     pub stopped: &'static str,
     pub strings: Vec<HarvestedString>,
     pub ge_key_imms: Vec<u8>,
+    /// Fetched `(pc, opcode)` in walk order, including the instruction that stopped.
+    #[serde(skip)]
+    pub ops: Vec<(u32, u8)>,
+    /// `HW`/156 tag bytes in walk order (5886 only).
+    #[serde(skip)]
+    pub hw_tags: Vec<(u32, u8)>,
 }
 
 impl SkipHarvest {
@@ -385,9 +408,11 @@ fn skip_hw_5886(
     cur: &mut Cursor<'_>,
     start_pc: u32,
     strings: &mut Vec<HarvestedString>,
+    hw_tags: &mut Vec<(u32, u8)>,
 ) -> Result<(), &'static str> {
     let _dst = cur.imm(HW_5886_DST_XOR)?;
     let tag = cur.imm(HW_5886_TAG_XOR)?;
+    hw_tags.push((start_pc, tag));
     match tag {
         HW_5886_TAG_STRING => {
             let text = cur.charset_string(HW_5886_STRING_CHARSET_XOR)?;
@@ -550,6 +575,27 @@ fn skip_he_5886(cur: &mut Cursor<'_>) -> Result<(), &'static str> {
     Ok(())
 }
 
+fn skip_hb_5886(cur: &mut Cursor<'_>) -> Result<(), &'static str> {
+    let tag = cur.imm(HB_5886_TAG_XOR)?;
+    let n = cur.leb()?;
+    match tag {
+        HB_5886_TAG_STORE | HB_5886_TAG_LOAD => {
+            let _ = cur.imm(HB_5886_XOR)?;
+            Ok(())
+        }
+        HB_5886_TAG_ALLOC => {
+            if n as usize > 1_048_576 {
+                return Err("string_too_long");
+            }
+            for _ in 0..n {
+                let _ = cur.leb()?;
+            }
+            Ok(())
+        }
+        _ => Err("xf_unskipped_tag"),
+    }
+}
+
 fn uses_5886_skip(params: FetchParams) -> bool {
     params.key_mul == FETCH_CHROME_2026_08_22_B_5886.key_mul
         && params.key_quad_b == FETCH_CHROME_2026_08_22_B_5886.key_quad_b
@@ -579,6 +625,7 @@ fn skip_mapped_5886(
     op: u8,
     start_pc: u32,
     strings: &mut Vec<HarvestedString>,
+    hw_tags: &mut Vec<(u32, u8)>,
 ) -> Result<(), &'static str> {
     if JUMP_OPCODES_5886.contains(&op) {
         return Err("unparsed_jump");
@@ -586,7 +633,7 @@ fn skip_mapped_5886(
     match op {
         HG_5886_OPCODE => skip_hg_5886(cur),
         QR_5886_OPCODE => skip_qr_5886(cur, start_pc, strings),
-        HW_5886_OPCODE => skip_hw_5886(cur, start_pc, strings),
+        HW_5886_OPCODE => skip_hw_5886(cur, start_pc, strings, hw_tags),
         HX_5886_OPCODE => skip_hx_5886(cur, start_pc, strings),
         HV_5886_OPCODE => skip_hv_5886(cur, start_pc, strings),
         QC_5886_OPCODE => skip_qc_5886(cur, start_pc, strings),
@@ -597,6 +644,7 @@ fn skip_mapped_5886(
         HO_5886_OPCODE => skip_ho_5886(cur),
         HT_NEW_5886_OPCODE => skip_ht_new_5886(cur),
         HE_5886_OPCODE => skip_he_5886(cur),
+        HB_5886_OPCODE => skip_hb_5886(cur),
         _ => match fixed_width_5886(op) {
             Some(w) => cur.skip_fixed(w),
             None => Err("unmapped_opcode"),
@@ -616,6 +664,8 @@ pub fn skip_harvest_strings(bytecode: &[u8], params: FetchParams) -> SkipHarvest
     };
     let mut strings = Vec::new();
     let mut ge_key_imms = Vec::new();
+    let mut ops = Vec::new();
+    let mut hw_tags = Vec::new();
     let mut instructions = 0usize;
     let mut last_pc = params.init_pc;
     let mut last_opcode = None;
@@ -636,9 +686,10 @@ pub fn skip_harvest_strings(bytecode: &[u8], params: FetchParams) -> SkipHarvest
             }
         };
         last_opcode = Some(op);
+        ops.push((last_pc, op));
         instructions += 1;
         let result = if uses_5886_skip(params) {
-            skip_mapped_5886(&mut cur, op, last_pc, &mut strings)
+            skip_mapped_5886(&mut cur, op, last_pc, &mut strings, &mut hw_tags)
         } else if op == XF_OPCODE {
             skip_xf(&mut cur, last_pc, &mut strings)
         } else if op == GC_OPCODE {
@@ -678,6 +729,8 @@ pub fn skip_harvest_strings(bytecode: &[u8], params: FetchParams) -> SkipHarvest
         stopped,
         strings,
         ge_key_imms,
+        ops,
+        hw_tags,
     }
 }
 
@@ -1041,15 +1094,51 @@ mod tests {
         }
         let h = skip_harvest_strings(&bc, FETCH_CHROME_2026_08_22_B_5886);
         assert_eq!(h.params_label, FETCH_CHROME_2026_08_22_B_5886.label);
+        let html_entry = FetchParams {
+            label: "html-candidate-176-unverified",
+            init_pc: 0,
+            init_key: 176,
+            byte_bias: FETCH_CHROME_2026_08_22_B_5886.byte_bias,
+            key_mul: FETCH_CHROME_2026_08_22_B_5886.key_mul,
+            key_add: FETCH_CHROME_2026_08_22_B_5886.key_add,
+            key_quad_b: FETCH_CHROME_2026_08_22_B_5886.key_quad_b,
+        };
+        let from_zero = skip_harvest_strings(&bc, html_entry);
+        assert_ne!(
+            from_zero.params_label, FETCH_LIVE.label,
+            "HTML 176 start must not be labeled FETCH_LIVE"
+        );
+        let mut union_strings: Vec<String> = h.strings.iter().map(|s| s.text.clone()).collect();
+        union_strings.extend(from_zero.strings.iter().map(|s| s.text.clone()));
+        for f in &rows {
+            let pc = f.get("pc").and_then(|x| x.as_u64()).unwrap() as u32;
+            let key = f.get("key").and_then(|x| x.as_u64()).unwrap() as u8;
+            if pc == FETCH_CHROME_2026_08_22_B_5886.init_pc
+                && key == FETCH_CHROME_2026_08_22_B_5886.init_key
+            {
+                continue;
+            }
+            let start = FetchParams {
+                init_pc: pc,
+                init_key: key,
+                ..FETCH_CHROME_2026_08_22_B_5886
+            };
+            let block = skip_harvest_strings(&bc, start);
+            union_strings.extend(block.strings.iter().map(|s| s.text.clone()));
+        }
         let leftover_hits: Vec<&str> = FOLLOWUP_UNSEEN_EXTRA_IDENT_B
             .iter()
             .copied()
-            .filter(|n| h.contains_ident(n))
+            .filter(|n| {
+                h.contains_ident(n) || union_strings.iter().any(|s| s == n || s.contains(n))
+            })
             .collect();
         let extra_hits: Vec<&str> = FOLLOWUP_EXTRA_IDENT_B
             .iter()
             .copied()
-            .filter(|n| h.contains_ident(n))
+            .filter(|n| {
+                h.contains_ident(n) || union_strings.iter().any(|s| s == n || s.contains(n))
+            })
             .collect();
         let packed_leftover: Vec<&str> = FOLLOWUP_UNSEEN_EXTRA_IDENT_B
             .iter()
@@ -1075,36 +1164,45 @@ mod tests {
             h.instructions,
             h.strings.len()
         );
-        let html_entry = FetchParams {
-            label: "html-candidate-176-unverified",
-            init_pc: 0,
-            init_key: 176,
-            byte_bias: FETCH_CHROME_2026_08_22_B_5886.byte_bias,
-            key_mul: FETCH_CHROME_2026_08_22_B_5886.key_mul,
-            key_add: FETCH_CHROME_2026_08_22_B_5886.key_add,
-            key_quad_b: FETCH_CHROME_2026_08_22_B_5886.key_quad_b,
-        };
-        let from_zero = skip_harvest_strings(&bc, html_entry);
-        assert_ne!(
-            from_zero.params_label, FETCH_LIVE.label,
-            "HTML 176 start must not be labeled FETCH_LIVE"
-        );
+        assert_eq!(SWITCH_OPCODES_5886.len(), 69);
+        let from_zero_leftover: Vec<&str> = FOLLOWUP_UNSEEN_EXTRA_IDENT_B
+            .iter()
+            .copied()
+            .filter(|n| from_zero.contains_ident(n))
+            .collect();
+        let h_texts: Vec<&str> = h.strings.iter().map(|s| s.text.as_str()).collect();
+        let z_texts: Vec<&str> = from_zero.strings.iter().map(|s| s.text.as_str()).collect();
+        let mut union_unique = union_strings.clone();
+        union_unique.sort();
+        union_unique.dedup();
+        let ops_head: Vec<(u32, u8)> = h.ops.iter().copied().take(32).collect();
+        let z_ops_head: Vec<(u32, u8)> = from_zero.ops.iter().copied().take(32).collect();
         eprintln!(
-            "tuples27 5886 skip-harvest stopped={} last_pc={} last_op={:?} instr={} strings={} leftover={leftover_hits:?} extra={extra_hits:?} packed_leftover={packed_leftover:?} html176 stopped={} last_pc={} last_op={:?} instr={}",
+            "tuples27 5886 skip-harvest stopped={} last_pc={} last_op={:?} instr={} leftover={leftover_hits:?} extra={extra_hits:?} packed_leftover={packed_leftover:?} ops={ops_head:?} hw_tags={:?} texts={h_texts:?} union_n={} union_unique={:?} html176 stopped={} last_pc={} last_op={:?} instr={} leftover={from_zero_leftover:?} ops={z_ops_head:?} hw_tags={:?} texts={z_texts:?}",
             h.stopped,
             h.last_pc,
             h.last_opcode,
             h.instructions,
-            h.strings.len(),
+            h.hw_tags,
+            union_strings.len(),
+            union_unique,
             from_zero.stopped,
             from_zero.last_pc,
             from_zero.last_opcode,
-            from_zero.instructions
+            from_zero.instructions,
+            from_zero.hw_tags
         );
         assert!(
-            h.instructions >= 2,
-            "expected Hg then at least one more, instr={}",
-            h.instructions
+            z_texts.contains(&"window"),
+            "html176 HW strings {z_texts:?}"
+        );
+        assert_eq!(from_zero.stopped, "unparsed_jump");
+        assert_eq!(from_zero.last_opcode, Some(135));
+        assert_eq!(h.stopped, "unmapped_opcode");
+        assert_eq!(h.last_opcode, Some(54));
+        assert!(
+            !SWITCH_OPCODES_5886.contains(&54),
+            "opcode 54 is absent from the tuples27 fetch switch"
         );
         assert!(
             !(h.last_pc == 181 && h.last_opcode == Some(HW_5886_OPCODE)),
@@ -1119,11 +1217,12 @@ mod tests {
         );
         assert_eq!(FETCH_LIVE.key_mul, 56_907);
         assert!(
-            leftover_hits.is_empty()
-                || leftover_hits
-                    .iter()
-                    .all(|n| FOLLOWUP_UNSEEN_EXTRA_IDENT_B.contains(n)),
-            "unexpected leftover hits {leftover_hits:?}"
+            leftover_hits.is_empty(),
+            "56907 leftover names on 5886 linear slices {leftover_hits:?}"
+        );
+        assert!(
+            union_unique.iter().any(|s| s == "window"),
+            "union HW/qR/Hx strings {union_unique:?}"
         );
         assert!(
             packed_leftover.is_empty(),
