@@ -360,6 +360,19 @@
         "gNcr3": "number"
       },
       "jsonOmittedExtraIdent": ["OQbM0", "UjLjP6", "YfDjo7", "Iqrc9", "OZgbm6"],
+      "numericSlotKind": "object",
+      "numericSlotKeyCountMin": 9,
+      "numericSlotKeyCountMax": 32,
+      "numericKinds": {
+        "1": "object:10", "2": "object:11", "3": "object:11", "4": "object:13", "5": "object:10",
+        "6": "object:10", "7": "object:10", "8": "object:10", "9": "object:10", "10": "object:10",
+        "11": "object:14", "12": "object:11", "13": "object:17", "14": "object:32", "15": "object:10",
+        "16": "object:9", "17": "object:20", "18": "object:13", "19": "object:10", "20": "object:17",
+        "21": "object:10", "22": "object:13", "23": "object:15", "24": "object:16", "25": "object:23",
+        "26": "object:11", "27": "object:10", "28": "object:13", "29": "object:14", "30": "object:9",
+        "31": "object:15", "32": "object:9", "33": "object:10", "34": "object:17", "35": "object:25",
+        "36": "object:10", "37": "object:10", "38": "object:12", "39": "object:15"
+      },
       "numericKeysInHtml": false,
       "extraIdentHtml": [
         { "name": "SMrTl9", "html": "chl_opt" },
@@ -388,7 +401,58 @@
       "via": "f4",
       "keyCount": 99,
       "identCount": 60,
-      "note": "Last f4 snapshot (SolveGate invisible, 2026-08-21). 46 of 47 init keys (MaOkK2 dropped), numeric 1..39, 14 extra ident names. Early f4 was init+xBCsP4 with no numeric slots — picker prefers numeric. Kinds only; JSON.stringify would omit function/undefined extras. Do not fill values or POST."
+      "note": "Last f4 snapshot (SolveGate invisible, 2026-08-21). 46 of 47 init keys (MaOkK2 dropped), numeric 1..39, 14 extra ident names. Early f4 was init+xBCsP4 with no numeric slots — picker prefers numeric. Kinds only; JSON.stringify would omit function/undefined extras. Do not fill values or POST.",
+      "writes": [
+        { "name": "SMrTl9", "source": "chl_opt", "writePath": "host_copy", "opcode": null },
+        { "name": "OQbM0", "source": "absent", "writePath": "unseen_in_dumps", "opcode": null },
+        { "name": "xBCsP4", "source": "chl_opt", "writePath": "host_copy", "opcode": null },
+        { "name": "UjLjP6", "source": "absent", "writePath": "unseen_in_dumps", "opcode": null },
+        { "name": "YfDjo7", "source": "absent", "writePath": "unseen_in_dumps", "opcode": null },
+        { "name": "Iqrc9", "source": "absent", "writePath": "unseen_in_dumps", "opcode": null },
+        { "name": "OZgbm6", "source": "absent", "writePath": "unseen_in_dumps", "opcode": null },
+        { "name": "pFyv1", "source": "absent", "writePath": "unseen_in_dumps", "opcode": null },
+        { "name": "SfUI1", "source": "absent", "writePath": "unseen_in_dumps", "opcode": null },
+        { "name": "sqKXG6", "source": "other_object", "writePath": "unseen_in_dumps", "opcode": null },
+        { "name": "HUDi4", "source": "absent", "writePath": "unseen_in_dumps", "opcode": null },
+        { "name": "DTBF3", "source": "absent", "writePath": "unseen_in_dumps", "opcode": null },
+        { "name": "mQiic7", "source": "string_table", "writePath": "unseen_in_dumps", "opcode": null },
+        { "name": "gNcr3", "source": "absent", "writePath": "unseen_in_dumps", "opcode": null },
+        { "name": "MaOkK2", "source": "init_obj", "writePath": "glue", "opcode": null },
+        { "name": "1..39", "source": "numeric_family", "writePath": "vm_entry_index", "opcode": null }
+      ],
+      "inlinePackedHarvest": {
+        "source": "runProgram(`71GxwDch…`) 5k stub in 56907 iframe HTML, not the 822k /fo/ init response",
+        "stopped": "unparsed_jump",
+        "lastOpcode": 187,
+        "instructions": 13,
+        "stringCount": 10,
+        "hasWindow": true,
+        "hasQuerySelectorAll": true,
+        "extraIdentInStub": false,
+        "geKeyImm1to39": false,
+        "note": "Skip-harvest skips XU/177 immediates without XI.apply and stops at the first jump (XX/187). Live 822k packed body is recaptured separately. Do not execute handlers."
+      },
+      "leftoverProbe": {
+        "status": "f4-inferred",
+        "unseenNames": [
+          "OQbM0", "UjLjP6", "YfDjo7", "Iqrc9", "OZgbm6", "pFyv1", "SfUI1", "sqKXG6",
+          "HUDi4", "DTBF3", "mQiic7", "gNcr3"
+        ],
+        "namesRotated": false,
+        "opcodeRecovered": false,
+        "writeCount": 0,
+        "leftoverHitCount": 0,
+        "note": "Headed Chrome 2026-08-22: leftover names still live on later f4 (same 12 as 56907). First f4 is init+xBCsP4; later f4 has 14 extras + numeric 1..39 objects. OOPIF ignores Fetch.fulfillRequest rewrite so __cfOp is empty; fetch-loop Debugger breakpoints stay off. Assignment traps did not fire on the f4 argument. Opcode stays unknown. Live HTML fetch is mix²*39695 — not FETCH_LIVE."
+      },
+      "packedHarvest": {
+        "recaptured": true,
+        "packedPrefix": "1oUjjpq4sauymkoqjx4C",
+        "respLen": 846200,
+        "fetchMul": 23196,
+        "fetchLiveUnchanged": true,
+        "unseenIdentHits": [],
+        "note": "Init /fo/ response saved via Fetch.getResponseBody (no /fo/ rewrite). Packed magic/fetch rotated off 56907; FETCH_LIVE skip-harvest stops at unmapped opcode 245. Leftover names are not in decrypted packed plaintext. Do not execute handlers."
+      }
     },
     "eveningLinear": {
       "source": "headed Chrome iframe HTML, same SolveGate day after 56907 and 8904",

@@ -85,6 +85,34 @@ pub const FETCH_BRANCH_B_LATE: FetchParams = FetchParams {
 /// Latest headed-Chrome snapshot. Earlier same-day linear `b` is [`FETCH_BRANCH_B`].
 pub const FETCH_LIVE: FetchParams = FETCH_BRANCH_B_LATE;
 
+/// Headed Chrome 2026-08-22 SolveGate (`mix²*5886 + mix*50261 + 1243`, bias 187).
+/// Verified by `--verify-case-tuples` on `chrome-oracle-tuples27` (9/9 decode).
+/// `init_pc`/`init_key` are the earliest verified harvest row. HTML `(0,176,[])`
+/// is **not** used: there was no verified pc=0 row.
+/// **Not** [`FETCH_LIVE`] (still 56907).
+pub const FETCH_CHROME_2026_08_22_B_5886: FetchParams = FetchParams {
+    label: "chrome-oracle-2026-08-22-b-5886",
+    init_pc: 175,
+    init_key: 166,
+    byte_bias: 187,
+    key_mul: 5_886,
+    key_add: 1_243,
+    key_quad_b: 50_261,
+};
+
+/// Leftover1/leftover4 iframe HTML: linear `*40954+30072`, bias 1,
+/// `new M9(M)[…](0,62,[])`. **Not** opcode-tuple verified. **Not** [`FETCH_LIVE`].
+/// Skip-harvest only (`run_program_skip`); do not remap 56907/5886 opcodes here.
+pub const FETCH_HTML_40954_UNVERIFIED: FetchParams = FetchParams {
+    label: "html-candidate-40954-unverified",
+    init_pc: 0,
+    init_key: 62,
+    byte_bias: 1,
+    key_mul: 40_954,
+    key_add: 30_072,
+    key_quad_b: 0,
+};
+
 /// Live entry (Chrome). Historical g-branch used key 100.
 pub const INIT_PC: u32 = FETCH_LIVE.init_pc;
 pub const INIT_KEY: u8 = FETCH_LIVE.init_key;
@@ -401,9 +429,7 @@ pub fn next_key(params: FetchParams, key: u8, opcode: u8) -> u8 {
 }
 
 /// Pick fetch + switch table from a packed-program magic header.
-pub fn params_for_magic(
-    magic: &[u8],
-) -> Option<(FetchParams, &'static [OpcodeDef])> {
+pub fn params_for_magic(magic: &[u8]) -> Option<(FetchParams, &'static [OpcodeDef])> {
     use crate::solver::run_program::{
         RUN_PROGRAM_MAGIC_BYTES, RUN_PROGRAM_MAGIC_BYTES_B, RUN_PROGRAM_MAGIC_BYTES_B_LATE,
     };
@@ -457,6 +483,55 @@ pub fn verify_oracle_tuple(
         ));
     }
     Ok(())
+}
+
+/// Case-label harvest records post-fetch `next_key`, not the fetch key.
+/// Brute `fetch_key` in `0..=255`. One hit is the fetch key; zero or many is not a snapshot.
+pub fn recover_fetch_key(
+    params: FetchParams,
+    opcode: u8,
+    byte: u8,
+    observed_next_key: u8,
+) -> Result<u8, String> {
+    let mut hits = Vec::new();
+    for k in 0u8..=255 {
+        if decode_opcode(params, k, byte) == opcode
+            && next_key(params, k, opcode) == observed_next_key
+        {
+            hits.push(k);
+        }
+    }
+    match hits.as_slice() {
+        [k] => Ok(*k),
+        [] => Err(format!(
+            "no fetch_key for {} op={opcode} byte=0x{byte:02x} next_key={observed_next_key}",
+            params.label
+        )),
+        more => Err(format!(
+            "ambiguous {} fetch_keys for {} op={opcode} byte=0x{byte:02x} next_key={observed_next_key}: {more:?}",
+            more.len(),
+            params.label
+        )),
+    }
+}
+
+pub fn verify_oracle_tuple_next_key(
+    params: FetchParams,
+    pc: u32,
+    opcode: u8,
+    byte: u8,
+    observed_next_key: u8,
+) -> Result<u8, String> {
+    let key = recover_fetch_key(params, opcode, byte, observed_next_key)?;
+    verify_oracle_tuple(params, pc, key, byte, opcode)?;
+    let got_next = next_key(params, key, opcode);
+    if got_next != observed_next_key {
+        return Err(format!(
+            "pc {pc}: next_key({} key={key} op={opcode}) = {got_next}, harvest {observed_next_key}",
+            params.label
+        ));
+    }
+    Ok(key)
 }
 
 /// 1-byte walk. Diverges at the first mapped handler that consumes immediates.
@@ -629,8 +704,7 @@ mod tests {
         assert!(stream.fetches[0].mapped);
         assert_eq!(stream.fetches[0].next_key, 197);
         assert_eq!(
-            params_for_magic(&RUN_PROGRAM_MAGIC_BYTES_B_LATE)
-                .map(|(p, _)| p.label),
+            params_for_magic(&RUN_PROGRAM_MAGIC_BYTES_B_LATE).map(|(p, _)| p.label),
             Some(FETCH_BRANCH_B_LATE.label)
         );
     }
@@ -681,6 +755,34 @@ mod tests {
         assert!(verify_oracle_tuple(FETCH_BRANCH_G, 0, 100, 0xaf, 21).is_ok());
         assert!(verify_oracle_tuple(FETCH_BRANCH_B_LATE, 0, 44, 0xef, 222).is_ok());
         assert!(verify_oracle_tuple(FETCH_BRANCH_B_LATE, 0, 44, 0xef, 8).is_err());
+        let nk = next_key(FETCH_BRANCH_B_LATE, 44, 222);
+        assert_eq!(
+            recover_fetch_key(FETCH_BRANCH_B_LATE, 222, 0xef, nk).unwrap(),
+            44
+        );
+        assert!(recover_fetch_key(FETCH_BRANCH_B_LATE, 8, 0xef, nk).is_err());
+        assert_eq!(
+            verify_oracle_tuple_next_key(FETCH_BRANCH_B_LATE, 0, 222, 0xef, nk).unwrap(),
+            44
+        );
+        assert_eq!(FETCH_LIVE.key_mul, 56_907);
+        assert_eq!(FETCH_CHROME_2026_08_22_B_5886.key_mul, 5_886);
+        assert_eq!(FETCH_CHROME_2026_08_22_B_5886.key_quad_b, 50_261);
+        assert_eq!(FETCH_CHROME_2026_08_22_B_5886.key_add, 1_243);
+        assert_eq!(FETCH_CHROME_2026_08_22_B_5886.byte_bias, 187);
+        assert!(verify_oracle_tuple(FETCH_CHROME_2026_08_22_B_5886, 175, 166, 94, 5).is_ok());
+        assert_eq!(next_key(FETCH_CHROME_2026_08_22_B_5886, 166, 5), 48);
+        assert!(verify_oracle_tuple(FETCH_LIVE, 175, 166, 94, 5).is_err());
+        assert_ne!(FETCH_LIVE.key_mul, FETCH_CHROME_2026_08_22_B_5886.key_mul);
+        assert_eq!(FETCH_HTML_40954_UNVERIFIED.key_mul, 40_954);
+        assert_eq!(FETCH_HTML_40954_UNVERIFIED.key_add, 30_072);
+        assert_eq!(FETCH_HTML_40954_UNVERIFIED.byte_bias, 1);
+        assert_eq!(FETCH_HTML_40954_UNVERIFIED.key_quad_b, 0);
+        assert_ne!(FETCH_LIVE.key_mul, FETCH_HTML_40954_UNVERIFIED.key_mul);
+        assert_ne!(
+            FETCH_CHROME_2026_08_22_B_5886.key_mul,
+            FETCH_HTML_40954_UNVERIFIED.key_mul
+        );
     }
 
     #[test]
@@ -746,10 +848,7 @@ mod tests {
                 late["fetch"]["init_key"].as_u64().unwrap() as u8,
                 p.init_key
             );
-            assert_eq!(
-                late["fetch"]["key_mul"].as_u64().unwrap() as u32,
-                p.key_mul
-            );
+            assert_eq!(late["fetch"]["key_mul"].as_u64().unwrap() as u32, p.key_mul);
             assert_eq!(
                 late["fetch"]["key_quad_b"].as_u64().unwrap() as u32,
                 p.key_quad_b

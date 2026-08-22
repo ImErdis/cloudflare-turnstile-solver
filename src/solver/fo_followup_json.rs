@@ -64,6 +64,52 @@ pub const FOLLOWUP_NUMERIC_KEY_MAX_B: u32 = 39;
 /// Numeric follow-up slots come from runtime writes, not an object literal.
 pub const FOLLOWUP_NUMERIC_KEYS_IN_HTML: bool = false;
 
+/// Headed Chrome later `f4` (`artifacts/re-out/chrome-oracle-keys`, 56907 day):
+/// every `"1"`..`"39"` value is an object (entry), not a string/number.
+pub const FOLLOWUP_NUMERIC_SLOT_KIND_B: &str = "object";
+
+/// Own-key counts on those entry objects (`object:N` kinds). Lengths only.
+pub const FOLLOWUP_NUMERIC_SLOT_KEYCOUNT_MIN_B: u32 = 9;
+pub const FOLLOWUP_NUMERIC_SLOT_KEYCOUNT_MAX_B: u32 = 32;
+
+/// Extra ident still `unseen_in_dumps` after HTML + stub skip-harvest + live packed recapture.
+/// Names rotate per iframe; the headed probe's live set is `extraIdentNow`, not this list.
+pub const FOLLOWUP_UNSEEN_EXTRA_IDENT_B: &[&str] = &[
+    "OQbM0", "UjLjP6", "YfDjo7", "Iqrc9", "OZgbm6", "pFyv1", "SfUI1", "sqKXG6", "HUDi4",
+    "DTBF3", "mQiic7", "gNcr3",
+];
+
+/// Headed leftover probe (2026-08-22): later-`f4` extras exist on packed2, but the
+/// write opcode was not recovered. Do not hunt this list on a later fetch rotation
+/// (40954 linear / 5886 quadratic). Fetch-loop Debugger breakpoints stay off.
+pub const FOLLOWUP_LEFTOVER_OPCODE_RECOVERED: bool = false;
+
+/// Live `/fo/` packed body recaptured 2026-08-22 (`artifacts/.../chrome-oracle-packed2`,
+/// gitignored). Runtime `runProgram` arg prefix; decrypt magic matches. Not the
+/// 56907 `71GxwDch` packer. Do not commit the blob.
+pub const FOLLOWUP_LIVE_PACKED_RECAPTURED: bool = true;
+
+/// First 20 chars of the live packed `runProgram` argument (`packedMeta`).
+pub const FOLLOWUP_LIVE_PACKED_PREFIX: &str = "1oUjjpq4sauymkoqjx4C";
+
+/// Init `/fo/` response length (packed-runProgram band) from Fetch.getResponseBody.
+pub const FOLLOWUP_LIVE_PACKED_RESP_LEN: usize = 846_200;
+
+/// HTML fetch on that iframe (`mix²*23196 + mix*32619 + 19372`, bias 217,
+/// `new HC(H)(0,63,[])`, first case 220). **Not** `FETCH_LIVE` (still 56907).
+pub const FOLLOWUP_LIVE_PACKED_FETCH_MUL: u32 = 23_196;
+
+/// Map a Chrome leftover assignment opcode to a write_path. `None` / unknown
+/// stays `unseen_in_dumps` (inject miss is not a handler story).
+pub fn write_path_from_chrome_opcode(opcode: Option<u8>) -> &'static str {
+    match opcode {
+        Some(177) => "host_xi",
+        Some(226) => "bytecode_string",
+        Some(227) | Some(169) | Some(138) => "property_set",
+        _ => "unseen_in_dumps",
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct ExtraIdentHtmlSource {
     pub name: &'static str,
@@ -89,6 +135,77 @@ pub const FOLLOWUP_EXTRA_IDENT_HTML_B: &[ExtraIdentHtmlSource] = &[
     ExtraIdentHtmlSource { name: "DTBF3", html: "absent", note: "not in 56907 iframe HTML" },
     ExtraIdentHtmlSource { name: "mQiic7", html: "string_table", note: "string-table token only" },
     ExtraIdentHtmlSource { name: "gNcr3", html: "absent", note: "not in 56907 iframe HTML" },
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct FollowUpFieldWrite {
+    pub name: &'static str,
+    /// `chl_opt` / `other_object` / `string_table` / `absent` / `init_obj` / `numeric_family`.
+    pub source: &'static str,
+    /// `host_copy` / `bytecode_string` / `glue` / `host_xi` / `property_set` /
+    /// `vm_entry_index` / `unseen_in_dumps`. `property_set` is Chrome leftover
+    /// only (`gG`/227, `ge`/169, `gN`/138) — do not infer it from HTML bodies.
+    pub write_path: &'static str,
+    pub opcode: Option<u8>,
+    pub evidence: &'static str,
+}
+
+const fn w(
+    name: &'static str,
+    source: &'static str,
+    write_path: &'static str,
+    opcode: Option<u8>,
+    evidence: &'static str,
+) -> FollowUpFieldWrite {
+    FollowUpFieldWrite {
+        name,
+        source,
+        write_path,
+        opcode,
+        evidence,
+    }
+}
+
+/// How each follow-up field is written (56907 dumps). Names were already known.
+/// HTML-embedded 5k `runProgram(\`71GxwDch…\`)` stub has none of the 14 extras
+/// (skip-harvest stops at jump XX/187 after skipping XU/177 immediates).
+/// Live `/fo/` packed body recaptured 2026-08-22 (`FOLLOWUP_LIVE_PACKED_*`):
+/// prefix `1oUjjpq4…`, fetch `mix²*23196` — not `FETCH_LIVE`. Skip-harvest with
+/// 56907 fetch stops at unmapped opcode 245; leftover names are not in the
+/// decrypted packed plaintext. Still `unseen_in_dumps`. Do not fill values or POST.
+pub const FOLLOWUP_FIELD_WRITE_B: &[FollowUpFieldWrite] = &[
+    w("SMrTl9", "chl_opt", "host_copy", None,
+        "_cf_chl_opt SMrTl9 is the 16-hex ray; follow-up kind string. Not on the init JSON literal. Assignment onto initObj is not in HTML."),
+    w("OQbM0", "absent", "unseen_in_dumps", None,
+        "not in 56907 HTML or the HTML-embedded packed stub; Chrome kind undefined (stringify omits). Leftover headed Chrome 2026-08-22: still on later f4; assignment opcode not recovered (OOPIF ignores Fetch rewrite; fetch-loop BP off)."),
+    w("xBCsP4", "chl_opt", "host_copy", None,
+        "_cf_chl_opt xBCsP4: []; follow-up kind array. Early f4 is init plus this key (no numeric slots) before the later mutated f4."),
+    w("UjLjP6", "absent", "unseen_in_dumps", None,
+        "not in 56907 HTML or the HTML-embedded packed stub; Chrome kind function (stringify omits). Leftover headed Chrome: still on later f4; opcode not recovered."),
+    w("YfDjo7", "absent", "unseen_in_dumps", None,
+        "not in 56907 HTML or the HTML-embedded packed stub; Chrome kind undefined. Leftover headed Chrome: still on later f4; opcode not recovered."),
+    w("Iqrc9", "absent", "unseen_in_dumps", None,
+        "not in 56907 HTML or the HTML-embedded packed stub; Chrome kind undefined. Leftover headed Chrome: still on later f4; opcode not recovered."),
+    w("OZgbm6", "absent", "unseen_in_dumps", None,
+        "not in 56907 HTML or the HTML-embedded packed stub; Chrome kind function (stringify omits). Leftover headed Chrome: still on later f4; opcode not recovered."),
+    w("pFyv1", "absent", "unseen_in_dumps", None,
+        "not in 56907 HTML or the HTML-embedded packed stub; Chrome kind number. Leftover headed Chrome: still on later f4; opcode not recovered."),
+    w("SfUI1", "absent", "unseen_in_dumps", None,
+        "not in 56907 HTML or the HTML-embedded packed stub; Chrome kind array. Leftover headed Chrome: still on later f4; opcode not recovered."),
+    w("sqKXG6", "other_object", "unseen_in_dumps", None,
+        "HTML has Xu={\"sqKXG6\":W?W:undefined,...} on an /eb/ error beacon (stack file string), not the /fo/ init literal. Follow-up kind string. Copy onto initObj not in HTML; stub harvest miss. Leftover headed Chrome: still on later f4; opcode not recovered."),
+    w("HUDi4", "absent", "unseen_in_dumps", None,
+        "not in 56907 HTML or the HTML-embedded packed stub; Chrome kind string. Leftover headed Chrome: still on later f4; opcode not recovered."),
+    w("DTBF3", "absent", "unseen_in_dumps", None,
+        "not in 56907 HTML or the HTML-embedded packed stub; Chrome kind string. Leftover headed Chrome: still on later f4; opcode not recovered."),
+    w("mQiic7", "string_table", "unseen_in_dumps", None,
+        "semicolon string-table token only; follow-up kind number. Stub harvest miss. Leftover headed Chrome: still on later f4; opcode not recovered."),
+    w("gNcr3", "absent", "unseen_in_dumps", None,
+        "not in 56907 HTML or the HTML-embedded packed stub; Chrome kind number. Leftover headed Chrome: still on later f4; opcode not recovered."),
+    w("MaOkK2", "init_obj", "glue", None,
+        "on the init object literal (\"MaOkK2\": host call). Absent from later f4 identKeys. delete/drop not in HTML."),
+    w("1..39", "numeric_family", "vm_entry_index", None,
+        "consecutive 1-based keys, count 39, no quoted \"1\": in HTML. Same kind as orchestrate-era parsed_vm.entries under \"1\"..\"N\". Headed Chrome later f4 (chrome-oracle-keys): every slot is object, own-key counts 9..=32. ge/169 can write an integer key imm; the HTML-embedded stub harvested none in 1..=39."),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -220,9 +337,48 @@ mod tests {
         for (src, name) in FOLLOWUP_EXTRA_IDENT_HTML_B.iter().zip(FOLLOWUP_EXTRA_IDENT_B) {
             assert_eq!(src.name, *name);
         }
+        assert_eq!(FOLLOWUP_FIELD_WRITE_B.len(), FOLLOWUP_EXTRA_IDENT_B.len() + 2);
+        for (row, name) in FOLLOWUP_FIELD_WRITE_B.iter().zip(FOLLOWUP_EXTRA_IDENT_B) {
+            assert_eq!(row.name, *name);
+            assert_eq!(row.opcode, None);
+        }
+        assert_eq!(FOLLOWUP_FIELD_WRITE_B[0].write_path, "host_copy");
+        assert_eq!(FOLLOWUP_FIELD_WRITE_B[2].write_path, "host_copy");
+        assert_eq!(FOLLOWUP_FIELD_WRITE_B[2].name, "xBCsP4");
+        assert_eq!(FOLLOWUP_FIELD_WRITE_B[9].name, "sqKXG6");
+        assert_eq!(FOLLOWUP_FIELD_WRITE_B[9].source, "other_object");
+        assert_eq!(FOLLOWUP_FIELD_WRITE_B[9].write_path, "unseen_in_dumps");
+        let dropped = FOLLOWUP_FIELD_WRITE_B.iter().find(|r| r.name == "MaOkK2").unwrap();
+        assert_eq!(dropped.write_path, "glue");
+        assert_eq!(dropped.source, "init_obj");
+        let numeric = FOLLOWUP_FIELD_WRITE_B.iter().find(|r| r.name == "1..39").unwrap();
+        assert_eq!(numeric.write_path, "vm_entry_index");
+        assert_eq!(FOLLOWUP_NUMERIC_SLOT_KIND_B, "object");
+        assert_eq!(FOLLOWUP_NUMERIC_SLOT_KEYCOUNT_MIN_B, 9);
+        assert_eq!(FOLLOWUP_NUMERIC_SLOT_KEYCOUNT_MAX_B, 32);
+        assert_eq!(FOLLOWUP_UNSEEN_EXTRA_IDENT_B.len(), 12);
+        for name in FOLLOWUP_UNSEEN_EXTRA_IDENT_B {
+            let row = FOLLOWUP_FIELD_WRITE_B.iter().find(|r| r.name == *name).unwrap();
+            assert_eq!(row.write_path, "unseen_in_dumps", "{name}");
+        }
+        assert_eq!(write_path_from_chrome_opcode(Some(177)), "host_xi");
+        assert_eq!(write_path_from_chrome_opcode(Some(226)), "bytecode_string");
+        assert_eq!(write_path_from_chrome_opcode(Some(227)), "property_set");
+        assert_eq!(write_path_from_chrome_opcode(Some(169)), "property_set");
+        assert_eq!(write_path_from_chrome_opcode(None), "unseen_in_dumps");
+        assert!(!FOLLOWUP_LEFTOVER_OPCODE_RECOVERED);
+        assert!(FOLLOWUP_LIVE_PACKED_RECAPTURED);
+        assert_eq!(FOLLOWUP_LIVE_PACKED_PREFIX, "1oUjjpq4sauymkoqjx4C");
+        assert_eq!(FOLLOWUP_LIVE_PACKED_RESP_LEN, 846_200);
+        assert_eq!(FOLLOWUP_LIVE_PACKED_FETCH_MUL, 23_196);
+        assert_eq!(crate::solver::run_program_vm::FETCH_LIVE.key_mul, 56_907);
+        assert_eq!(NEXT_AFTER_FOLLOWUP_JSON, "handler_semantics");
         let path = std::path::Path::new("artifacts/re-out/chrome-oracle/iframe-1.html");
         if path.is_file() {
             let html = std::fs::read_to_string(path).unwrap();
+            if !html.contains("56907") || !html.contains("XK=A[rH(JY.aj)](runProgram,XS,E)") {
+                return;
+            }
             assert!(html.contains("SMrTl9: '"));
             assert!(html.contains("xBCsP4: []"));
             assert!(html.contains("\"sqKXG6\":"));
@@ -240,6 +396,12 @@ mod tests {
             }
             assert!(!html.contains("\"1\":"));
             assert!(!html.contains("'1':"));
+            assert!(html.contains("SMrTl9: '"));
+            assert!(html.contains("xBCsP4: []"));
+            assert!(html.contains("\"sqKXG6\":"));
+            assert!(html.contains("\"MaOkK2\":"));
+            assert!(html.contains("XK=A[rH(JY.aj)](runProgram,XS,E)"));
+            assert!(html.contains("A[rH(JY.aH)](XK,n,fj)"));
         }
     }
 
@@ -298,6 +460,30 @@ mod tests {
         }
         if let Some(n) = row["numericKeyCount"].as_u64() {
             assert_eq!(n, FOLLOWUP_NUMERIC_KEY_MAX_B as u64);
+        }
+        if row.get("numericSlotKind").and_then(|x| x.as_str()) == Some("object") {
+            assert_eq!(
+                row["numericSlotKeyCountMin"].as_u64(),
+                Some(FOLLOWUP_NUMERIC_SLOT_KEYCOUNT_MIN_B as u64)
+            );
+            assert_eq!(
+                row["numericSlotKeyCountMax"].as_u64(),
+                Some(FOLLOWUP_NUMERIC_SLOT_KEYCOUNT_MAX_B as u64)
+            );
+        }
+        if let Some(lp) = row.get("leftoverProbe") {
+            assert_eq!(lp["opcodeRecovered"], false);
+            assert_eq!(lp["namesRotated"], false);
+            if let Some(names) = lp["unseenNames"].as_array() {
+                let got: Vec<&str> = names.iter().filter_map(|k| k.as_str()).collect();
+                assert_eq!(got, FOLLOWUP_UNSEEN_EXTRA_IDENT_B);
+            }
+        }
+        if let Some(ph) = row.get("packedHarvest") {
+            assert_eq!(ph["recaptured"], true);
+            assert_eq!(ph["fetchLiveUnchanged"], true);
+            assert_eq!(ph["packedPrefix"], FOLLOWUP_LIVE_PACKED_PREFIX);
+            assert_eq!(ph["fetchMul"], FOLLOWUP_LIVE_PACKED_FETCH_MUL);
         }
         if let Some(ident) = row["identKeys"].as_array() {
             let names: Vec<String> = ident

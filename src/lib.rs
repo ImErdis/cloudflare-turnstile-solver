@@ -20,8 +20,10 @@ pub use solver::fo_followup::{
     LIVE_FO_FOLLOWUP, classify_fo_response_len, NEXT_AFTER_FOLLOWUP_SHAPE,
 };
 pub use solver::fo_followup_json::{
-    FOLLOWUP_COPIED_COUNT_B, FOLLOWUP_DROPPED_INIT_B, FOLLOWUP_EXTRA_IDENT_B, LIVE_FO_FOLLOWUP_JSON,
-    classify_fo_plaintext, NEXT_AFTER_FOLLOWUP_JSON,
+    FOLLOWUP_COPIED_COUNT_B, FOLLOWUP_DROPPED_INIT_B, FOLLOWUP_EXTRA_IDENT_B, FOLLOWUP_FIELD_WRITE_B,
+    FOLLOWUP_LIVE_PACKED_RECAPTURED, FOLLOWUP_NUMERIC_SLOT_KIND_B, FOLLOWUP_UNSEEN_EXTRA_IDENT_B,
+    LIVE_FO_FOLLOWUP_JSON, classify_fo_plaintext, write_path_from_chrome_opcode,
+    NEXT_AFTER_FOLLOWUP_JSON,
 };
 pub use solver::protocol::{
     DEMO_HREF, DEMO_SITE_KEY, PUBLIC_API_JS, extract_fo_session, parse_turnstile_api_js_url,
@@ -38,6 +40,7 @@ pub use solver::run_program_ops::{
     operand_from_byte, xf_tag_kind,
 };
 pub use solver::run_program_vm::{
-    FETCH_LIVE, INIT_KEY, INIT_PC, OPCODE_TABLE, decode_opcode, naive_one_byte_fetches, next_key,
-    opcode_def, opcode_def_in, params_for_magic, verify_oracle_tuple,
+    FETCH_CHROME_2026_08_22_B_5886, FETCH_LIVE, INIT_KEY, INIT_PC, OPCODE_TABLE, decode_opcode,
+    naive_one_byte_fetches, next_key, opcode_def, opcode_def_in, params_for_magic, recover_fetch_key,
+    verify_oracle_tuple, verify_oracle_tuple_next_key,
 };

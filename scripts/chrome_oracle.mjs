@@ -8,8 +8,25 @@
  * historical) inside the OOPIF iframe. Logs `{pc, op, key, byte}` so instruction
  * widths are PC deltas — not a 1-byte walk. Debugger on `f4` / `wZ` records the
  * plaintext object's **key names and value kinds** (string lengths, not contents).
- * Does **not** reconstruct a live `/fo/` body, dump full POST bodies, fill JSON
- * values, execute handlers as a solver, or harvest a token.
+ * Leftover extra-ident writes are logged as `{pc, opcode, key, valueKind}` via a
+ * read-only poll on the `fn(initObj, sendHelper)` argument — not values, and
+ * not by planting stale doorbell names. The later-`f4` ident list rotates; the
+ * live extra set is `leftoverProbe.extraIdentNow`. The body encoder (`Mt=function`
+ * on the 40954 iframe, historical `f4`/`f3`) is the leftover shape hook: send
+ * helper `c` runs `runProgram` then `Mt(X)`. Do not breakpoint the `wZ`
+ * performance logger.
+ * Fetch-loop Debugger breakpoints stay off unless `ORACLE_FETCH_TUPLES=1`
+ * (finite harvest + large-bytecode condition) or `ORACLE_FETCH_LOOP_BP=1`.
+ * Always-on pauses stalled `/fo/` because the HTML stub hits the same loop
+ * before init POST. Case-label pauses are **after** the key update: harvest
+ * `{pc, op: caseN, nextKey: keySlot, byte}` — do not treat `keySlot` as the
+ * fetch key, and do not take mix from Window/global (`outerWidth` is not mix).
+ * The iframe calls a **local** `runProgram`, so wrapping
+ * `globalThis.runProgram` does not see the packed argument (`packedMeta` stays
+ * null). Capture the init `/fo/` **response** instead (`Fetch.getResponseBody`
+ * then `continueRequest` — do not rewrite `/fo/`). Does **not** reconstruct a
+ * live `/fo/` POST body, dump full POST bodies, fill JSON values, execute
+ * handlers as a solver, or harvest a token.
  *
  * Usage:
  *   DISPLAY=:1 node scripts/chrome_oracle.mjs [url] [out-dir]
@@ -17,9 +34,21 @@
  *
  * Env:
  *   CHROME_PATH          default /usr/bin/google-chrome-stable
- *   ORACLE_WAIT_MS       default 22000
+ *   ORACLE_WAIT_MS       default 22000 (45000 when ORACLE_FETCH_TUPLES=1)
  *   ORACLE_HEADLESS      set to 1 to force headless (not the intended mode)
  *   ORACLE_SITE_ISOLATION set to 1 to keep OOPIF isolation (hooks will miss the iframe)
+ *   ORACLE_SKIP_IFRAME_REWRITE set to 1 to save iframe HTML without Fetch.fulfillRequest
+ *                    (packed /fo/ recapture; rewrite can stall a new fetch build)
+ *   ORACLE_FETCH_TUPLES set to 1 for a finite fetch-loop harvest. Prefers a logpoint on
+ *                    the fetch `switch(...){` (discriminant already holds `op`; condition
+ *                    returns false so packed `/fo/` is not stalled). Unique handler `{`
+ *                    BPs are the live fallback (Chrome 148 never hits mid-line switch BPs).
+ *                    Opcode comes from the fetch-loop parent discriminant (`s`/`YG`) when
+ *                    that frame is evaluable; otherwise the BP `case N` only if no other
+ *                    unique handler is on the stack. Skips iframe rewrite unless
+ *                    ORACLE_INJECT_IFRAME=1. Chrome 148 removed setScriptSource.
+ *   ORACLE_INJECT_IFRAME set to 1 to Fetch.fulfillRequest-inject `__cfOp.push` into the
+ *                    first turnstile iframe document (optional; default off).
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -30,9 +59,21 @@ const positional = process.argv.slice(2).filter((a) => a !== "--self-test");
 const url = positional[0] || "https://solvegate.io/demo/invisible";
 const outDir = positional[1] || path.join("artifacts", "re-out", "chrome-oracle");
 const chrome = process.env.CHROME_PATH || "/usr/bin/google-chrome-stable";
-const waitMs = Number(process.env.ORACLE_WAIT_MS || 22_000);
+const fetchTuples = process.env.ORACLE_FETCH_TUPLES === "1";
+const fetchLoopBp = process.env.ORACLE_FETCH_LOOP_BP === "1";
+const wantFetchLoopBp = fetchTuples || fetchLoopBp;
+const waitMs = Number(process.env.ORACLE_WAIT_MS || (fetchTuples ? 45_000 : 22_000));
 const headed = process.env.ORACLE_HEADLESS !== "1";
 const isolateIframes = process.env.ORACLE_SITE_ISOLATION === "1";
+const skipIframeRewrite =
+  process.env.ORACLE_SKIP_IFRAME_REWRITE === "1" || fetchTuples;
+/** Fetch.fulfillRequest inject into iframe HTML. Off by default: rewrite is not the packed script. */
+const injectIframe = process.env.ORACLE_INJECT_IFRAME === "1";
+/** Unique packed `case N` hits, then remove those BPs. Default 16. */
+const fetchTupleCap = Number(process.env.ORACLE_FETCH_TUPLE_CAP || 16);
+/** Skip the HTML-embedded stub (~7k packed). Live `/fo/` packed is ~600k+. */
+const FETCH_LOOP_BP_CONDITION =
+  '(function(){try{if(globalThis.__cfPackedMeta&&globalThis.__cfPackedMeta.packedLen>10000)return true;var g=this&&this.g;if(!g)return false;if(typeof this.l==="number"&&g[this.l]&&g[this.l].length>10000)return true;for(var i=0;i<Math.min(g.length||0,48);i++){var v=g[i];if(v&&v.length>10000)return true;}return false;}catch(e){return false;}})()';
 
 const CHROME_ARGS = [
   "--no-sandbox",
@@ -54,6 +95,9 @@ if (!selfTest) {
   fs.mkdirSync(outDir, { recursive: true });
 }
 
+const handlerNameToOp = new Map();
+const ambiguousHandlerNames = new Set();
+
 const PREAMBLE = `(() => {
   if (globalThis.__cfOracleHook) return;
   globalThis.__cfOracleHook = true;
@@ -61,6 +105,12 @@ const PREAMBLE = `(() => {
   globalThis.__cfXhr = globalThis.__cfXhr || [];
   globalThis.__cfRP = globalThis.__cfRP || [];
   globalThis.__cfFo = globalThis.__cfFo || [];
+  globalThis.__cfWrites = globalThis.__cfWrites || [];
+  const __cfWatched = typeof WeakSet === "function" ? new WeakSet() : { add: function () {}, has: function () { return false; } };
+  const __cfLeftover = {
+    OQbM0:1, UjLjP6:1, YfDjo7:1, Iqrc9:1, OZgbm6:1, pFyv1:1, SfUI1:1,
+    sqKXG6:1, HUDi4:1, DTBF3:1, mQiic7:1, gNcr3:1
+  };
   function __cfKind(v) {
     if (v === null) return "null";
     if (Array.isArray(v)) return "array:" + v.length;
@@ -69,6 +119,66 @@ const PREAMBLE = `(() => {
     if (t === "object") return "object:" + Object.keys(v).length;
     return t;
   }
+  function __cfLastOp() {
+    const ops = globalThis.__cfOp || [];
+    const last = ops.length ? ops[ops.length - 1] : null;
+    return {
+      pc: last && last.pc,
+      opcode: last && last.op,
+      fetchKey: last && last.key,
+      opCount: ops.length
+    };
+  }
+  function __cfLogWrite(key, value, via) {
+    try {
+      const k = String(key);
+      const writes = globalThis.__cfWrites;
+      if (writes.length >= 80) return;
+      const isDel = via === "delete";
+      if (writes.some(function (w) { return w.key === k && (isDel ? w.via === "delete" : w.via !== "delete"); })) return;
+      const op = __cfLastOp();
+      writes.push({
+        via: via,
+        key: k,
+        leftover: !!__cfLeftover[k],
+        numeric: /^\\d+$/.test(k),
+        valueKind: String(__cfKind(value)).split(":")[0],
+        pc: op.pc == null ? null : op.pc,
+        opcode: op.opcode == null ? null : op.opcode,
+        opCount: op.opCount
+      });
+    } catch (e) {}
+  }
+  function __cfInstallWatch(obj) {
+    if (!obj || typeof obj !== "object") return;
+    try {
+      if (__cfWatched.has(obj)) return;
+      __cfWatched.add(obj);
+    } catch (e) { return; }
+    const baseline = Object.create(null);
+    try {
+      const keys = Object.keys(obj);
+      for (let i = 0; i < keys.length; i++) baseline[keys[i]] = 1;
+    } catch (e) {}
+    const start = Date.now();
+    const poll = setInterval(function () {
+      try {
+        const keys = Object.keys(obj);
+        for (let i = 0; i < keys.length; i++) {
+          const k = keys[i];
+          if (/^\\d+$/.test(k) || !baseline[k]) {
+            __cfLogWrite(k, obj[k], "poll");
+            baseline[k] = 1;
+          }
+        }
+        if (baseline["MaOkK2"] && !Object.prototype.hasOwnProperty.call(obj, "MaOkK2")) {
+          __cfLogWrite("MaOkK2", undefined, "delete");
+        }
+        if (Date.now() - start > 12000) clearInterval(poll);
+      } catch (e) { clearInterval(poll); }
+    }, 5);
+  }
+  globalThis.__cfInstallWatch = __cfInstallWatch;
   function __cfShape(obj, via) {
     if (!obj || typeof obj !== "object" || Array.isArray(obj)) return null;
     const keys = Object.keys(obj);
@@ -158,6 +268,13 @@ const PREAMBLE = `(() => {
             const s = __cfShape(arguments[i], "setTimeout");
             if (s && globalThis.__cfFo.length < 12) globalThis.__cfFo.push(s);
           }
+          const orig = fn;
+          fn = function () {
+            const obj = arguments.length > 1 ? arguments[1] : undefined;
+            const r = orig.apply(this, arguments);
+            try { if (obj && typeof obj === "object") __cfInstallWatch(obj); } catch (e) {}
+            return r;
+          };
         }
       } catch {}
       return st.apply(this, arguments);
@@ -175,6 +292,13 @@ const PREAMBLE = `(() => {
             packedLen: packed && packed.length,
             packedPrefix: String(packed || "").slice(0, 20),
           });
+          if (typeof packed === "string" && packed.length > 50000 && !globalThis.__cfPackedMeta) {
+            globalThis.__cfPackedMeta = {
+              packedLen: packed.length,
+              packedPrefix: packed.slice(0, 20),
+            };
+            globalThis.__cfPacked = packed;
+          }
         } catch {}
         const ret = v.apply(this, arguments);
         if (typeof ret === "function") {
@@ -182,6 +306,7 @@ const PREAMBLE = `(() => {
             try {
               const s0 = __cfShape(initObj, "rpReturn");
               if (s0 && globalThis.__cfFo.length < 12) globalThis.__cfFo.push(s0);
+              try { __cfInstallWatch(initObj); } catch (e) {}
               let last = s0 && s0.keyCount;
               const start = Date.now();
               const poll = setInterval(function () {
@@ -231,16 +356,21 @@ const PREAMBLE = `(() => {
 
 function fetchSnippet(html) {
   for (const marker of [
+    "23196",
+    "32619",
+    "19372",
     "*31579,59205",
     "I*I*8904",
     "*8904,",
     "14792",
+    "39695",
     "56907",
     "36163)+38392",
     "19663)+36376",
     "*28814",
     "36163",
     "19663",
+    "40954",
   ]) {
     const idx = html.indexOf(marker);
     if (idx >= 0) {
@@ -253,24 +383,306 @@ function fetchSnippet(html) {
 /** HTML fetch schedule. `init_key` is not here — that needs opcode tuples. */
 function extractFetchQuadratic(html) {
   if (!html) return null;
-  const idx = html.search(/(\w+)\*\1\*\d{4,5}|\d{4,5}\*\((\w+)\*\2\)/);
+  // Prefer mix² * mul over later helper constants (8696 is key_quad_b, not key_mul).
+  let idx = -1;
+  for (const x of [
+    html.search(/\d{4,5}\*\(([A-Za-z_$][\w$]*)\*\1\)/),
+    html.search(/([A-Za-z_$][\w$]*)\*\1\*\d{4,5}/),
+    html.search(/([A-Za-z_$][\w$]*)\*\1,\d{4,5}/),
+    html.search(/([A-Za-z_$][\w$]*),\1\),\d{4,5}/),
+    html.search(/([A-Za-z_$][\w$]*),\1\)\*\d{4,5}/),
+  ]) {
+    if (x >= 0 && (idx < 0 || x < idx)) idx = x;
+  }
+  if (idx < 0) {
+    idx = html.search(
+      /(\w+)\*\1\*\d{4,5}|,\d{4,5}\),[\s\S]{0,48}\(\w+,\d{4,5}\)/,
+    );
+  }
   const window = idx >= 0 ? html.slice(Math.max(0, idx - 240), idx + 420) : html;
   const sq = window.match(
     /(\w+)\*\1\*(\d{4,5}),[\s\S]{0,96}?\(\1,(\d{4,5})\)\)\+(\d{4,5}),255/,
   );
+  const sqBareBmix = window.match(
+    /(\w+)\*\1\*(\d{4,5})\+\1\*(\d{4,5})\+(\d{4,5})/,
+  );
+  const sqBareMulB = window.match(
+    /(\w+)\*\1\*(\d{4,5})\+(\d{4,5})\*\1\+(\d{4,5})/,
+  );
+  const sqPlus = window.match(
+    /(\w+)\*\1\*(\d{4,5})\+[\s\S]{0,96}?\(\1,(\d{4,5})\)\+(\d{4,5}),255/,
+  );
   const alt = window.match(
     /(\d{4,5})\*\((\w+)\*\2\)\+[\s\S]{0,96}?\(\2,(\d{4,5})\),(\d{4,5})\)&255/,
   );
+  const mulStar = window.match(
+    /(\d{4,5})\*\((\w+)\*\2\),(\2)\*(\d{4,5})\)\+(\d{4,5}),255/,
+  );
+  const sqAmp = window.match(
+    /(\w+)\*\1\*(\d{4,5})\+[\s\S]{0,96}?\(\1,(\d{4,5})\)\+(\d{4,5})&255/,
+  );
+  const nestPairCommaMul = window.match(
+    /\((\w+),\1\),(\d{4,5})\)\+[\s\S]{0,96}?\(\1,(\d{4,5})\),(\d{4,5})\),255/,
+  );
+  // tuples26 catch: helper(mix,mix),mul),b*mix)+add&255
+  const nestPairCommaStarBmixAmp = window.match(
+    /(\w+),\1\),(\d{4,5})\),(\d{4,5})\*\1\)\+(\d{4,5})&255/,
+  );
+  const nestSqCommaMulHelper = window.match(
+    /(\w+)\*\1,(\d{4,5})\)\+[\s\S]{0,96}?\(\1,(\d{4,5})\),(\d{4,5})\)&255/,
+  );
+  const nestMul = window.match(
+    /\((\w+),\1\),(\d{4,5})\),[\s\S]{0,96}?\(\1,(\d{4,5})\)\)\+(\d{4,5}),255/,
+  );
+  const starMix = window.match(
+    /\((\w+),\1\)\*(\d{4,5})\+\1\*(\d{4,5})\+(\d{4,5}),255/,
+  );
+  const mulTimesSq = window.match(
+    /(\d{4,5})\*\((\w+)\*\2\)\+[\s\S]{0,96}?\(\2,(\d{4,5})\)\+(\d{4,5})&255/,
+  );
+  const mulSqPlusBmix = window.match(
+    /(\d{4,5})\*\((\w+)\*\2\)\+(\d{4,5})\*\2,(\d{4,5})\)/,
+  );
+  const helperPairCommaBmix = window.match(
+    /\((\w+),\1\)\*(\d{4,5}),(\d{4,5})\*\1\)\+(\d{4,5}),255/,
+  );
+  const helperPairTimesMul = window.match(
+    /(\w+),\1\)\*(\d{4,5})\+[\s\S]{0,96}?\(\1,(\d{4,5})\)\+(\d{4,5})&255/,
+  );
+  const helperPairCommaAdd = window.match(
+    /(\w+),\1\)\*(\d{4,5})\+[\s\S]{0,96}?\(\1,(\d{4,5})\),(\d{4,5})\)/,
+  );
+  const mulSqBmixPlusAdd = window.match(
+    /(\d{4,5})\*\((\w+)\*\2\)\+(\d{4,5})\*\2\+(\d{4,5}),255/,
+  );
+  // 54260*(L*L),43539*L),20295),255 — helper comma-add chain.
+  const mulCommaBmix = window.match(
+    /(\d{4,5})\*\((\w+)\*\2\),(\d{4,5})\*\2\),(\d{4,5})\),255/,
+  );
+  const mulCommaBmixAmp = window.match(
+    /(\d{4,5})\*\((\w+)\*\2\),(\d{4,5})\*\2\)\+(\d{4,5})&255/,
+  );
+  const nestSqCommaBmix = window.match(
+    /(\w+)\*\1,(\d{4,5})\),[\s\S]{0,96}?\1\*(\d{4,5})\),(\d{4,5})\)&255/,
+  );
+  const sqBareMulBCommaAdd = window.match(
+    /(\w+)\*\1\*(\d{4,5})\+(\d{4,5})\*\1,(\d{4,5})\)&255/,
+  );
+  const mulCommaHelper = window.match(
+    /(\d{4,5})\*\((\w+)\*\2\),[\s\S]{0,120}?\(\2,(\d{4,5})\)\),(\d{4,5})\)&255/,
+  );
+  const sqCommaHelper = window.match(
+    /(\w+)\*\1\*(\d{4,5}),[\s\S]{0,120}?\(\1,(\d{4,5})\)\)\+(\d{4,5})&255/,
+  );
+  // helper(mix*mix,mul)+mix*quad,add),255  (tuples25 happy)
+  const nestSqStarBmixCommaAdd = window.match(
+    /(\w+)\*\1,(\d{4,5})\)\+\1\*(\d{4,5}),(\d{4,5})\),255/,
+  );
+  const nestSqStarBmixCommaAddAmp = window.match(
+    /(\w+)\*\1,(\d{4,5})\)\+\1\*(\d{4,5}),(\d{4,5})\)&255/,
+  );
+  const nestSqStarBmixPlusAddAmp = window.match(
+    /(\w+)\*\1,(\d{4,5})\)\+\1\*(\d{4,5})\+(\d{4,5})&255/,
+  );
   const biasM = window.match(/\]-(\d{2,3}),256\)&255/);
+  const biasSub = window.match(/\]-(\d{2,3}),256/);
+  const biasAdd = window.match(/\[(\w+)\],(\d{2,3})\)\+256/);
+  const biasAddComma = window.match(/\[(\w+)\],(\d{2,3})\),256/);
+  const biasPlus = window.match(/\((\d{2,3})\+\w+\[\w+\],255\)/);
+  const biasAndAdd = window.match(/255&(\d{2,3})\+\w+\[/);
+  const biasPlusAmp = window.match(/(\d{2,3})\+\w+\[[^\]]{0,24}\]&255/);
   const caseM = window.match(/\{case (\d+):/);
-  if (!sq && !alt) return null;
+  const hit =
+    sq ||
+    sqBareBmix ||
+    sqBareMulB ||
+    sqPlus ||
+    sqAmp ||
+    nestMul ||
+    nestPairCommaMul ||
+    nestPairCommaStarBmixAmp ||
+    nestSqCommaMulHelper ||
+    starMix ||
+    mulTimesSq ||
+    mulSqPlusBmix ||
+    mulSqBmixPlusAdd ||
+    mulCommaBmix ||
+    mulCommaBmixAmp ||
+    nestSqCommaBmix ||
+    sqBareMulBCommaAdd ||
+    helperPairCommaBmix ||
+    helperPairTimesMul ||
+    helperPairCommaAdd ||
+    nestSqStarBmixCommaAdd ||
+    nestSqStarBmixCommaAddAmp ||
+    nestSqStarBmixPlusAddAmp ||
+    mulCommaHelper ||
+    sqCommaHelper ||
+    alt ||
+    mulStar;
+  if (!hit) return null;
+  let keyMul;
+  let keyQuadB;
+  let keyAdd;
+  let spelling;
+  if (sq) {
+    keyMul = Number(sq[2]);
+    keyQuadB = Number(sq[3]);
+    keyAdd = Number(sq[4]);
+    spelling = "mix*mix*mul";
+  } else if (sqBareBmix) {
+    keyMul = Number(sqBareBmix[2]);
+    keyQuadB = Number(sqBareBmix[3]);
+    keyAdd = Number(sqBareBmix[4]);
+    spelling = "mix*mix*mul+mix*b+add";
+  } else if (sqBareMulB) {
+    keyMul = Number(sqBareMulB[2]);
+    keyQuadB = Number(sqBareMulB[3]);
+    keyAdd = Number(sqBareMulB[4]);
+    spelling = "mix*mix*mul+b*mix+add";
+  } else if (sqPlus) {
+    keyMul = Number(sqPlus[2]);
+    keyQuadB = Number(sqPlus[3]);
+    keyAdd = Number(sqPlus[4]);
+    spelling = "mix*mix*mul+";
+  } else if (sqAmp) {
+    keyMul = Number(sqAmp[2]);
+    keyQuadB = Number(sqAmp[3]);
+    keyAdd = Number(sqAmp[4]);
+    spelling = "mix*mix*mul+helper&255";
+  } else if (nestMul) {
+    keyMul = Number(nestMul[2]);
+    keyQuadB = Number(nestMul[3]);
+    keyAdd = Number(nestMul[4]);
+    spelling = "helper(mix,mix),mul";
+  } else if (nestPairCommaMul) {
+    keyMul = Number(nestPairCommaMul[2]);
+    keyQuadB = Number(nestPairCommaMul[3]);
+    keyAdd = Number(nestPairCommaMul[4]);
+    spelling = "helper(mix,mix),mul)+helper(mix,b),add),255";
+  } else if (nestPairCommaStarBmixAmp) {
+    keyMul = Number(nestPairCommaStarBmixAmp[2]);
+    keyQuadB = Number(nestPairCommaStarBmixAmp[3]);
+    keyAdd = Number(nestPairCommaStarBmixAmp[4]);
+    spelling = "helper(mix,mix),mul),b*mix)+add&255";
+  } else if (nestSqCommaMulHelper) {
+    keyMul = Number(nestSqCommaMulHelper[2]);
+    keyQuadB = Number(nestSqCommaMulHelper[3]);
+    keyAdd = Number(nestSqCommaMulHelper[4]);
+    spelling = "mix*mix,mul)+helper(mix,b),add)&255";
+  } else if (starMix) {
+    keyMul = Number(starMix[2]);
+    keyQuadB = Number(starMix[3]);
+    keyAdd = Number(starMix[4]);
+    spelling = "(mix,mix)*mul+mix*b";
+  } else if (mulTimesSq) {
+    keyMul = Number(mulTimesSq[1]);
+    keyQuadB = Number(mulTimesSq[3]);
+    keyAdd = Number(mulTimesSq[4]);
+    spelling = "mul*(mix*mix)+helper&255";
+  } else if (mulSqPlusBmix) {
+    keyMul = Number(mulSqPlusBmix[1]);
+    keyQuadB = Number(mulSqPlusBmix[3]);
+    keyAdd = Number(mulSqPlusBmix[4]);
+    spelling = "mul*(mix*mix)+b*mix,add";
+  } else if (mulSqBmixPlusAdd) {
+    keyMul = Number(mulSqBmixPlusAdd[1]);
+    keyQuadB = Number(mulSqBmixPlusAdd[3]);
+    keyAdd = Number(mulSqBmixPlusAdd[4]);
+    spelling = "mul*(mix*mix)+b*mix+add,255";
+  } else if (mulCommaBmix) {
+    keyMul = Number(mulCommaBmix[1]);
+    keyQuadB = Number(mulCommaBmix[3]);
+    keyAdd = Number(mulCommaBmix[4]);
+    spelling = "mul*(mix*mix),b*mix),add),255";
+  } else if (mulCommaBmixAmp) {
+    keyMul = Number(mulCommaBmixAmp[1]);
+    keyQuadB = Number(mulCommaBmixAmp[3]);
+    keyAdd = Number(mulCommaBmixAmp[4]);
+    spelling = "mul*(mix*mix),b*mix)+add&255";
+  } else if (nestSqCommaBmix) {
+    keyMul = Number(nestSqCommaBmix[2]);
+    keyQuadB = Number(nestSqCommaBmix[3]);
+    keyAdd = Number(nestSqCommaBmix[4]);
+    spelling = "helper(mix*mix,mul),mix*b),add)&255";
+  } else if (sqBareMulBCommaAdd) {
+    keyMul = Number(sqBareMulBCommaAdd[2]);
+    keyQuadB = Number(sqBareMulBCommaAdd[3]);
+    keyAdd = Number(sqBareMulBCommaAdd[4]);
+    spelling = "mix*mix*mul+b*mix,add)&255";
+  } else if (helperPairCommaBmix) {
+    keyMul = Number(helperPairCommaBmix[2]);
+    keyQuadB = Number(helperPairCommaBmix[3]);
+    keyAdd = Number(helperPairCommaBmix[4]);
+    spelling = "helper(mix,mix)*mul,b*mix)+add,255";
+  } else if (helperPairTimesMul) {
+    keyMul = Number(helperPairTimesMul[2]);
+    keyQuadB = Number(helperPairTimesMul[3]);
+    keyAdd = Number(helperPairTimesMul[4]);
+    spelling = "helper(mix,mix)*mul+helper(mix,b)+add";
+  } else if (helperPairCommaAdd) {
+    keyMul = Number(helperPairCommaAdd[2]);
+    keyQuadB = Number(helperPairCommaAdd[3]);
+    keyAdd = Number(helperPairCommaAdd[4]);
+    spelling = "helper(mix,mix)*mul+helper(mix,b),add";
+  } else if (nestSqStarBmixCommaAdd) {
+    keyMul = Number(nestSqStarBmixCommaAdd[2]);
+    keyQuadB = Number(nestSqStarBmixCommaAdd[3]);
+    keyAdd = Number(nestSqStarBmixCommaAdd[4]);
+    spelling = "helper(mix*mix,mul)+mix*b,add),255";
+  } else if (nestSqStarBmixCommaAddAmp) {
+    keyMul = Number(nestSqStarBmixCommaAddAmp[2]);
+    keyQuadB = Number(nestSqStarBmixCommaAddAmp[3]);
+    keyAdd = Number(nestSqStarBmixCommaAddAmp[4]);
+    spelling = "helper(mix*mix,mul)+mix*b,add)&255";
+  } else if (nestSqStarBmixPlusAddAmp) {
+    keyMul = Number(nestSqStarBmixPlusAddAmp[2]);
+    keyQuadB = Number(nestSqStarBmixPlusAddAmp[3]);
+    keyAdd = Number(nestSqStarBmixPlusAddAmp[4]);
+    spelling = "helper(mix*mix,mul)+mix*b+add&255";
+  } else if (mulCommaHelper) {
+    keyMul = Number(mulCommaHelper[1]);
+    keyQuadB = Number(mulCommaHelper[3]);
+    keyAdd = Number(mulCommaHelper[4]);
+    spelling = "mul*(mix*mix),helper),add&255";
+  } else if (sqCommaHelper) {
+    keyMul = Number(sqCommaHelper[2]);
+    keyQuadB = Number(sqCommaHelper[3]);
+    keyAdd = Number(sqCommaHelper[4]);
+    spelling = "mix*mix*mul,helper)+add&255";
+  } else if (mulStar) {
+    keyMul = Number(mulStar[1]);
+    keyQuadB = Number(mulStar[4]);
+    keyAdd = Number(mulStar[5]);
+    spelling = "mul*(mix*mix),mix*b";
+  } else {
+    keyMul = Number(alt[1]);
+    keyQuadB = Number(alt[3]);
+    keyAdd = Number(alt[4]);
+    spelling = "mul*(mix*mix)";
+  }
   return {
-    keyMul: sq ? Number(sq[2]) : Number(alt[1]),
-    keyQuadB: sq ? Number(sq[3]) : Number(alt[3]),
-    keyAdd: sq ? Number(sq[4]) : Number(alt[4]),
-    byteBias: biasM ? Number(biasM[1]) : null,
+    kind: "quadratic",
+    keyMul,
+    keyQuadB,
+    keyAdd,
+    byteBias: biasM
+      ? Number(biasM[1])
+      : biasSub
+        ? Number(biasSub[1])
+        : biasAdd
+          ? Number(biasAdd[2])
+          : biasAddComma
+            ? Number(biasAddComma[2])
+            : biasPlus
+              ? (256 - Number(biasPlus[1])) & 255
+              : biasAndAdd
+                ? (256 - Number(biasAndAdd[1])) & 255
+                : biasPlusAmp
+                  ? (256 - Number(biasPlusAmp[1])) & 255
+                  : null,
     firstSwitchCase: caseM ? Number(caseM[1]) : null,
-    spelling: sq ? "mix*mix*mul" : "mul*(mix*mix)",
+    spelling,
     note: "HTML formula only; init_key needs opcode tuples. Not FETCH_LIVE.",
   };
 }
@@ -289,6 +701,7 @@ function extractFetchLinear(html) {
   );
   const biasAdd = window.match(/\[(\w+)\],(\d{2,3})\)\+256/);
   const biasSub = window.match(/\[(\w+)\]-(\d{2,3}),256/);
+  const biasPlus = window.match(/(\d{2,3})\+\w+\[\w+\],255/);
   if (!mulAdd && !plus && !addMix) return null;
   const keyMul = mulAdd ? Number(mulAdd[1]) : plus ? Number(plus[1]) : Number(addMix[1]);
   const keyAdd = mulAdd ? Number(mulAdd[2]) : plus ? Number(plus[2]) : Number(addMix[2]);
@@ -297,19 +710,100 @@ function extractFetchLinear(html) {
     : plus
       ? Number(plus[4])
       : Number(addMix[4]);
+  const byteBias = biasAdd
+    ? Number(biasAdd[2])
+    : biasSub
+      ? Number(biasSub[2])
+      : biasPlus
+        ? (256 - Number(biasPlus[1])) & 255
+        : null;
   return {
     kind: "linear",
     keyMul,
     keyAdd,
-    byteBias: biasAdd ? Number(biasAdd[2]) : biasSub ? Number(biasSub[2]) : null,
+    byteBias,
     firstSwitchCase,
     spelling: mulAdd ? "*mul,add)&255" : plus ? "mul)+add&255" : "(mix,mul),add)&255",
     note: "HTML formula only; init_key needs opcode tuples. Not FETCH_LIVE.",
   };
 }
 
+function extractVmEntryKey(html) {
+  if (!html) return null;
+  const ctor = String(html).match(/new \w+\(\w+\)\(0,(\d{1,3}),\[\]\)/);
+  if (ctor) return Number(ctor[1]);
+  const method = String(html).match(
+    /new \w+\(\w+\)\[\w+\([^)]{0,40}\)\]\(0,(\d{1,3}),\[\]\)/,
+  );
+  if (method) return Number(method[1]);
+  const bare = String(html).match(/\(0,(\d{1,3}),\[\]\)/);
+  return bare ? Number(bare[1]) : null;
+}
+
 function extractFetchSchedule(html) {
-  return extractFetchQuadratic(html) || extractFetchLinear(html);
+  const s = extractFetchQuadratic(html) || extractFetchLinear(html);
+  if (!s) return null;
+  const initKeyCandidate = extractVmEntryKey(html);
+  if (initKeyCandidate != null) s.initKeyCandidate = initKeyCandidate;
+  return s;
+}
+
+function byteBiasFromSource(src) {
+  if (!src) return null;
+  const s = extractFetchSchedule(src);
+  if (s && typeof s.byteBias === "number") return s.byteBias;
+  const m = String(src).match(/\]-(\d{2,3}),256/);
+  return m ? Number(m[1]) : null;
+}
+
+/** Markers observed in headed iframe HTML (not FETCH_LIVE). 8904 alone matches SVG. */
+const FETCH_SOURCE_MARKERS = [
+  "23196",
+  "32619",
+  "19372",
+  "56907",
+  "39695",
+  "36163",
+  "19663",
+  "28814",
+  "31579",
+  "59205",
+  "55067",
+  "54260",
+  "43539",
+  "20295",
+  "5886",
+  "50261",
+  "I*I*8904",
+  "*8904,",
+  "40954",
+];
+
+function fetchMarkerInSource(src) {
+  if (!src) return null;
+  const schedule = extractFetchSchedule(src);
+  for (const marker of FETCH_SOURCE_MARKERS) {
+    const idx = src.indexOf(marker);
+    if (idx >= 0) {
+      return { marker, idx, schedule, hasInject: src.includes("__cfOp.push") };
+    }
+  }
+  if (schedule && schedule.keyMul != null) {
+    const marker = String(schedule.keyMul);
+    const idx = src.indexOf(marker);
+    if (idx >= 0) return { marker, idx, schedule, hasInject: src.includes("__cfOp.push") };
+  }
+  const nested = src.match(/(\d{4,5})\*\([A-Za-z_$][\w$]*\*[A-Za-z_$][\w$]*\)/);
+  const sqMul = src.match(/([A-Za-z_$][\w$]*)\*\1\*(\d{4,5})/);
+  const sqCommaMul = src.match(/([A-Za-z_$][\w$]*)\*\1,(\d{4,5})/);
+  const extra = nested ? nested[1] : sqMul ? sqMul[2] : sqCommaMul ? sqCommaMul[2] : null;
+  if (extra) {
+    const idx = src.indexOf(extra);
+    if (idx >= 0) {
+      return { marker: extra, idx, schedule, hasInject: src.includes("__cfOp.push") };
+    }
+  }
+  return null;
 }
 
 /**
@@ -321,10 +815,11 @@ function extractFetchSchedule(html) {
  *   key = (mix*mix*8904 + 14792*mix + 11229)&255  (evening b; byte-232)
  * PC is snapshotted from `if(pc=state[slot],pc!==pc)return ...;switch(`.
  */
-function injectOpcodeLog(html) {
+function injectOpcodeLog(html, opts = {}) {
   if (!html) {
     return { html, injected: false, replacements: 0, snippet: null };
   }
+  const jsOnly = !!opts.jsOnly;
   const snippet = fetchSnippet(html);
   let n = 0;
   let out = html;
@@ -356,6 +851,22 @@ function injectOpcodeLog(html) {
     (_full, op, st, keySlot, rest, arr) => {
       n++;
       return `${op}=(globalThis.__cfT&&(globalThis.__cfT.key=${st}[${keySlot}]&255,globalThis.__cfT.byte=${arr}[${op}]&255),${st}[${keySlot}])^${rest}`;
+    },
+  );
+  // 39695 try: oF=st[key]^helper(arr[pc],133)+256&255 (pc kept in a second local)
+  out = out.replace(
+    /(\w+)=(\w+)\[(\w+)\]\^([\s\S]{0,96}?\((\w+)\[(\w+)\],(\d{2,3})\)\+256&255)/g,
+    (_full, op, st, keySlot, rest, arr, pcVar) => {
+      n++;
+      return `${op}=(globalThis.__cfT&&(globalThis.__cfT.key=${st}[${keySlot}]&255,globalThis.__cfT.byte=${arr}[${pcVar}]&255),${st}[${keySlot}])^${rest}`;
+    },
+  );
+  // 39695 catch: xor(st[key], and(add(arr[op],133)+256,255))
+  out = out.replace(
+    /(\w+)=(\w+\[[^\]]{0,80}\])\((\w+)\[(\w+)\],(\w+\[[^\]]{0,80}\])\((\w+\[[^\]]{0,80}\])\((\w+)\[\1\],(\d{2,3})\)\+256,255\)\)/g,
+    (_full, op, xorCallee, st, keySlot, andCallee, addCallee, arr, bias) => {
+      n++;
+      return `${op}=(globalThis.__cfT&&(globalThis.__cfT.key=${st}[${keySlot}]&255,globalThis.__cfT.byte=${arr}[${op}]&255),${xorCallee}(${st}[${keySlot}],${andCallee}(${addCallee}(${arr}[${op}],${bias})+256,255)))`;
     },
   );
   // Helper xor: D=xor(st[key], add(arr[D],113)+256&255)
@@ -519,6 +1030,201 @@ function injectOpcodeLog(html) {
     },
   );
 
+  // 39695 try: mix*mix*39695+helper(mix,3159)+64171,255), op
+  out = out.replace(
+    /(\w+)\*\1\*(\d{4,5})\+([\s\S]{0,120}?)\(\1,(\d{4,5})\)\+(\d{4,5}),255\),(\w+)\)/g,
+    (_full, mixVar, mul, mid, quadB, add, opVar) => {
+      n++;
+      return logAfterKeyUpdate(
+        `${mixVar}*${mixVar}*${mul}+${mid}(${mixVar},${quadB})+${add},255`,
+        opVar,
+      );
+    },
+  );
+  // 39695 catch: 39695*(mix*mix),mix*3159)+64171,255), op
+  out = out.replace(
+    /(\d{4,5})\*\((\w+)\*\2\),(\2)\*(\d{4,5})\)\+(\d{4,5}),255\),(\w+)\)/g,
+    (_full, mul, mixVar, _mix2, quadB, add, opVar) => {
+      n++;
+      return logAfterKeyUpdate(
+        `${mul}*(${mixVar}*${mixVar}),${mixVar}*${quadB})+${add},255`,
+        opVar,
+      );
+    },
+  );
+
+  out = out.replace(
+    /(\w+)=(\w+)\[(\w+)\]\^((?:\w+\[[^\]]{0,80}\])\((\d{2,3})\+(\w+)\[\1\],255\))/g,
+    (_full, op, st, keySlot, rest, _add, arr) => {
+      n++;
+      return `${op}=(globalThis.__cfT&&(globalThis.__cfT.key=${st}[${keySlot}]&255,globalThis.__cfT.byte=${arr}[${op}]&255),${st}[${keySlot}])^${rest}`;
+    },
+  );
+  out = out.replace(
+    /(\w+)=(\w+)\[(\w+)\]\^([\s\S]{0,96}?\((\w+)\[(\w+)\]-(\d{2,3}),256\)&255)/g,
+    (_full, op, st, keySlot, rest, arr, pcVar) => {
+      n++;
+      return `${op}=(globalThis.__cfT&&(globalThis.__cfT.key=${st}[${keySlot}]&255,globalThis.__cfT.byte=${arr}[${pcVar}]&255),${st}[${keySlot}])^${rest}`;
+    },
+  );
+  out = out.replace(
+    /\((\w+),\1\),(\d{4,5})\),([\s\S]{0,96}?)\(\1,(\d{4,5})\)\)\+(\d{4,5}),255\),(\w+)\)/g,
+    (_full, mixVar, mul, mid, quadB, add, opVar) => {
+      n++;
+      return logAfterKeyUpdate(
+        `(${mixVar},${mixVar}),${mul}),${mid}(${mixVar},${quadB}))+${add},255`,
+        opVar,
+      );
+    },
+  );
+  out = out.replace(
+    /\((\w+),\1\)\*(\d{4,5})\+\1\*(\d{4,5})\+(\d{4,5}),255\),(\w+)\)/g,
+    (_full, mixVar, mul, quadB, add, opVar) => {
+      n++;
+      return logAfterKeyUpdate(
+        `(${mixVar},${mixVar})*${mul}+${mixVar}*${quadB}+${add},255`,
+        opVar,
+      );
+    },
+  );
+
+  out = out.replace(
+    /(\d{4,5})\*\((\w+)\*\2\)\+([\s\S]{0,96}?)\(\2,(\d{4,5})\)\+(\d{4,5})&255(?:\.\d+)?,(\w+)\)/g,
+    (_full, mul, mixVar, mid, quadB, add, opVar) => {
+      n++;
+      return logAfterKeyUpdate(
+        `${mul}*(${mixVar}*${mixVar})+${mid}(${mixVar},${quadB})+${add}&255`,
+        opVar,
+      );
+    },
+  );
+
+  // 54260 happy decode: x=helper(st[key],255&96+arr[x])  (xor as two-arg helper)
+  out = out.replace(
+    /(\w+)=(\w+\[[^\]]{0,80}\])\((\w+)\[(\w+)\],255&(\d{2,3})\+(\w+)\[\1\]\)/g,
+    (_full, op, xorCallee, st, keySlot, add, arr) => {
+      n++;
+      return `${op}=(globalThis.__cfT&&(globalThis.__cfT.key=${st}[${keySlot}]&255,globalThis.__cfT.byte=${arr}[${op}]&255),${xorCallee}(${st}[${keySlot}],255&${add}+${arr}[${op}]))`;
+    },
+  );
+  // 54260 catch decode: pH=st[key]^outer(inner(arr[pc],160)+256,255)
+  out = out.replace(
+    /(\w+)=(\w+)\[(\w+)\]\^(\w+\[[^\]]{0,80}\])\((\w+\[[^\]]{0,80}\])\((\w+)\[(\w+)\],(\d{2,3})\)\+256,255\)/g,
+    (_full, op, st, keySlot, outer, inner, arr, pcVar, bias) => {
+      n++;
+      return `${op}=(globalThis.__cfT&&(globalThis.__cfT.key=${st}[${keySlot}]&255,globalThis.__cfT.byte=${arr}[${pcVar}]&255),${st}[${keySlot}]^${outer}(${inner}(${arr}[${pcVar}],${bias})+256,255))`;
+    },
+  );
+  // 54260 happy key: helper(helper(helper(54260*(L*L),43539*L),20295),255),x)
+  out = out.replace(
+    /(\d{4,5})\*\((\w+)\*\2\),(\d{4,5})\*\2\),(\d{4,5})\),255\),(\w+)\)/g,
+    (_full, mul, mixVar, quadB, add, opVar) => {
+      n++;
+      return logAfterKeyUpdate(
+        `${mul}*(${mixVar}*${mixVar}),${quadB}*${mixVar}),${add}),255`,
+        opVar,
+      );
+    },
+  );
+  // 54260 catch key: 54260*(py*py),helper(py,43539)),20295)&255,pH)
+  out = out.replace(
+    /(\d{4,5})\*\((\w+)\*\2\),([\s\S]{0,96}?\(\2,(\d{4,5})\))\),(\d{4,5})\)&255(?:\.\d+)?,(\w+)\)/g,
+    (_full, mul, mixVar, mid, quadB, add, opVar) => {
+      n++;
+      return logAfterKeyUpdate(
+        `${mul}*(${mixVar}*${mixVar}),${mid}),${add})&255`,
+        opVar,
+      );
+    },
+  );
+  // 54260 plus: helper(54260*(L*L)+43539*L+20295,255),x)
+  out = out.replace(
+    /(\d{4,5})\*\((\w+)\*\2\)\+(\d{4,5})\*\2\+(\d{4,5}),255\),(\w+)\)/g,
+    (_full, mul, mixVar, quadB, add, opVar) => {
+      n++;
+      return logAfterKeyUpdate(
+        `${mul}*(${mixVar}*${mixVar})+${quadB}*${mixVar}+${add},255`,
+        opVar,
+      );
+    },
+  );
+  // 54260 catch: helper(helper(mix,mix),mul)+b*mix+add,255),op
+  out = out.replace(
+    /\((\w+),\1\),(\d{4,5})\)\+(\d{4,5})\*\1\+(\d{4,5}),255\),(\w+)\)/g,
+    (_full, mixVar, mul, quadB, add, opVar) => {
+      n++;
+      return logAfterKeyUpdate(
+        `(${mixVar},${mixVar}),${mul})+${quadB}*${mixVar}+${add},255`,
+        opVar,
+      );
+    },
+  );
+  // 54260 catch decode: xor(st[key], helper(arr[pc],160)+256&255)
+  out = out.replace(
+    /(\w+)=(\w+\[[^\]]{0,80}\])\((\w+)\[(\w+)\],(\w+\[[^\]]{0,80}\])\((\w+)\[(\w+)\],(\d{2,3})\)\+256&255\)/g,
+    (_full, op, xorCallee, st, keySlot, addCallee, arr, pcVar, bias) => {
+      n++;
+      return `${op}=(globalThis.__cfT&&(globalThis.__cfT.key=${st}[${keySlot}]&255,globalThis.__cfT.byte=${arr}[${pcVar}]&255),${xorCallee}(${st}[${keySlot}],${addCallee}(${arr}[${pcVar}],${bias})+256&255))`;
+    },
+  );
+  // 54260: 255&mix*mix*mul+mix*b+add,op
+  out = out.replace(
+    /255&(\w+)\*\1\*(\d{4,5})\+\1\*(\d{4,5})\+(\d{4,5}),(\w+)\)/g,
+    (_full, mixVar, mul, quadB, add, opVar) => {
+      n++;
+      return logAfterKeyUpdate(
+        `255&${mixVar}*${mixVar}*${mul}+${mixVar}*${quadB}+${add}`,
+        opVar,
+      );
+    },
+  );
+  // 54260: helper(mix*mix*mul+b*mix+add,255),op
+  out = out.replace(
+    /(\w+)\*\1\*(\d{4,5})\+(\d{4,5})\*\1\+(\d{4,5}),255\),(\w+)\)/g,
+    (_full, mixVar, mul, quadB, add, opVar) => {
+      n++;
+      return logAfterKeyUpdate(
+        `${mixVar}*${mixVar}*${mul}+${quadB}*${mixVar}+${add},255`,
+        opVar,
+      );
+    },
+  );
+  // 54260: mul*(mix*mix),b*mix)+add&255,op
+  out = out.replace(
+    /(\d{4,5})\*\((\w+)\*\2\),(\d{4,5})\*\2\)\+(\d{4,5})&255(?:\.\d+)?,(\w+)\)/g,
+    (_full, mul, mixVar, quadB, add, opVar) => {
+      n++;
+      return logAfterKeyUpdate(
+        `${mul}*(${mixVar}*${mixVar}),${quadB}*${mixVar})+${add}&255`,
+        opVar,
+      );
+    },
+  );
+  // 54260: helper(st[key],96+arr[op]&255)
+  out = out.replace(
+    /(\w+)=(\w+\[[^\]]{0,80}\])\((\w+)\[(\w+)\],(\d{2,3})\+(\w+)\[\1\]&255/g,
+    (_full, op, xorCallee, st, keySlot, add, arr) => {
+      n++;
+      return `${op}=(globalThis.__cfT&&(globalThis.__cfT.key=${st}[${keySlot}]&255,globalThis.__cfT.byte=${arr}[${op}]&255),${xorCallee}(${st}[${keySlot}],${add}+${arr}[${op}]&255))`;
+    },
+  );
+
+  // 54260 catch decode: xor(st[key], outer(mid(inner(arr[pc],160),256),255))
+  out = out.replace(
+    /(\w+)=(\w+)\[(\w+)\]\^(\w+\[[^\]]{0,80}\])\((\w+\[[^\]]{0,80}\])\((\w+\[[^\]]{0,80}\])\((\w+)\[(\w+)\],(\d{2,3})\),256\),255\)/g,
+    (_full, op, st, keySlot, outer, mid, inner, arr, pcVar, bias) => {
+      n++;
+      return `${op}=(globalThis.__cfT&&(globalThis.__cfT.key=${st}[${keySlot}]&255,globalThis.__cfT.byte=${arr}[${pcVar}]&255),${st}[${keySlot}]^${outer}(${mid}(${inner}(${arr}[${pcVar}],${bias}),256),255))`;
+    },
+  );
+
+  if (jsOnly) {
+    if (n > 0 && !out.includes("__cfOracleHook")) {
+      out = `${PREAMBLE};${out}`;
+    }
+    return { html: out, injected: n > 0, replacements: n, snippet };
+  }
+
   const nonceScript = /<script([^>]*nonce="[^"]+"[^>]*)>/i;
   if (nonceScript.test(out)) {
     out = out.replace(nonceScript, `<script$1>${PREAMBLE}`);
@@ -531,10 +1237,12 @@ function injectOpcodeLog(html) {
 }
 
 function logAfterKeyUpdate(prefix, opVar) {
+  const packed =
+    '(function(){try{var g=this&&this.g;if(!g)return false;if(typeof this.l==="number"&&g[this.l]&&g[this.l].length>10000)return true;for(var i=0;i<Math.min(g.length||0,48);i++){var v=g[i];if(v&&v.length>10000)return true;}return false;}catch(e){return false;}})()';
   return (
     `${prefix},(globalThis.__cfT&&(globalThis.__cfT.op=${opVar}&255),` +
     `globalThis.__cfOp=globalThis.__cfOp||[],` +
-    `globalThis.__cfOp.length<2500&&(globalThis.__cfOp.push({` +
+    `globalThis.__cfOp.length<128&&${packed}&&(globalThis.__cfOp.push({` +
     `pc:globalThis.__cfT&&globalThis.__cfT.pc,op:${opVar}&255,` +
     `key:globalThis.__cfT&&globalThis.__cfT.key,byte:globalThis.__cfT&&globalThis.__cfT.byte}),` +
     `console.debug("__cfOp",globalThis.__cfOp[globalThis.__cfOp.length-1])),${opVar})`
@@ -558,13 +1266,325 @@ function pcDeltas(ops) {
   return rows;
 }
 
+function isCompleteTuple(r) {
+  return (
+    r &&
+    Number.isFinite(Number(r.pc)) &&
+    Number.isFinite(Number(r.op)) &&
+    Number.isFinite(Number(r.key)) &&
+    Number.isFinite(Number(r.byte))
+  );
+}
+
+/** Case-label harvest: fetch key is next_key, recovered later. */
+function isHarvestTuple(r) {
+  return (
+    r &&
+    Number.isFinite(Number(r.pc)) &&
+    Number.isFinite(Number(r.op)) &&
+    Number.isFinite(Number(r.byte)) &&
+    (Number.isFinite(Number(r.key)) || Number.isFinite(Number(r.nextKey)))
+  );
+}
+
+function inferLocalOpMix(rows) {
+  const names = new Set();
+  for (const r of rows) {
+    for (const k of Object.keys(r.locals || {})) names.add(k);
+  }
+  let opKey;
+  let mixKey;
+  for (const k of names) {
+    const vals = rows.map((r) => r.locals && r.locals[k]).filter((v) => typeof v === "number");
+    if (vals.length < 2) continue;
+    const uniq = new Set(vals);
+    if (uniq.size <= 1) continue;
+    const max = Math.max(...vals);
+    if (max <= 255 && opKey == null) opKey = k;
+    else if (max > 255 && mixKey == null) mixKey = k;
+  }
+  return { opKey, mixKey };
+}
+
+function inferPcSlotFromGNums(rows) {
+  if (!rows.length || !rows[0].gNums) return null;
+  for (const idx of Object.keys(rows[0].gNums)) {
+    const vals = rows.map((r) => r.gNums && r.gNums[idx]).filter((v) => typeof v === "number");
+    if (vals.length < rows.length) continue;
+    let inc = vals.length >= 2;
+    for (let i = 1; i < vals.length; i++) {
+      if (vals[i] <= vals[i - 1]) inc = false;
+    }
+    if (inc && vals[0] >= 0 && vals[0] <= 2) return Number(idx);
+  }
+  return null;
+}
+
+function uniqueOpFromFrameNames(
+  frameNames,
+  nameToOp = handlerNameToOp,
+  ambiguous = ambiguousHandlerNames,
+) {
+  for (const n of frameNames || []) {
+    if (!n || ambiguous.has(n)) continue;
+    if (nameToOp.has(n)) return { name: n, op: nameToOp.get(n) };
+  }
+  return null;
+}
+
+/** Top named frame only. Do not walk into a unique caller/callee. */
+function pausedUniqueHandler(
+  frameNames,
+  nameToOp = handlerNameToOp,
+  ambiguous = ambiguousHandlerNames,
+) {
+  for (const n of frameNames || []) {
+    if (!n || String(n).includes("<computed>")) continue;
+    if (ambiguous.has(n)) return null;
+    if (nameToOp.has(n)) return { name: n, op: nameToOp.get(n) };
+    return null;
+  }
+  return null;
+}
+
+/**
+ * Unique handler on the stack other than the BP's `case N` function.
+ * Chrome 148 often names the callee as the top frame (YX vs Ye).
+ */
+function fetchLoopCalleeOnStack(
+  frameNames,
+  bpName,
+  nameToOp = handlerNameToOp,
+  ambiguous = ambiguousHandlerNames,
+) {
+  for (const n of frameNames || []) {
+    if (!n || String(n).includes("<computed>")) continue;
+    if (ambiguous.has(n)) continue;
+    if (!nameToOp.has(n)) continue;
+    if (bpName && n === bpName) continue;
+    return n;
+  }
+  return null;
+}
+
+function decodeFetchOp(key, byte, bias) {
+  return (key ^ ((byte - bias) & 255)) & 255;
+}
+
+function switchEvalDecodes(e, byte, bias) {
+  if (!e || typeof e.op !== "number" || typeof e.mix !== "number") return false;
+  if (typeof byte !== "number" || typeof bias !== "number") return false;
+  const key = (e.mix - e.op) & 255;
+  return decodeFetchOp(key, byte, bias) === (e.op & 255);
+}
+
+function pickSwitchDiscriminant(evals, keySlot, preferOp, byte, bias) {
+  const good = (evals || []).filter((e) => e && typeof e.op === "number");
+  if (!good.length) return null;
+  if (typeof byte === "number" && typeof bias === "number") {
+    const decoded = good.filter((e) => switchEvalDecodes(e, byte, bias));
+    if (decoded.length) {
+      if (preferOp != null) {
+        const hit = decoded.filter((e) => e.op === preferOp);
+        if (hit.length) {
+          return (
+            hit.find((e) => e.mix >= 256 && e.mix <= 510) || hit[0]
+          );
+        }
+      }
+      return (
+        decoded.find((e) => e.mix >= 256 && e.mix <= 510) || decoded[0]
+      );
+    }
+    return null;
+  }
+  if (preferOp != null) {
+    const hit = good.filter((e) => e.op === preferOp);
+    if (hit.length) {
+      return (
+        hit.find((e) => typeof e.mix === "number" && e.mix >= 256 && e.mix <= 510) ||
+        hit.find((e) => typeof e.mix === "number" && e.mix !== keySlot) ||
+        hit[0]
+      );
+    }
+  }
+  const withMix = good.filter(
+    (e) => typeof e.mix === "number" && e.mix >= 0 && e.mix <= 510,
+  );
+  const wide = withMix.filter((e) => e.mix >= 256 && e.mix <= 510);
+  const pool = wide.length
+    ? wide
+    : withMix.filter((e) => e.mix !== keySlot).length
+      ? withMix.filter((e) => e.mix !== keySlot)
+      : withMix.length
+        ? withMix
+        : good;
+  return pool.find((e) => e.mix !== keySlot) || pool[0] || null;
+}
+
+function modalPackedBcLen(rows) {
+  const counts = new Map();
+  for (const r of rows || []) {
+    const n = r && r.bcLen;
+    if ((n || 0) > 10000) counts.set(n, (counts.get(n) || 0) + 1);
+  }
+  let best = null;
+  let bestN = 0;
+  for (const [k, v] of counts) {
+    if (v > bestN) {
+      best = k;
+      bestN = v;
+    }
+  }
+  return best;
+}
+
+/** 56907 Chrome: pause at the mul is after `pc+=1` (first observed pcSlot 1). */
+function finalizeFetchLoopRows(rows) {
+  const fl = (rows || []).filter((r) => r && r.via === "fetchLoop");
+  if (!fl.length) return [];
+  const packed = fl.filter((r) => (r.bcLen || 0) > 10000);
+  const modal = modalPackedBcLen(packed);
+  const use = modal != null ? packed.filter((r) => r.bcLen === modal) : packed;
+  const { opKey, mixKey } = inferLocalOpMix(use);
+  const pcFromG = inferPcSlotFromGNums(use);
+  const out = [];
+  const seenPc = new Set();
+  for (const r of use) {
+    let pcSlot = r.pcSlot;
+    if (!Number.isFinite(pcSlot) && pcFromG != null && r.gNums && Number.isFinite(r.gNums[pcFromG])) {
+      pcSlot = r.gNums[pcFromG];
+    }
+    const adjust = Number.isFinite(pcSlot) && pcSlot >= 1;
+    const pc = Number.isFinite(pcSlot) ? (adjust ? pcSlot - 1 : pcSlot) : r.pc;
+    const stackH = pausedUniqueHandler(r.frameNames);
+    const keepDisc =
+      r.opFrom === "switchParent" || r.opFrom === "switchLocal";
+    const fromCase =
+      !keepDisc && (r.opFrom === "caseLabel" || Number.isFinite(r.caseOp));
+    let op = keepDisc && Number.isFinite(r.op)
+      ? r.op
+      : fromCase && Number.isFinite(r.caseOp)
+        ? r.caseOp
+        : stackH
+          ? stackH.op
+          : r.op;
+    const fn = r.bpName || r.fn || (stackH && stackH.name);
+    const opFrom = keepDisc
+      ? r.opFrom
+      : fromCase
+        ? "caseLabel"
+        : stackH
+          ? "pausedFn"
+          : r.opFrom;
+    const bpCaseOp = Number.isFinite(r.bpCaseOp) ? r.bpCaseOp & 255 : undefined;
+    let mix = r.mixLocal != null ? r.mixLocal : r.mix;
+    let key = r.key;
+    let nextKey = Number.isFinite(r.nextKey)
+      ? r.nextKey & 255
+      : fromCase && Number.isFinite(r.keySlot)
+        ? r.keySlot & 255
+        : undefined;
+    if (!fromCase) {
+      if (op == null && opKey && r.locals && typeof r.locals[opKey] === "number") {
+        op = r.locals[opKey] & 255;
+      }
+      if (mix == null && mixKey && r.locals && typeof r.locals[mixKey] === "number") {
+        mix = r.locals[mixKey];
+      }
+      if (key == null && Number.isFinite(r.keySlot)) key = r.keySlot & 255;
+      if (op == null && Number.isFinite(mix) && Number.isFinite(key)) {
+        op = (mix - key) & 255;
+      }
+      if (key == null && Number.isFinite(mix) && Number.isFinite(op)) {
+        key = (mix - op) & 255;
+      }
+    } else if (
+      key == null &&
+      Number.isFinite(mix) &&
+      mix >= 256 &&
+      mix <= 510 &&
+      Number.isFinite(op)
+    ) {
+      const maybe = (mix - op) & 255;
+      if (!Number.isFinite(nextKey) || maybe !== nextKey) {
+        key = maybe;
+      }
+    }
+    let byte = r.byte;
+    if (byte == null) {
+      byte = adjust ? r.byteAtPcMinus1 : r.byteAtPc;
+    }
+    if (Number.isFinite(pc) && seenPc.has(pc)) continue;
+    if (Number.isFinite(pc)) seenPc.add(pc);
+    const row = {
+      via: "fetchLoop",
+      pc,
+      op: Number.isFinite(op) ? op & 255 : undefined,
+      key: Number.isFinite(key) ? key & 255 : undefined,
+      byte: Number.isFinite(byte) ? byte & 255 : undefined,
+      nextKey: Number.isFinite(nextKey) ? nextKey : undefined,
+      mix: Number.isFinite(mix) && mix >= 256 && mix <= 510 ? mix : undefined,
+      bcLen: r.bcLen,
+      pcSlot,
+      caseOp: Number.isFinite(op) ? op & 255 : Number.isFinite(r.caseOp) ? r.caseOp & 255 : undefined,
+      opFrom,
+      fn,
+      bpWhy: r.bpWhy,
+      bpName: r.bpName,
+      bpCaseOp,
+      frameNames: Array.isArray(r.frameNames) ? r.frameNames.slice(0, 6) : undefined,
+      vmFrom: r.vmFrom,
+      byteVia: Number.isFinite(byte) ? "vm" : undefined,
+    };
+    out.push(row);
+  }
+  return out;
+}
+
+function fillBytesFromPacked(rows, packedStr) {
+  if (!packedStr) return rows;
+  let bc;
+  try {
+    bc = Buffer.from(String(packedStr).replace(/\s/g, ""), "base64");
+  } catch {
+    return rows;
+  }
+  if (!bc.length) return rows;
+  return (rows || []).map((r) => {
+    if (!r || Number.isFinite(r.byte) || !Number.isFinite(r.pc)) return r;
+    if (r.pc < 0 || r.pc >= bc.length) return r;
+    return { ...r, byte: bc[r.pc], byteVia: "packed" };
+  });
+}
+
 /** Breakpoint locals rotate; opcode is the 0–255 varying number, mix is often >255. */
 function normalizeBreakpointOps(rows) {
-  const bp = rows.filter((r) => r.via === "breakpoint");
+  const kept = [];
+  for (const r of rows || []) {
+    if (!r) continue;
+    if (r.via === "breakpoint" && r.op == null && r.byte == null && r.pc == null && r.mix == null) {
+      continue;
+    }
+    kept.push(r);
+  }
+  const bp = kept.filter((r) => r.via === "breakpoint" && !isCompleteTuple(r));
   const keys = new Set();
   for (const r of bp) {
     for (const k of Object.keys(r)) {
-      if (k === "via" || k === "op" || k === "mix" || k === "key" || k === "pc" || k === "gLen" || k === "keySlot") {
+      if (
+        k === "via" ||
+        k === "op" ||
+        k === "mix" ||
+        k === "key" ||
+        k === "pc" ||
+        k === "gLen" ||
+        k === "keySlot" ||
+        k === "byte" ||
+        k === "bcLen" ||
+        k === "pcSlot" ||
+        k === "byteVia"
+      ) {
         continue;
       }
       keys.add(k);
@@ -580,7 +1600,23 @@ function normalizeBreakpointOps(rows) {
     if (max <= 255 && opKey == null) opKey = k;
     else if (max > 255 && mixKey == null) mixKey = k;
   }
-  return rows.map((r) => {
+  return kept.map((r) => {
+    if (r.via === "fetchLoop" || (r.via === "breakpoint" && isCompleteTuple(r))) {
+      const row = {
+        via: r.via,
+        pc: r.pc,
+        op: Number.isFinite(r.op) ? r.op & 255 : undefined,
+        key: Number.isFinite(r.key) ? r.key & 255 : undefined,
+        byte: Number.isFinite(r.byte) ? r.byte & 255 : undefined,
+      };
+      if (Number.isFinite(r.nextKey)) row.nextKey = r.nextKey & 255;
+      if (Number.isFinite(r.caseOp)) row.caseOp = r.caseOp & 255;
+      if (r.opFrom) row.opFrom = r.opFrom;
+      if (Number.isFinite(r.mix) && r.mix >= 256 && r.mix <= 510) row.mix = r.mix;
+      if (r.byteVia) row.byteVia = r.byteVia;
+      if (r.bcLen) row.bcLen = r.bcLen;
+      return row;
+    }
     if (r.via !== "breakpoint") return r;
     const op = r.op != null ? r.op : opKey != null ? r[opKey] & 255 : undefined;
     const mix = r.mix != null ? r.mix : mixKey != null ? r[mixKey] : undefined;
@@ -590,7 +1626,9 @@ function normalizeBreakpointOps(rows) {
         : typeof op === "number" && typeof mix === "number"
           ? (mix - op) & 255
           : undefined;
-    return { via: "breakpoint", pc: r.pc, op, mix, key };
+    const row = { via: "breakpoint", pc: r.pc, op, mix, key };
+    if (Number.isFinite(r.byte)) row.byte = r.byte & 255;
+    return row;
   });
 }
 
@@ -654,6 +1692,11 @@ function classifyFoResponseLen(len) {
   if (len >= 700000 && len <= 950000) return "packedRunProgram";
   if (len >= 1500 && len <= 4000) return "followUpAck";
   return "other";
+}
+
+function rayFromFoUrl(u) {
+  const m = String(u || "").match(/\/fo\/[^/]+\/([0-9a-fA-F]{16})\//);
+  return m ? m[1].toLowerCase() : null;
 }
 
 function foBodyShape(foNet, xhr, iframeHtml) {
@@ -833,10 +1876,103 @@ function pickFollowUpShape(shapes, initKeys) {
   for (const k of best.cls.extraIdent || []) {
     if (kinds[k]) extraIdentKinds[k] = kinds[k].split(":")[0];
   }
+  const numericKinds = {};
+  let nKindMin = null;
+  let nKindMax = null;
+  let numericSlotKind = null;
+  for (const k of Object.keys(kinds)) {
+    if (!/^\d+$/.test(k)) continue;
+    numericKinds[k] = kinds[k];
+    const head = String(kinds[k]).split(":")[0];
+    if (!numericSlotKind) numericSlotKind = head;
+    const colon = String(kinds[k]).indexOf(":");
+    if (colon >= 0) {
+      const n = Number(String(kinds[k]).slice(colon + 1));
+      if (Number.isFinite(n)) {
+        if (nKindMin == null || n < nKindMin) nKindMin = n;
+        if (nKindMax == null || n > nKindMax) nKindMax = n;
+      }
+    }
+  }
   return {
     ...best.cls,
     identKeys: best.shape.identKeys,
     extraIdentKinds,
+    numericKinds,
+    numericSlotKind,
+    numericSlotKeyCountMin: nKindMin,
+    numericSlotKeyCountMax: nKindMax,
+  };
+}
+
+function classifyLeftoverOpcode(op) {
+  if (op === 177) return { handler: "XU", writePath: "host_xi" };
+  if (op === 226) return { handler: "gC", writePath: "bytecode_string" };
+  if (op === 227) return { handler: "gG", writePath: "property_set" };
+  if (op === 169) return { handler: "ge", writePath: "property_set" };
+  if (op === 138) return { handler: "gN", writePath: "property_set" };
+  return { handler: null, writePath: "unseen_in_dumps" };
+}
+
+const LEFTOVER_UNSEEN_NAMES = [
+  "OQbM0", "UjLjP6", "YfDjo7", "Iqrc9", "OZgbm6", "pFyv1", "SfUI1", "sqKXG6",
+  "HUDi4", "DTBF3", "mQiic7", "gNcr3",
+];
+
+function leftoverHitRow(name, row) {
+  return {
+    name,
+    ...classifyLeftoverOpcode(row.opcode),
+    opcode: row.opcode == null ? null : row.opcode,
+    via: row.via || null,
+    valueKind: row.valueKind || null,
+    pc: row.pc == null ? null : row.pc,
+  };
+}
+
+function leftoverProbeSummary(writes, extraIdent) {
+  const byKey = {};
+  for (const w of writes || []) {
+    if (w && w.key != null && !byKey[w.key]) byKey[w.key] = w;
+  }
+  const extraNow = extraIdent || [];
+  const leftoverHits = [];
+  const seen = new Set();
+  for (const n of [...LEFTOVER_UNSEEN_NAMES, ...extraNow]) {
+    if (seen.has(n)) continue;
+    seen.add(n);
+    const row = byKey[n];
+    if (!row) continue;
+    leftoverHits.push(leftoverHitRow(n, row));
+  }
+  const namesRotated =
+    extraNow.length > 0 &&
+    LEFTOVER_UNSEEN_NAMES.every((n) => extraNow.indexOf(n) < 0);
+  const numericWrites = (writes || []).filter((w) => w && w.numeric);
+  const numericOpcodes = [
+    ...new Set(numericWrites.map((w) => w.opcode).filter((o) => o != null)),
+  ];
+  const extraWrites = (writes || []).filter(
+    (w) => w && !w.numeric && w.key !== "MaOkK2",
+  );
+  const extraOpcodes = [
+    ...new Set(extraWrites.map((w) => w.opcode).filter((o) => o != null)),
+  ];
+  return {
+    status: leftoverHits.length || extraWrites.length || numericWrites.length
+      ? "ran"
+      : extraNow.length
+        ? "f4-inferred"
+        : "empty",
+    writeCount: (writes || []).length,
+    leftoverHits,
+    leftoverHitCount: leftoverHits.length,
+    namesRotated,
+    numericWriteCount: numericWrites.length,
+    numericOpcodes,
+    extraOpcodes,
+    extraIdentNow: extraNow,
+    note: "kinds and opcodes only; do not dump values or POST",
   };
 }
 
@@ -848,18 +1984,213 @@ function sourceLineCol(scriptSource, idx) {
   return { lineNumber, columnNumber };
 }
 
+function indexFromLineCol(src, lineNumber, columnNumber) {
+  if (!src || lineNumber == null || columnNumber == null) return null;
+  if (lineNumber === 0) return columnNumber;
+  let idx = 0;
+  let line = 0;
+  while (line < lineNumber && idx < src.length) {
+    const nl = src.indexOf("\n", idx);
+    if (nl < 0) return src.length;
+    idx = nl + 1;
+    line++;
+  }
+  return idx + columnNumber;
+}
+
+/** Mix local assigned as `W=state[key]+op` (or helper) just before the quadratic. */
+function inferMixVarNearFetch(src, braceIdx, opVar) {
+  if (!src || braceIdx == null || braceIdx < 0 || !/^[A-Za-z_$][\w$]*$/.test(opVar || "")) {
+    return null;
+  }
+  const pre = String(src).slice(Math.max(0, braceIdx - 320), braceIdx);
+  const plus = pre.match(new RegExp(`(\\w+)=\\w+\\[\\w+\\]\\+${opVar}(?![\\w$])`));
+  if (plus) return plus[1];
+  const helper = pre.match(
+    new RegExp(`(\\w+)=\\w+\\[[^\\]]{0,80}\\]\\(\\w+\\[\\w+\\],${opVar}\\)`),
+  );
+  if (helper) return helper[1];
+  const sq = pre.match(/(\w+)\*\1\*\d{4,5}/);
+  if (sq) return sq[1];
+  const pair = pre.match(/\((\w+),\1\)\s*\*/);
+  if (pair) return pair[1];
+  return null;
+}
+
+/**
+ * Logpoint condition at fetch `switch(...){`. Must be an expression (arrow IIFE)
+ * so `try/catch` can swallow lookup errors without pausing. Locals (`op`/`mix`)
+ * are visible to the arrow via the call-frame eval scope; `this` is the VM.
+ * Always returns false — do not pause packed `/fo/`.
+ */
+function switchLogCondition(opVar, mixVar) {
+  if (!/^[A-Za-z_$][\w$]*$/.test(opVar || "")) return "false";
+  const mixOk = /^[A-Za-z_$][\w$]*$/.test(mixVar || "");
+  const mixPart = mixOk
+    ? `,mix:typeof ${mixVar}==="number"?${mixVar}:null,key:typeof ${mixVar}==="number"?((${mixVar}-${opVar})&255):null`
+    : "";
+  return (
+    `(()=>{try{globalThis.__cfSwitchHit=(globalThis.__cfSwitchHit|0)+1;` +
+    `var __g=this&&this.g,__bc;` +
+    `if(__g){` +
+    `if(typeof this.l==="number"&&__g[this.l]&&__g[this.l].length>10000)__bc=__g[this.l];` +
+    `if(!__bc){for(var __i=0;__i<Math.min(__g.length||0,64);__i++){var __v=__g[__i];if(__v&&__v.length>10000&&typeof __v[0]==="number"){__bc=__v;break;}}}` +
+    `}` +
+    `if(__bc){` +
+    `globalThis.__cfOp=globalThis.__cfOp||[];` +
+    `if(globalThis.__cfOp.length<128){` +
+    `var __pc=typeof this.j==="number"?((__g[this.j]|0)-1):null;` +
+    `globalThis.__cfOp.push({pc:__pc,op:(${opVar}&255),` +
+    `nextKey:typeof this.i==="number"?(__g[this.i]&255):null,` +
+    `byte:(__pc>=0&&__pc<__bc.length)?(__bc[__pc]&255):null` +
+    `${mixPart},via:"switchLog",gLen:__g&&__g.length,bcLen:__bc.length});` +
+    `typeof console!=="undefined"&&console.debug&&console.debug("__cfOp",globalThis.__cfOp[globalThis.__cfOp.length-1]);` +
+    `}} }catch(__e){globalThis.__cfSwitchErr=String(__e)}return false})()`
+  );
+}
+
+/**
+ * Fetch-loop switch body's `{` after `,op){case N:`. Discriminant already holds `op`.
+ * Happy + catch copies only; skip nested decoder `switch(...,x){case 3:`.
+ */
+function fetchLoopSwitchLogSites(src, markerIdx) {
+  if (!src || markerIdx == null || markerIdx < 0) return [];
+  const winStart = Math.max(0, markerIdx - 80);
+  const window = String(src).slice(winStart, markerIdx + 4000);
+  const firstNear = window.match(/\{case (\d+):/);
+  const firstCase = firstNear ? Number(firstNear[1]) : null;
+  const sites = [];
+  const re = /,(\w+)\)\{case (\d+):/g;
+  let m;
+  while ((m = re.exec(window))) {
+    const caseOp = Number(m[2]);
+    const abs = winStart + m.index;
+    const brace = abs + m[0].indexOf("{");
+    const dist = brace - markerIdx;
+    if (dist < -80 || dist > 3500) continue;
+    if (firstCase != null && caseOp !== firstCase) continue;
+    if (firstCase == null && caseOp < 16) continue;
+    const pre = String(src).slice(Math.max(0, abs - 48), abs);
+    if (/switch\(\w+\[\w+\]=\w+,/.test(pre) && caseOp < 16) continue;
+    const opVar = m[1];
+    const mixVar = inferMixVarNearFetch(src, brace, opVar);
+    sites.push({
+      idx: brace,
+      why: "switchBrace",
+      opVar,
+      mixVar,
+      caseOp,
+      condition: switchLogCondition(opVar, mixVar),
+      ...sourceLineCol(src, brace),
+    });
+    if (sites.length >= 2) break;
+  }
+  return sites;
+}
+
+function switchSiteAt(src, idx, switchSites) {
+  if (!switchSites || !switchSites.length) return null;
+  let best = switchSites[0];
+  for (const s of switchSites) {
+    if (s.idx <= idx && (!best || s.idx > best.idx)) best = s;
+  }
+  return best;
+}
+
+/** `switch(` before each fetch `){case`. Discriminant may not have run. */
+function fetchLoopSwitchKeywordSites(src, switchSites) {
+  const out = [];
+  for (const site of switchSites || []) {
+    const sw = String(src).lastIndexOf("switch(", site.idx);
+    if (sw < 0 || site.idx - sw > 400) continue;
+    out.push({
+      ...site,
+      idx: sw,
+      why: "switchKw",
+      ...sourceLineCol(src, sw),
+    });
+  }
+  return out;
+}
+
+/**
+ * Unique `case N:name[` **call** (the handler ident, not the `case` keyword).
+ * Still the interpreter frame, so `op`/`mix` locals are in scope.
+ */
+function fetchLoopCaseCallLogSites(src, markerIdx, switchSites) {
+  if (!src || markerIdx == null || markerIdx < 0 || !switchSites?.length) return [];
+  const byName = collectHandlerCaseOps(src, markerIdx);
+  const winStart = Math.max(0, markerIdx - 400);
+  const window = String(src).slice(winStart, markerIdx + 25000);
+  const sites = [];
+  const seenOp = new Set();
+  const re = /case (\d+):(\w+)[\[(]/g;
+  let m;
+  while ((m = re.exec(window))) {
+    const op = Number(m[1]);
+    const name = m[2];
+    const ops = byName.get(name);
+    if (!ops || ops.size !== 1 || [...ops][0] !== op) continue;
+    if (seenOp.has(op)) continue;
+    seenOp.add(op);
+    const nameOff = m[0].indexOf(name);
+    const idx = winStart + m.index + nameOff;
+    const sw = switchSiteAt(src, idx, switchSites);
+    if (!sw) continue;
+    sites.push({
+      idx,
+      why: "caseCallLog",
+      opVar: sw.opVar,
+      mixVar: sw.mixVar,
+      caseOp: op,
+      name,
+      condition: sw.condition,
+      ...sourceLineCol(src, idx),
+    });
+    if (sites.length >= 48) break;
+  }
+  return sites;
+}
+
+/** Opcode is the `case N:` label at or just before idx. */
+function caseOpAt(src, idx) {
+  if (!src || idx == null || idx < 0) return null;
+  const fwd = String(src).slice(idx, idx + 20).match(/^case (\d+):/);
+  if (fwd) return Number(fwd[1]);
+  const pre = String(src).slice(Math.max(0, idx - 96), idx + 1);
+  const all = [...pre.matchAll(/case (\d+):/g)];
+  if (!all.length) return null;
+  return Number(all[all.length - 1][1]);
+}
+
+function isPerfLogger(scriptSource, brace) {
+  const head = String(scriptSource).slice(brace, brace + 800);
+  if (/performance\[/.test(head)) return true;
+  // Opcode handlers also use `function wZ(` — not the historical compressor.
+  if (/this\.g/.test(head) && /this\.j/.test(head) && /this\.l/.test(head)) {
+    return true;
+  }
+  return false;
+}
+
+function functionBraceAt(scriptSource, pat) {
+  const idx = scriptSource.indexOf(pat);
+  if (idx < 0) return null;
+  const brace = scriptSource.indexOf("{", idx);
+  if (brace < 0) return null;
+  if (isPerfLogger(scriptSource, brace)) return null;
+  return { ...sourceLineCol(scriptSource, brace), pat, idx };
+}
+
 function compressorBreakpointAt(scriptSource) {
   for (const pat of [
     "function f4(",
-    "function wZ(",
     "f4=function(",
+    "function wZ(",
     "wZ=function(",
   ]) {
-    const idx = scriptSource.indexOf(pat);
-    if (idx < 0) continue;
-    const brace = scriptSource.indexOf("{", idx);
-    if (brace < 0) continue;
-    return { ...sourceLineCol(scriptSource, brace), pat, idx };
+    const hit = functionBraceAt(scriptSource, pat);
+    if (hit) return hit;
   }
   return null;
 }
@@ -877,6 +2208,141 @@ function sendHelperBreakpointAt(scriptSource) {
   if (brace < 0) return null;
   return { ...sourceLineCol(scriptSource, brace), pat, idx, name };
 }
+
+/** Body encoder after `runProgram` (`Mt=function` on the 40954 iframe). Not the `wZ` perf logger. */
+function encoderBreakpointAt(scriptSource) {
+  const cs = String(scriptSource).match(/(\w+)=`([A-Za-z0-9$+\-]{65})`/);
+  if (cs) {
+    const varName = cs[1];
+    const re = /(?:function (\w+)\(|(\w+)=function\()/g;
+    let m;
+    let last = null;
+    while ((m = re.exec(scriptSource))) {
+      const name = m[1] || m[2];
+      if (!name) continue;
+      const brace = scriptSource.indexOf("{", m.index);
+      if (brace < 0) continue;
+      if (isPerfLogger(scriptSource, brace)) continue;
+      const end = braceEnd(scriptSource, brace);
+      const body =
+        end > brace
+          ? scriptSource.slice(brace, end)
+          : scriptSource.slice(brace, brace + 4000);
+      if (body.includes(`${varName}[`) && /&63/.test(body)) {
+        last = {
+          ...sourceLineCol(scriptSource, brace),
+          pat: m[1] ? `function ${name}(` : `${name}=function(`,
+          idx: m.index,
+          name,
+          role: "encoder",
+        };
+      }
+    }
+    if (last) return last;
+  }
+  const send = sendHelperBreakpointAt(scriptSource);
+  if (!send) return null;
+  const bodyStart = scriptSource.indexOf("{", send.idx);
+  const end = braceEnd(scriptSource, bodyStart);
+  if (end < 0) return null;
+  const body = scriptSource.slice(bodyStart, end);
+  const matches = [...body.matchAll(/(\w+)\(([A-Za-z_$][\w$]*)\)/g)];
+  const skip = new Set([
+    "typeof",
+    "return",
+    "if",
+    "for",
+    "while",
+    "switch",
+    "function",
+    send.name,
+  ]);
+  let encoderName = null;
+  for (let i = matches.length - 1; i >= 0; i--) {
+    const name = matches[i][1];
+    if (!skip.has(name)) {
+      encoderName = name;
+      break;
+    }
+  }
+  if (!encoderName) return null;
+  const hit =
+    functionBraceAt(scriptSource, `${encoderName}=function(`) ||
+    functionBraceAt(scriptSource, `function ${encoderName}(`);
+  if (!hit) return null;
+  return { ...hit, name: encoderName, role: "encoder" };
+}
+
+const TUPLE_HARVEST_EXPR = `(function(args) {
+  function pick(obj) {
+    if (!obj || !obj.g) return null;
+    const g = obj.g;
+    if (typeof obj.j !== "number" && typeof obj.i !== "number") return null;
+    return obj;
+  }
+  let vm = pick(this);
+  let vmFrom = vm ? "this" : undefined;
+  if (!vm && args && args.length) {
+    for (let i = 0; i < Math.min(args.length, 16); i++) {
+      vm = pick(args[i]);
+      if (vm) {
+        vmFrom = "arg" + i;
+        break;
+      }
+    }
+  }
+  const g = vm && vm.g;
+  const thisNums = {};
+  if (vm) {
+    const names = ["i","j","l","h","o","u","n","m","k","p"];
+    for (let n = 0; n < names.length; n++) {
+      const k = names[n];
+      if (typeof vm[k] === "number") thisNums[k] = vm[k];
+    }
+  }
+  let pcSlot;
+  let keySlot;
+  let bc;
+  if (g && typeof vm.j === "number") pcSlot = g[vm.j];
+  if (g && typeof vm.i === "number") keySlot = g[vm.i];
+  if (g && typeof vm.l === "number" && g[vm.l] && typeof g[vm.l].length === "number") {
+    bc = g[vm.l];
+  }
+  if (!bc && g) {
+    for (let i = 0; i < Math.min(g.length || 0, 64); i++) {
+      const v = g[i];
+      if (v && typeof v.length === "number" && v.length > 10000 && typeof v[0] === "number") {
+        bc = v;
+        break;
+      }
+    }
+  }
+  const byteAt = function (p) {
+    return (bc && typeof p === "number" && p >= 0 && p < bc.length) ? (bc[p] & 255) : undefined;
+  };
+  const gNums = {};
+  if (g) {
+    for (let i = 0; i < Math.min(g.length || 0, 24); i++) {
+      if (typeof g[i] === "number") gNums[i] = g[i];
+    }
+  }
+  return {
+    via: "fetchLoop",
+    thisType: typeof this,
+    vmFrom: vmFrom,
+    hasG: !!(g),
+    pcSlot: typeof pcSlot === "number" ? pcSlot : undefined,
+    keySlot: typeof keySlot === "number" ? (keySlot & 255) : undefined,
+    gLen: g && g.length,
+    bcLen: bc && bc.length,
+    byteAtPc: byteAt(pcSlot),
+    byteAtPcMinus1: typeof pcSlot === "number" ? byteAt(pcSlot - 1) : undefined,
+    thisNums: thisNums,
+    gNums: gNums
+  };
+}).call(this, (function (a) {
+  try { return Array.prototype.slice.call(a); } catch (e) { return []; }
+})(typeof arguments !== "undefined" ? arguments : []))`;
 
 const FO_SHAPE_EXPR = `(() => {
   function kind(v) {
@@ -922,17 +2388,96 @@ const FO_SHAPE_EXPR = `(() => {
     if (typeof arguments !== "undefined") {
       for (let i = 0; i < Math.min(arguments.length, 4); i++) {
         const s = shape(arguments[i], "f4");
-        if (s) return s;
+        if (s) {
+          try {
+            s.writes = (globalThis.__cfWrites || []).slice(0, 80);
+            if ((s.numericKeyCount || 0) === 0 && typeof globalThis.__cfInstallWatch === "function") {
+              const obj = arguments[i];
+              setTimeout(function () {
+                try { globalThis.__cfInstallWatch(obj); } catch (e3) {}
+              }, 0);
+            }
+          } catch (e2) {}
+          return s;
+        }
       }
     }
   } catch (e) {}
   try {
     if (typeof a !== "undefined") {
       const s = shape(a, "f4");
-      if (s) return s;
+      if (s) {
+        try {
+          s.writes = (globalThis.__cfWrites || []).slice(0, 80);
+          if ((s.numericKeyCount || 0) === 0 && typeof globalThis.__cfInstallWatch === "function") {
+            setTimeout(function () {
+              try { globalThis.__cfInstallWatch(a); } catch (e3) {}
+            }, 0);
+          }
+        } catch (e2) {}
+        return s;
+      }
     }
   } catch (e) {}
   return null;
+})()`;
+
+/** Condition is `false` so Chrome does not pause. Records /fo/ plaintext shape only. */
+const ENCODER_LOGPOINT_CONDITION = `(function(){
+  try {
+    var cand = [];
+    try {
+      if (arguments && arguments.length) {
+        for (var ai = 0; ai < Math.min(arguments.length, 4); ai++) cand.push(arguments[ai]);
+      }
+    } catch (e0) {}
+    if (typeof X !== "undefined") cand.push(X);
+    if (typeof a !== "undefined") cand.push(a);
+    var obj = null;
+    var best = 0;
+    for (var ci = 0; ci < cand.length; ci++) {
+      var o = cand[ci];
+      if (!o || typeof o !== "object" || Array.isArray(o)) continue;
+      var n = Object.keys(o).length;
+      if (n > best) { best = n; obj = o; }
+    }
+    if (!obj || typeof obj !== "object" || Array.isArray(obj)) return false;
+    var keys = Object.keys(obj);
+    if (keys.length < 40 || keys.length > 250) return false;
+    if (keys.indexOf("alignContent") >= 0) return false;
+    var ident = [];
+    var numeric = 0;
+    var nMin = null;
+    var nMax = null;
+    var kinds = {};
+    for (var i = 0; i < keys.length; i++) {
+      var k = keys[i];
+      var v = obj[k];
+      var t = v === null ? "null" : Array.isArray(v) ? "array:" + v.length : typeof v;
+      if (t === "string") t = "string:" + v.length;
+      else if (t === "object" && v) t = "object:" + Object.keys(v).length;
+      kinds[k] = t;
+      if (/^\\d+$/.test(k)) {
+        numeric++;
+        var n = Number(k);
+        if (nMin === null || n < nMin) nMin = n;
+        if (nMax === null || n > nMax) nMax = n;
+      } else ident.push(k);
+    }
+    globalThis.__cfFo = globalThis.__cfFo || [];
+    if (globalThis.__cfFo.length < 12) {
+      globalThis.__cfFo.push({
+        via: "encoder",
+        keyCount: keys.length,
+        identKeys: ident,
+        numericKeyCount: numeric,
+        numericKeyMin: nMin,
+        numericKeyMax: nMax,
+        kinds: kinds
+      });
+    }
+  } catch (e) {}
+  return false;
 })()`;
 
 function foPostPairs(foNet) {
@@ -1030,6 +2575,10 @@ function selfTestInject() {
     "if(QK=Qg[QO],QK!==QK)return Qg[QV];switch(Qg[QO]=Qs[m1(pj.QZ)](QK,1),Qv=Qs[m1(pj.Qx)](Qg[QZ],Qs[m1(pj.jW)](Qs[m1(pj.m)](Qy[QK]-113,256),255)),Qg[QZ]=Qs[m1(pj.jd)](Qs[m1(pj.QU)](Qg[QZ]+Qv,31579),59205)&255.46,Qv){case 104:Yb[m1(pj.Qo)](this);break;}";
   const happyLin31579Plus =
     "if(D=Qg[QO],D!==D)return Qg[QV];switch(Qg[QO]=Qs[m0(pO.m)](D,1),D=Qg[QZ]^Qs[m0(pO.a)](Qs[m0(pO.QO)](Qy[D],113)+256,255),Qg[QZ]=Qs[m0(pO.D)](Qs[m0(pO.I)](Qg[QZ],D),31579)+59205&255.37,D){case 104:Yb[m0(pO.QZ)](this);break;}";
+  const happy39695 =
+    "if(oR=od[oq],oV[UP(Wd.hv)](oR,oR))return od[oj];switch(od[oq]=oR+1,oF=od[oQ]^oV[UP(Wd.oj)](oy[oR],133)+256&255,ok=od[oQ]+oF,od[oQ]=oV[UP(Wd.hc)](ok*ok*39695+oV[UP(Wd.hH)](ok,3159)+64171,255),oF){case 79:f9(this);break;}";
+  const catch39695 =
+    "if(H=od[oq],H!==H)return od[oj];switch(od[oq]=H+1,H=oV[UP(Wd.om)](od[oQ],oV[UP(Wd.ou)](oV[UP(Wd.oj)](oy[H],133)+256,255)),C=od[oQ]+H,od[oQ]=oV[UP(Wd.oG)](oV[UP(Wd.oV)](39695*(C*C),C*3159)+64171,255),H){case 79:f9(this);break;}";
   const a = injectOpcodeLog(happyOld);
   const b = injectOpcodeLog(happyLive);
   const c = injectOpcodeLog(catchLive);
@@ -1045,6 +2594,10 @@ function selfTestInject() {
   const lin31579F = extractFetchLinear(happyLin31579);
   const lin31579Plus = injectOpcodeLog(happyLin31579Plus);
   const lin31579PlusF = extractFetchLinear(happyLin31579Plus);
+  const q39695H = injectOpcodeLog(happy39695);
+  const q39695C = injectOpcodeLog(catch39695);
+  const q39695F = extractFetchQuadratic(happy39695);
+  const q39695Fc = extractFetchQuadratic(catch39695);
   const eveFormula = extractFetchQuadratic(happyEve8904);
   let liveEveOk = true;
   let liveEve = null;
@@ -1144,6 +2697,317 @@ function selfTestInject() {
   };
   const cssCls = classifyFoPlaintext(cssShape, fakeInitKeys);
   const cssPicked = pickFollowUpShape([cssShape, fakeInitShape], fakeInitKeys);
+  const leftoverHit = leftoverProbeSummary(
+    [{ key: "OQbM0", opcode: 227, via: "set", valueKind: "undefined", pc: 12 }],
+    ["OQbM0"],
+  );
+  const leftoverRotated = leftoverProbeSummary(
+    [{ key: "zzNew1", opcode: 177, via: "set", valueKind: "number", numeric: false }],
+    ["zzNew1"],
+  );
+  const leftoverInferred = leftoverProbeSummary([], ["zzNew1"]);
+  const wzPerf = compressorBreakpointAt(
+    "void 0;function wZ(wq,lo){if(lo=lS,Mq[x])return;Mq[y]++,Mq[z]=performance[k](),wf()}",
+  );
+  const wzVm = compressorBreakpointAt(
+    "void 0;function wZ(gn){J=this.g,P=this.h,H=this.j,A=J[H],J[this.l][A++]}",
+  );
+  const encSrc =
+    "MO(setTimeout,c,100,k,MS);function c(M,X){typeof Mq===k&&Mq(X,c);return Mt(X)}Mt=function(X){return X}";
+  const encBp = encoderBreakpointAt(encSrc);
+  const encCharsetSrc =
+    "Mb=`" +
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+$-" +
+    "`;function Ms(X){return Mb[0]}Mt=function(X){X[0]=Mb[Mg&63];return X}MO(setTimeout,c,100,k,MS);function c(M,X){return I4(MS)}";
+  const encCharsetBp = encoderBreakpointAt(encCharsetSrc);
+  const lin40954Src =
+    "F=MS[Mg]^MO[Yd(Zr.MW)](255+MW[F],255),MS[Mg]=MO[Yd(Zr.Mp)](MO[Yd(Zr.Mq)](MO[Yd(Zr.V)](MS[Mg]+F,40954),30072),255),F){case 247:bW[Yd(Zr.MT)](this);break;}*40954,30072)&255,MQ){case 247:x();new M9(M)[YG(ZJ.M)](0,62,[])";
+  const lin40954F = extractFetchLinear(lin40954Src);
+  const lin40954Sched = extractFetchSchedule(lin40954Src);
+  const live23196Happy =
+    "if(K=zV[zh],K!==K)return zV[zM];switch(zV[zh]=zF[Ef(pe.K)](K,1),K=zV[zs]^zF[Ef(pe.zA)](39+zD[K],255),Q=zV[zs]+K,zV[zs]=zF[Ef(pe.zW)](zF[Ef(pe.zR)](zF[Ef(pe.zx)](zF[Ef(pe.zV)](Q,Q),23196),zF[Ef(pe.zI)](Q,32619))+19372,255),K){case 220:Po(this);break;}";
+  const live23196Catch =
+    "if(zA=zV[zh],zF[Ef(pe.zs)](zA,zA))return zV[zM];switch(zV[zh]=zF[Ef(pe.vb)](zA,1),zW=zV[zs]^zF[Ef(pe.zZ)](zD[zA]-217,256)&255.61,zR=zV[zs]+zW,zV[zs]=zF[Ef(pe.zA)](zF[Ef(pe.zD)](zR,zR)*23196+zR*32619+19372,255),zW){case 220:Po(this);break;}";
+  const live23196H = injectOpcodeLog(live23196Happy, { jsOnly: true });
+  const live23196C = injectOpcodeLog(live23196Catch, { jsOnly: true });
+  const live23196F = extractFetchQuadratic(live23196Happy);
+  const live23196Fc = extractFetchQuadratic(live23196Catch);
+  const live23196Entry = extractVmEntryKey("new PD(Y)[EP(pC.Y)](0,63,[])");
+  const live23196MulSq =
+    "if(V=Yh[YU],V!==V)return Yh[YX];switch(Yh[YU]=M[HJ(uz.V)](V,1),V=M[HJ(uz.YF)](Yh[YA],M[HJ(uz.YL)](Ym[V]-217,256)&255),H=Yh[YA]+V,Yh[YA]=23196*(H*H)+M[HJ(uz.YX)](H,32619)+19372&255.87,V){case 220:Jj(this);break;}";
+  const live23196MulSqF = extractFetchQuadratic(live23196MulSq);
+  const live23196MulSqI = injectOpcodeLog(live23196MulSq, { jsOnly: true });
+  const live23196Sites = fetchLoopBreakpointSites(
+    live23196MulSq,
+    live23196MulSq.indexOf("23196"),
+  );
+  const packed2Snippet =
+    "new HC(H)(0,63,[]);if(Q=zD[K],Q!==Q)return zD[R];switch(zD[K]=Q+1,Q=zD[k]^xx(zD[Q],217)+256&255,M=zD[k]+Q,zD[k]=M*M*23196+yy(M,32619)+19372&255,Q){case 220:fn(this);break;}";
+  const packed2Mark = fetchMarkerInSource(packed2Snippet);
+  const packed2Sched = extractFetchQuadratic(packed2Snippet);
+  const packed2Entry = extractVmEntryKey(packed2Snippet);
+  const live55067Comma =
+    "switch(tB[ta]=j+1,j=255&173+tV[j]^tB[tz],G=tB[tz]+j,tB[tz]=tL[ro(Xa.U)](tL[ro(Xa.j)](55067*(G*G),tL[ro(Xa.tB)](G,8696)),44379)&255.15,j){case 143:e7[ro(Xa.tF)](this);break;} new qz(P)[po(T4.P)](0,144,[])";
+  const live55067Catch =
+    "switch(tB[ta]=tv+1,tx=tB[tz]^tL[ro(Xa.Zb)](tV[tv],83)+256&255.41,tR=tB[tz]+tx,tB[tz]=tL[ro(Xa.Zm)](tR*tR*55067,tL[ro(Xa.G)](tR,8696))+44379&255,tx){case 143:e7[ro(Xa.tv)](this);break;}";
+  const live55067F = extractFetchQuadratic(live55067Comma);
+  const live55067Fc = extractFetchQuadratic(live55067Catch);
+  const live55067Mark = fetchMarkerInSource(live55067Comma);
+  const live55067Bmix =
+    "j=tL[rn(f9.ts)](173+tV[j],255),G=tB[tz]+j,tB[tz]=tL[rn(f9.tD)](tL[rn(f9.tv)](55067*(G*G)+8696*G,44379),255),j){case 143:e7[rn(f9.tx)](this);break;}";
+  const live55067BmixF = extractFetchQuadratic(live55067Bmix);
+  const live55067BmixMark = fetchMarkerInSource(live55067Bmix);
+  const live55067HelperPair =
+    "tB[tz]=tL[rn(f9.ZM)](tR,tR)*55067+tL[rn(f9.ZT)](tR,8696)+44379&255,tx){case 143:e7";
+  const live55067HelperPairF = extractFetchQuadratic(live55067HelperPair);
+  const live55067PairComma =
+    "PW[PE]=Pc[pn(MW.Pv)](Pc[pn(MW.PW)](Pc[pn(MW.Pg)](S,S)*55067+Pc[pn(MW.Pn)](S,8696),44379),255),Q){case 143:q7";
+  const live55067PairCommaF = extractFetchQuadratic(live55067PairComma);
+  const live55067CatchPlus =
+    "Pv=PW[PE]^Pc[pn(MW.Q)](Pc[pn(MW.PL)](PL[Pr],83),256)&255.3,Pn=PW[PE]+Pv,PW[PE]=Pc[pn(MW.jU)](55067*(Pn*Pn)+8696*Pn+44379,255),Pv){case 143:q7";
+  const live55067CatchPlusF = extractFetchQuadratic(live55067CatchPlus);
+  const live54260Happy =
+    "if(x=pv[pq],pa[eU(Iw.pb)](x,x))return pv[pb];switch(pv[pq]=x+1,x=pa[eU(Iw.pD)](pv[pB],255&96+pF[x]),L=pa[eU(Iw.x)](pv[pB],x),pv[pB]=pa[eU(Iw.L)](pa[eU(Iw.pJ)](pa[eU(Iw.x)](54260*(L*L),43539*L),20295),255),x){case 191:s7[eU(Iw.pH)](this);break;} new sz(p)[eP(c0.p)](0,166,[])";
+  const live54260Catch =
+    "if(pD=pv[pq],pD!==pD)return pv[pb];switch(pv[pq]=pa[eU(Iw.pJ)](pD,1),pH=pv[pB]^pa[eU(Iw.ki)](pa[eU(Iw.pv)](pF[pD],160)+256,255),py=pv[pB]+pH,pv[pB]=pa[eU(Iw.kA)](pa[eU(Iw.kR)](54260*(py*py),pa[eU(Iw.pB)](py,43539)),20295)&255,pH){case 191:s7[eU(Iw.kJ)](this);break;}";
+  const live54260F = extractFetchQuadratic(live54260Happy);
+  const live54260Fc = extractFetchQuadratic(live54260Catch);
+  const live54260Mark = fetchMarkerInSource(live54260Happy);
+  const live54260H = injectOpcodeLog(live54260Happy, { jsOnly: true });
+  const live54260C = injectOpcodeLog(live54260Catch, { jsOnly: true });
+  const live54260PlusHappy =
+    "if(x=pv[pq],x!==x)return pv[pb];switch(pv[pq]=x+1,x=pv[pB]^pa[ey(ID.pB)](pF[x]-160,256)&255.77,L=pv[pB]+x,pv[pB]=pa[ey(ID.e)](54260*(L*L)+43539*L+20295,255),x){case 191:s7[ey(ID.pQ)](this);break;} new sz(p)[eP(c0.p)](0,166,[])";
+  const live54260PlusCatch =
+    "if(pD=pv[pq],pa[ey(ID.kE)](pD,pD))return pv[pb];switch(pv[pq]=pa[ey(ID.x)](pD,1),pH=pa[ey(ID.L)](pv[pB],pa[ey(ID.kY)](pF[pD],160)+256&255),py=pv[pB]+pH,pv[pB]=pa[ey(ID.e)](pa[ey(ID.kl)](pa[ey(ID.pv)](py,py),54260)+43539*py+20295,255),pH){case 191:s7[ey(ID.kr)](this);break;}";
+  const live54260PlusF = extractFetchQuadratic(live54260PlusHappy);
+  const live54260PlusH = injectOpcodeLog(live54260PlusHappy, { jsOnly: true });
+  const live54260PlusC = injectOpcodeLog(live54260PlusCatch, { jsOnly: true });
+  const live54260AmpHappy =
+    "if(B=KI[KQ],B!==B)return KI[Kd];switch(KI[KQ]=KA[iX(fU.KJ)](B,1),B=KA[iX(fU.Kp)](KI[KJ],96+KS[B]&255.77),W=KA[iX(fU.KJ)](KI[KJ],B),KI[KJ]=255&W*W*54260+W*43539+20295,B){case 191:x8[iX(fU.KS)](this);break;} new sz(p)[eP(c0.p)](0,166,[])";
+  const live54260AmpCatch =
+    "if(KE=KI[KQ],KA[iX(fU.g)](KE,KE))return KI[Kd];switch(KI[KQ]=KE+1,Kw=KI[KJ]^KA[iX(fU.Ug)](KA[iX(fU.UB)](KA[iX(fU.UW)](KS[KE],160),256),255),KP=KA[iX(fU.Uk)](KI[KJ],Kw),KI[KJ]=KA[iX(fU.KA)](54260*(KP*KP),43539*KP)+20295&255,Kw){case 191:x8[iX(fU.UT)](this);break;}";
+  const live54260AmpF = extractFetchQuadratic(live54260AmpHappy);
+  const live54260AmpH = injectOpcodeLog(live54260AmpHappy, { jsOnly: true });
+  const live54260AmpC = injectOpcodeLog(live54260AmpCatch, { jsOnly: true });
+  const live5886Happy =
+    "if(s=YU[YW],YD[yB(zj.Yw)](s,s))return YU[Yw];switch(YU[YW]=s+1,s=YU[YZ]^YD[yB(zj.s)](YH[s]-187,256)&255,N=YU[YZ]+s,YU[YZ]=YD[yB(zj.Yv)](YD[yB(zj.N)](YD[yB(zj.YG)](YD[yB(zj.YD)](N,N),5886)+YD[yB(zj.YU)](N,50261),1243),255),s){case 135:YY[yB(zj.Yg)](this);break;} new qz(P)[po(T4.P)](0,176,[])";
+  const live5886Catch =
+    "switch(YU[YW]=Yv+1,YG=YD[yB(zj.Y)](YU[YZ],YD[yB(zj.s)](YH[Yv]-187,256)&255.28),Yg=YD[yB(zj.uN)](YU[YZ],YG),YU[YZ]=YD[yB(zj.YW)](YD[yB(zj.uS)](Yg*Yg,5886)+YD[yB(zj.Yq)](Yg,50261),1243)&255.25,YG){case 135:YY[yB(zj.uQ)](this);break;}";
+  const live5886NestSqStar =
+    "s=YU[YZ]^YD[ym(Do.l)](YD[ym(Do.s)](YH[s]-187,256),255),N=YU[YZ]+s,YU[YZ]=YD[ym(Do.Yw)](YD[ym(Do.N)](YD[ym(Do.Yv)](N*N,5886)+N*50261,1243),255),s){case 135:YY[ym(Do.YG)](this);break;} new qz(P)[po(T4.P)](0,176,[])";
+  const live5886F = extractFetchQuadratic(live5886Happy);
+  const live5886Fc = extractFetchQuadratic(live5886Catch);
+  const live5886NestF = extractFetchQuadratic(live5886NestSqStar);
+  const live5886Mark = fetchMarkerInSource(live5886Happy);
+  const live5886NestMark = fetchMarkerInSource(live5886NestSqStar);
+  // tuples26 iframe (executed HTML, not guessed): helper(mix*mix,mul)+mix*b+add&255
+  const live5886Iframe26 =
+    "if(s=YU[YW],s!==s)return YU[Yw];switch(YU[YW]=YD[yB(Dr.N)](s,1),s=YD[yB(Dr.Yv)](YU[YZ],YD[yB(Dr.YG)](YD[yB(Dr.YU)](YH[s],187)+256,255)),N=YU[YZ]+s,YU[YZ]=YD[yB(Dr.YM)](N*N,5886)+N*50261+1243&255.37,s){case 135:YY[yB(Dr.Yg)](this);break;} new Yz(Y)[yo(Dl.Y)](0,176,[])";
+  const live5886Iframe26Catch =
+    "switch(YU[YW]=YD[yB(Dr.N)](Yv,1),YG=YU[YZ]^YD[yB(Dr.uQ)](YD[yB(Dr.N)](YH[Yv]-187,256),255),Yg=YU[YZ]+YG,YU[YZ]=YD[yB(Dr.ua)](YD[yB(Dr.YM)](YD[yB(Dr.uT)](Yg,Yg),5886),50261*Yg)+1243&255.14,YG){case 135:YY[yB(Dr.u7)](this);break;}";
+  const live5886Iframe26F = extractFetchQuadratic(live5886Iframe26);
+  const live5886Iframe26Fc = extractFetchQuadratic(live5886Iframe26Catch);
+  const live5886Iframe26Mark = fetchMarkerInSource(live5886Iframe26);
+  const live5886Iframe26Sw = fetchLoopSwitchLogSites(
+    live5886Iframe26,
+    live5886Iframe26.indexOf("5886"),
+  );
+  let live5886Iframe26FileOk = true;
+  const live5886Iframe26Path = "artifacts/re-out/chrome-oracle-tuples26/iframe-1.html";
+  if (fs.existsSync(live5886Iframe26Path)) {
+    const html = fs.readFileSync(live5886Iframe26Path, "utf8");
+    const sched = extractFetchSchedule(html);
+    const mark = fetchMarkerInSource(html);
+    live5886Iframe26FileOk = !!(
+      sched &&
+      sched.keyMul === 5886 &&
+      sched.keyQuadB === 50261 &&
+      sched.keyAdd === 1243 &&
+      sched.byteBias === 187 &&
+      sched.initKeyCandidate === 176 &&
+      mark &&
+      (mark.marker === "5886" || mark.marker === "50261")
+    );
+  }
+  const live54260NestHappy =
+    "if(x=pj[pB],pv[en(IT.pQ)](x,x))return pj[pD];switch(pj[pB]=x+1,x=pj[pQ]^pv[en(IT.N)](pv[en(IT.x)](pg[x],160)+256,255),L=pj[pQ]+x,pj[pQ]=pv[en(IT.pF)](pv[en(IT.pF)](pv[en(IT.pg)](L*L,54260),L*43539),20295)&255.77,x){case 191:s8[en(IT.po)](this);break;} new sz(p)[eP(c0.p)](0,166,[])";
+  const live54260NestCatch =
+    "switch(pj[pB]=pv[en(IT.kY)](pH,1),py=pj[pQ]^255&96+pg[pH],pU=pj[pQ]+py,pj[pQ]=pv[en(IT.pj)](pU*pU*54260+43539*pU,20295)&255,py){case 191:s8[en(IT.kl)](this);break;}";
+  const live54260NestF = extractFetchQuadratic(live54260NestHappy);
+  const live54260NestFc = extractFetchQuadratic(live54260NestCatch);
+  const live54260NestSwitch = fetchLoopSwitchLogSites(
+    live54260NestHappy,
+    live54260NestHappy.indexOf("54260"),
+  );
+  const caseCallLogSrc =
+    "L=st[k]+x,st[k]=255&L*L*54260+L*43539+20295,x){case 220:Jj[Hq](this);break;case 151:JY[Hq](this);break;case 1:Amb[Hq](this);break;} function Jj(a){return a} function JY(a){return a} function Amb(a){return a} function Amb2(a){return a}";
+  const caseCallSw = fetchLoopSwitchLogSites(caseCallLogSrc, caseCallLogSrc.indexOf("54260"));
+  const caseCallLogs = fetchLoopCaseCallLogSites(
+    caseCallLogSrc,
+    caseCallLogSrc.indexOf("54260"),
+    caseCallSw,
+  );
+  const switchKwSites = fetchLoopSwitchKeywordSites(live54260NestHappy, live54260NestSwitch);
+  const live54260HelperPair =
+    "Kv[iX(Os.g)](W,W)*54260+Kv[iX(Os.KQ)](W,43539),20295)&255,B){case 191:x7[iX(Os.KJ)](this);break;";
+  const live54260HelperPairF = extractFetchQuadratic(live54260HelperPair);
+  const switchAmp = fetchLoopSwitchLogSites(live54260AmpHappy, live54260AmpHappy.indexOf("54260"));
+  const switchHp = fetchLoopSwitchLogSites(
+    live54260HelperPair,
+    live54260HelperPair.indexOf("54260"),
+  );
+  const switchCatch = fetchLoopSwitchLogSites(
+    "if(Kd=KA[KZ],Kd!==Kd)return KA[Kh];switch(KA[KZ]=Kd+1,KE=Kv[iX(Os.K)](KA[KQ],Kv[iX(Os.KG)](Kv[iX(Os.a)](Kp[Kd]-160,256),255)),Kw=KA[KQ]+KE,KA[KQ]=Kv[iX(Os.Uo)](Kv[iX(Os.Us)](Kw*Kw,54260),Kv[iX(Os.g)](Kw,43539))+20295&255.01,KE){case 191:x7[iX(Os.U1)](this);break;",
+    0,
+  );
+  const falseLinFirst =
+    "x=8696)+44379&255,j){case 143:zz();}" + live55067Bmix;
+  const falseLinFirstF = extractFetchQuadratic(falseLinFirst);
+  const falseLinFirstS = extractFetchSchedule(falseLinFirst);
+  const svg8904 = fetchMarkerInSource('width="8904" height="12"');
+  const fin = finalizeFetchLoopRows([
+    {
+      via: "fetchLoop",
+      pcSlot: 1,
+      op: 220,
+      keySlot: 63,
+      mix: 283,
+      byteAtPcMinus1: 77,
+      bcLen: 50000,
+    },
+  ]);
+  const filled = fillBytesFromPacked(
+    [{ via: "fetchLoop", pc: 0, op: 1, key: 2 }],
+    Buffer.from([9, 8, 7]).toString("base64"),
+  );
+  const droppedShell = normalizeBreakpointOps([{ via: "breakpoint" }]);
+  const finCase = finalizeFetchLoopRows([
+    {
+      via: "fetchLoop",
+      pcSlot: 462740,
+      caseOp: 26,
+      opFrom: "caseLabel",
+      keySlot: 185,
+      byteAtPcMinus1: 62,
+      bcLen: 463076,
+    },
+  ]);
+  const stubDropped = finalizeFetchLoopRows([
+    {
+      via: "fetchLoop",
+      pcSlot: 1195,
+      caseOp: 127,
+      opFrom: "caseLabel",
+      keySlot: 155,
+      byteAtPcMinus1: 172,
+      bcLen: 5206,
+    },
+  ]);
+  const outerWidthIgnored = finalizeFetchLoopRows([
+    {
+      via: "fetchLoop",
+      pcSlot: 10,
+      caseOp: 35,
+      opFrom: "caseLabel",
+      keySlot: 9,
+      mix: 1922,
+      byteAtPcMinus1: 1,
+      bcLen: 50000,
+    },
+  ]);
+  const handlerSrc =
+    "switch(Q){case 220:Jj[Hq](this);break;case 151:JY[Hq](this);break;case 1:L[Hq](this);break;case 2:L[Hq](this);break;} function Jj(a){return a} function JY(a){return a} function L(a){return a}";
+  const handlerSites = fetchLoopHandlerSites(handlerSrc, handlerSrc.indexOf("switch"));
+  const uniqueCalls = fetchLoopUniqueCallSites(handlerSrc, handlerSrc.indexOf("switch"));
+  const jjCall = uniqueCalls.find((x) => x.name === "Jj");
+  const handlerThisGSrc =
+    "switch(Q){case 220:Jj[Hq](this);break;} function Jj(a){var z=this.g;return z}";
+  const handlerThisGSites = fetchLoopHandlerSites(
+    handlerThisGSrc,
+    handlerThisGSrc.indexOf("switch"),
+  );
+  const braceSites = fetchLoopUniqueBraceSites(handlerThisGSrc, handlerThisGSrc.indexOf("switch"));
+  const stackMap = new Map([
+    ["W", 58],
+    ["s9", 205],
+    ["sl", 24],
+  ]);
+  const stackAmb = new Set(["J"]);
+  const stackSl = uniqueOpFromFrameNames(
+    ["x.<computed>", "sl", "sz"],
+    stackMap,
+    stackAmb,
+  );
+  const stackW = uniqueOpFromFrameNames(["W", "s9"], stackMap, stackAmb);
+  const stackJ = uniqueOpFromFrameNames(["J", "sz"], stackMap, stackAmb);
+  const pausedSl = pausedUniqueHandler(
+    ["x.<computed>", "sl", "sz"],
+    stackMap,
+    stackAmb,
+  );
+  const pausedJ = pausedUniqueHandler(["J", "s9"], stackMap, stackAmb);
+  const pausedS4 = pausedUniqueHandler(["s4", "sh"], new Map([["s4", 51], ["sh", 1]]), stackAmb);
+  const calleeTop = fetchLoopCalleeOnStack(
+    ["YX", "Yz.<computed>.<computed>"],
+    "Ye",
+    new Map([
+      ["YX", 156],
+      ["Ye", 227],
+    ]),
+    new Set(),
+  );
+  const calleeNone = fetchLoopCalleeOnStack(
+    ["Ye", "Yz.<computed>.<computed>"],
+    "Ye",
+    new Map([["Ye", 227]]),
+    new Set(),
+  );
+  const discWide = pickSwitchDiscriminant(
+    [
+      { op: 147, mix: 247 },
+      { op: 229, mix: 345 },
+    ],
+    134,
+  );
+  const discDec = pickSwitchDiscriminant(
+    [
+      { op: 5, mix: 116 },
+      { op: 176, mix: 228 },
+    ],
+    111,
+    null,
+    63,
+    187,
+  );
+  handlerNameToOp.set("s4", 51);
+  const finSwitchParent = finalizeFetchLoopRows([
+    {
+      via: "fetchLoop",
+      pcSlot: 176,
+      caseOp: 5,
+      op: 5,
+      opFrom: "switchParent",
+      key: 166,
+      nextKey: 48,
+      byteAtPcMinus1: 94,
+      bcLen: 50000,
+    },
+  ]);
+  const finBpNotStack = finalizeFetchLoopRows([
+    {
+      via: "fetchLoop",
+      pcSlot: 160976,
+      caseOp: 33,
+      opFrom: "caseLabel",
+      fn: "s0",
+      bpName: "s0",
+      frameNames: ["s4", "sh"],
+      keySlot: 22,
+      byteAtPcMinus1: 53,
+      bcLen: 50000,
+    },
+  ]);
+  handlerNameToOp.delete("s4");
   return {
     ok:
       a.injected &&
@@ -1202,6 +3066,14 @@ function selfTestInject() {
       lin31579PlusF.keyMul === 31579 &&
       lin31579PlusF.keyAdd === 59205 &&
       lin31579PlusF.spelling === "mul)+add&255" &&
+      q39695H.html.includes("__cfOp.push") &&
+      q39695C.html.includes("__cfOp.push") &&
+      q39695F &&
+      q39695F.keyMul === 39695 &&
+      q39695F.keyQuadB === 3159 &&
+      q39695F.keyAdd === 64171 &&
+      q39695Fc &&
+      q39695Fc.keyMul === 39695 &&
       liveEveOk &&
       liveLinOk &&
       extracted === CHARSET_BRANCH_B &&
@@ -1232,7 +3104,300 @@ function selfTestInject() {
       cssPicked == null &&
       CHROME_ARGS.includes("--disable-site-isolation-trials") &&
       PREAMBLE.includes("rpMutate") &&
-      PREAMBLE.includes("setTimeout"),
+      PREAMBLE.includes("setTimeout") &&
+      PREAMBLE.includes("__cfWrites") &&
+      PREAMBLE.includes("__cfInstallWatch") &&
+      PREAMBLE.includes("globalThis.__cfInstallWatch") &&
+      leftoverHit.leftoverHitCount === 1 &&
+      leftoverHit.leftoverHits[0].writePath === "property_set" &&
+      leftoverHit.leftoverHits[0].opcode === 227 &&
+      leftoverRotated.namesRotated === true &&
+      leftoverRotated.extraOpcodes[0] === 177 &&
+      leftoverRotated.leftoverHits[0] &&
+      leftoverRotated.leftoverHits[0].name === "zzNew1" &&
+      leftoverInferred.status === "f4-inferred" &&
+      leftoverInferred.extraIdentNow[0] === "zzNew1" &&
+      wzPerf == null &&
+      wzVm == null &&
+      ENCODER_LOGPOINT_CONDITION.includes("return false") &&
+      ENCODER_LOGPOINT_CONDITION.includes("__cfFo") &&
+      encBp &&
+      encBp.role === "encoder" &&
+      encBp.name === "Mt" &&
+      encBp.pat === "Mt=function(" &&
+      encCharsetBp &&
+      encCharsetBp.name === "Mt" &&
+      encCharsetBp.pat === "Mt=function(" &&
+      lin40954F &&
+      lin40954F.keyMul === 40954 &&
+      lin40954F.keyAdd === 30072 &&
+      lin40954F.byteBias === 1 &&
+      lin40954F.firstSwitchCase === 247 &&
+      lin40954Sched &&
+      lin40954Sched.initKeyCandidate === 62 &&
+      classifyLeftoverOpcode(226).writePath === "bytecode_string" &&
+      classifyLeftoverOpcode(177).writePath === "host_xi" &&
+      skipIframeRewrite === false &&
+      fetchTuples === false &&
+      wantFetchLoopBp === false &&
+      injectIframe === false &&
+      packed2Mark &&
+      packed2Mark.marker === "23196" &&
+      packed2Sched &&
+      packed2Sched.keyMul === 23196 &&
+      packed2Sched.keyQuadB === 32619 &&
+      packed2Sched.keyAdd === 19372 &&
+      packed2Sched.byteBias === 217 &&
+      packed2Sched.firstSwitchCase === 220 &&
+      packed2Entry === 63 &&
+      live55067F &&
+      live55067F.keyMul === 55067 &&
+      live55067F.keyQuadB === 8696 &&
+      live55067F.keyAdd === 44379 &&
+      live55067F.byteBias === 83 &&
+      live55067F.firstSwitchCase === 143 &&
+      live55067Fc &&
+      live55067Fc.keyMul === 55067 &&
+      live55067Mark &&
+      live55067Mark.marker === "55067" &&
+      live55067BmixF &&
+      live55067BmixF.keyMul === 55067 &&
+      live55067BmixF.keyQuadB === 8696 &&
+      live55067BmixF.keyAdd === 44379 &&
+      live55067BmixMark &&
+      live55067BmixMark.marker === "55067" &&
+      live55067HelperPairF &&
+      live55067HelperPairF.keyMul === 55067 &&
+      live55067HelperPairF.keyQuadB === 8696 &&
+      live55067HelperPairF.keyAdd === 44379 &&
+      live55067PairCommaF &&
+      live55067PairCommaF.keyMul === 55067 &&
+      live55067PairCommaF.keyQuadB === 8696 &&
+      live55067PairCommaF.keyAdd === 44379 &&
+      live55067CatchPlusF &&
+      live55067CatchPlusF.keyMul === 55067 &&
+      live55067CatchPlusF.keyQuadB === 8696 &&
+      live55067CatchPlusF.keyAdd === 44379 &&
+      live55067CatchPlusF.byteBias === 83 &&
+      live54260F &&
+      live54260F.keyMul === 54260 &&
+      live54260F.keyQuadB === 43539 &&
+      live54260F.keyAdd === 20295 &&
+      live54260F.byteBias === 160 &&
+      live54260F.firstSwitchCase === 191 &&
+      live54260Mark &&
+      live54260Mark.schedule &&
+      live54260Mark.schedule.initKeyCandidate === 166 &&
+      live54260Fc &&
+      live54260Fc.keyMul === 54260 &&
+      live54260Fc.keyQuadB === 43539 &&
+      live54260Fc.keyAdd === 20295 &&
+      live54260Mark &&
+      live54260Mark.marker === "54260" &&
+      live54260H.injected &&
+      live54260H.html.includes("__cfOp.push") &&
+      live54260H.html.includes("pc:x") &&
+      live54260C.injected &&
+      live54260C.html.includes("__cfOp.push") &&
+      live54260C.html.includes("pc:pD") &&
+      live54260PlusF &&
+      live54260PlusF.keyMul === 54260 &&
+      live54260PlusF.keyQuadB === 43539 &&
+      live54260PlusF.keyAdd === 20295 &&
+      live54260PlusF.byteBias === 160 &&
+      live54260PlusH.injected &&
+      live54260PlusH.html.includes("__cfOp.push") &&
+      live54260PlusH.html.includes("pc:x") &&
+      live54260PlusC.injected &&
+      live54260PlusC.html.includes("__cfOp.push") &&
+      live54260PlusC.html.includes("pc:pD") &&
+      live54260AmpF &&
+      live54260AmpF.keyMul === 54260 &&
+      live54260AmpF.keyQuadB === 43539 &&
+      live54260AmpF.keyAdd === 20295 &&
+      live54260AmpF.byteBias === 160 &&
+      live54260AmpH.injected &&
+      live54260AmpH.html.includes("__cfOp.push") &&
+      live54260AmpH.html.includes("pc:B") &&
+      live54260AmpC.injected &&
+      live54260AmpC.html.includes("__cfOp.push") &&
+      live54260HelperPairF &&
+      live54260HelperPairF.keyMul === 54260 &&
+      live54260HelperPairF.keyQuadB === 43539 &&
+      live54260HelperPairF.keyAdd === 20295 &&
+      switchAmp.length === 1 &&
+      switchAmp[0].why === "switchBrace" &&
+      switchAmp[0].opVar === "B" &&
+      switchAmp[0].mixVar === "W" &&
+      switchAmp[0].caseOp === 191 &&
+      switchAmp[0].condition.includes('via:"switchLog"') &&
+      switchAmp[0].condition.includes("return false") &&
+      live54260AmpHappy.slice(switchAmp[0].idx, switchAmp[0].idx + 1) === "{" &&
+      switchHp.length === 1 &&
+      switchHp[0].opVar === "B" &&
+      switchHp[0].caseOp === 191 &&
+      switchCatch.length === 1 &&
+      switchCatch[0].opVar === "KE" &&
+      switchCatch[0].mixVar === "Kw" &&
+      live54260NestF &&
+      live54260NestF.keyMul === 54260 &&
+      live54260NestF.keyQuadB === 43539 &&
+      live54260NestF.keyAdd === 20295 &&
+      live54260NestF.byteBias === 160 &&
+      live54260NestF.spelling === "helper(mix*mix,mul),mix*b),add)&255" &&
+      live54260NestFc &&
+      live54260NestFc.keyMul === 54260 &&
+      live54260NestFc.keyQuadB === 43539 &&
+      live54260NestFc.keyAdd === 20295 &&
+      live54260NestSwitch.length === 1 &&
+      live54260NestSwitch[0].opVar === "x" &&
+      live54260NestSwitch[0].mixVar === "L" &&
+      live5886F &&
+      live5886F.keyMul === 5886 &&
+      live5886F.keyQuadB === 50261 &&
+      live5886F.keyAdd === 1243 &&
+      live5886F.byteBias === 187 &&
+      live5886Fc &&
+      live5886Fc.keyMul === 5886 &&
+      live5886Mark &&
+      live5886Mark.marker === "5886" &&
+      live5886Mark.schedule &&
+      live5886Mark.schedule.initKeyCandidate === 176 &&
+      live5886NestF &&
+      live5886NestF.keyMul === 5886 &&
+      live5886NestF.keyQuadB === 50261 &&
+      live5886NestF.keyAdd === 1243 &&
+      live5886NestF.byteBias === 187 &&
+      live5886NestMark &&
+      live5886NestMark.schedule &&
+      live5886NestMark.schedule.initKeyCandidate === 176 &&
+      live5886Iframe26F &&
+      live5886Iframe26F.keyMul === 5886 &&
+      live5886Iframe26F.keyQuadB === 50261 &&
+      live5886Iframe26F.keyAdd === 1243 &&
+      live5886Iframe26F.byteBias === 187 &&
+      live5886Iframe26F.spelling === "helper(mix*mix,mul)+mix*b+add&255" &&
+      live5886Iframe26Fc &&
+      live5886Iframe26Fc.keyMul === 5886 &&
+      live5886Iframe26Fc.keyQuadB === 50261 &&
+      live5886Iframe26Fc.keyAdd === 1243 &&
+      live5886Iframe26Fc.byteBias === 187 &&
+      live5886Iframe26Mark &&
+      live5886Iframe26Mark.marker === "5886" &&
+      live5886Iframe26Mark.schedule &&
+      live5886Iframe26Mark.schedule.initKeyCandidate === 176 &&
+      live5886Iframe26Sw.length >= 1 &&
+      live5886Iframe26Sw[0].opVar === "s" &&
+      live5886Iframe26Sw[0].mixVar === "N" &&
+      live5886Iframe26Sw[0].caseOp === 135 &&
+      live5886Iframe26FileOk &&
+      packedBytecodeDumpExpr(null).includes(".call(this)") &&
+      packedBytecodeDumpExpr(0, 8).includes("a.push") &&
+      extractFetchQuadratic(
+        "HJ[Hj]=HT[Xp(Nf.Hu)](HT[Xp(Nf.HP)](HT[Xp(Nf.HS)](HS,HS)*5886,50261*HS)+1243,255),X){case 135:",
+      )?.keyMul === 5886 &&
+      switchKwSites.length === 1 &&
+      live54260NestHappy.slice(switchKwSites[0].idx, switchKwSites[0].idx + 6) === "switch" &&
+      caseCallSw.length === 1 &&
+      caseCallLogs.some((x) => x.why === "caseCallLog" && x.caseOp === 220 && x.name === "Jj") &&
+      caseCallLogs.some((x) => x.why === "caseCallLog" && x.caseOp === 151 && x.name === "JY") &&
+      caseCallLogSrc.slice(caseCallLogs.find((x) => x.name === "Jj").idx, caseCallLogs.find((x) => x.name === "Jj").idx + 2) === "Jj" &&
+      injectIframe === false &&
+      falseLinFirstF &&
+      falseLinFirstF.keyMul === 55067 &&
+      falseLinFirstS &&
+      falseLinFirstS.keyMul === 55067 &&
+      falseLinFirstS.kind === "quadratic" &&
+      live23196H.html.includes("__cfOp.push") &&
+      live23196C.html.includes("__cfOp.push") &&
+      live23196F &&
+      live23196F.keyMul === 23196 &&
+      live23196F.keyQuadB === 32619 &&
+      live23196F.keyAdd === 19372 &&
+      live23196F.byteBias === 217 &&
+      live23196Fc &&
+      live23196Fc.keyMul === 23196 &&
+      live23196MulSqF &&
+      live23196MulSqF.keyMul === 23196 &&
+      live23196MulSqF.keyQuadB === 32619 &&
+      live23196MulSqF.keyAdd === 19372 &&
+      live23196MulSqF.byteBias === 217 &&
+      live23196MulSqI.html.includes("__cfOp.push") &&
+      live23196Sites.some((x) => x.why === "case") &&
+      live23196Sites.some((x) => x.why === "switch") &&
+      live23196Sites.some((x) => x.why === "caseCall" && x.caseOp === 220) &&
+      live23196Sites.some((x) => x.why === "case" && x.caseOp === 220) &&
+      handlerSites.some((x) => x.why === "handlerFn" && x.caseOp === 220 && x.name === "Jj") &&
+      handlerSites.some((x) => x.why === "handlerFn" && x.caseOp === 151 && x.name === "JY") &&
+      handlerSites.every((x) => x.name !== "L") &&
+      uniqueCalls.some((x) => x.why === "handlerCall" && x.caseOp === 220 && x.name === "Jj") &&
+      uniqueCalls.some((x) => x.why === "handlerCall" && x.caseOp === 151 && x.name === "JY") &&
+      uniqueCalls.every((x) => x.name !== "L") &&
+      jjCall &&
+      handlerSrc.slice(jjCall.idx, jjCall.idx + 8) === "case 220" &&
+      braceSites.some(
+        (x) =>
+          x.why === "handlerFn" &&
+          x.name === "Jj" &&
+          handlerThisGSrc.slice(x.idx, x.idx + 1) === "{",
+      ) &&
+      handlerThisGSites.some(
+        (x) =>
+          x.why === "handlerFn" &&
+          x.name === "Jj" &&
+          handlerThisGSrc.slice(x.idx, x.idx + 6) === "this.g",
+      ) &&
+      stackSl &&
+      stackSl.op === 24 &&
+      stackSl.name === "sl" &&
+      stackW &&
+      stackW.name === "W" &&
+      stackJ == null &&
+      pausedSl &&
+      pausedSl.op === 24 &&
+      pausedSl.name === "sl" &&
+      pausedJ == null &&
+      pausedS4 &&
+      pausedS4.name === "s4" &&
+      calleeTop === "YX" &&
+      calleeNone == null &&
+      discWide &&
+      discWide.op === 229 &&
+      discWide.mix === 345 &&
+      discDec &&
+      discDec.op === 176 &&
+      discDec.mix === 228 &&
+      finSwitchParent[0] &&
+      finSwitchParent[0].op === 5 &&
+      finSwitchParent[0].key === 166 &&
+      finSwitchParent[0].opFrom === "switchParent" &&
+      finBpNotStack[0] &&
+      finBpNotStack[0].op === 33 &&
+      finBpNotStack[0].fn === "s0" &&
+      svg8904 == null &&
+      fin[0] &&
+      fin[0].pc === 0 &&
+      fin[0].op === 220 &&
+      fin[0].key === 63 &&
+      fin[0].byte === 77 &&
+      finCase[0] &&
+      finCase[0].pc === 462739 &&
+      finCase[0].op === 26 &&
+      finCase[0].nextKey === 185 &&
+      finCase[0].key == null &&
+      finCase[0].byte === 62 &&
+      stubDropped.length === 0 &&
+      outerWidthIgnored[0] &&
+      outerWidthIgnored[0].op === 35 &&
+      outerWidthIgnored[0].mix == null &&
+      filled[0] &&
+      filled[0].byte === 9 &&
+      filled[0].byteVia === "packed" &&
+      droppedShell.length === 0 &&
+      rayFromFoUrl(
+        "https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/b/fo/907568659:1:x/a2ee5624d969f508/ch",
+      ) === "a2ee5624d969f508" &&
+      rayFromFoUrl("https://example.com/") === null,
     happyOld: { replacements: a.replacements, injected: a.injected },
     happyLive: { replacements: b.replacements, injected: b.injected },
     catchLive: { replacements: c.replacements, injected: c.injected },
@@ -1267,6 +3432,17 @@ function selfTestInject() {
       sendHelperBp: sendBp && sendBp.name,
       cssRejected: cssCls && cssCls.kind,
     },
+    fetchDetect: {
+      marker: packed2Mark && packed2Mark.marker,
+      keyMul: packed2Sched && packed2Sched.keyMul,
+      initKeyCandidate: packed2Entry,
+      svgRejected: svg8904 == null,
+      finalizePc: fin[0] && fin[0].pc,
+      iframe26Mul: live5886Iframe26F && live5886Iframe26F.keyMul,
+      iframe26CatchMul: live5886Iframe26Fc && live5886Iframe26Fc.keyQuadB,
+      iframe26Bias: live5886Iframe26F && live5886Iframe26F.byteBias,
+      iframe26FileOk: live5886Iframe26FileOk,
+    },
   };
 }
 
@@ -1296,13 +3472,89 @@ const pending = new Map();
 const cdpSessions = [];
 const liveOps = [];
 const liveFo = [];
+const liveWrites = [];
+const liveFetchRaw = [];
 const compressorBreakpoints = new Set();
 const compressorScripts = new Set();
+const fetchLoopBreakpoints = new Set();
+const fetchLoopBpRows = [];
+const fetchLoopBpMeta = new Map();
+const scriptSwitchVars = new Map();
+const scriptFetchSchedule = new Map();
+const scriptSources = new Map();
 const scriptNotes = [];
 let iframeRewrites = 0;
+let foInitResponse = null;
+let fetchLoopCleared = false;
+let fetchLoopBpPlaced = 0;
+let fetchLoopBpFailed = 0;
+let packedBytecodeDump = false;
+
+async function removeFetchLoopBreakpoint(session, breakpointId) {
+  await session
+    .send("Debugger.removeBreakpoint", { breakpointId })
+    .catch(() => {});
+  fetchLoopBreakpoints.delete(breakpointId);
+  fetchLoopBpMeta.delete(breakpointId);
+}
+
+async function removeFetchLoopBreakpointsForCaseOp(caseOp) {
+  if (caseOp == null) return;
+  const ids = [];
+  for (const [id, meta] of fetchLoopBpMeta) {
+    if (meta && meta.caseOp === caseOp) ids.push(id);
+  }
+  for (const id of ids) {
+    const row = fetchLoopBpRows.find((r) => r.breakpointId === id);
+    if (row) await removeFetchLoopBreakpoint(row.session, id);
+  }
+}
+
+async function clearFetchLoopBreakpoints() {
+  if (fetchLoopCleared) return;
+  fetchLoopCleared = true;
+  for (const row of fetchLoopBpRows) {
+    await removeFetchLoopBreakpoint(row.session, row.breakpointId);
+  }
+  fetchLoopBreakpoints.clear();
+  note("fetchLoopBpCleared", { cap: fetchTupleCap, harvested: liveFetchRaw.length });
+}
 
 function note(kind, payload) {
   events.push({ t: Date.now(), kind, ...payload });
+}
+
+function saveFoResponse(url, text, status, via) {
+  const len = (text || "").length;
+  const ray = rayFromFoUrl(url);
+  const band = classifyFoResponseLen(len);
+  const meta = {
+    via,
+    status,
+    respLen: len,
+    respPrefix: String(text || "").slice(0, 24),
+    ray,
+    band,
+    urlTail: String(url || "").split("/fo/")[1] || "",
+  };
+  note("foResponse", meta);
+  const packed =
+    status === 200 && (band === "packedRunProgram" || len >= 50000);
+  if (!packed || selfTest) return meta;
+  if (foInitResponse?.saved) return meta;
+  try {
+    fs.writeFileSync(path.join(outDir, "fo-init-response.txt"), text);
+    if (ray) fs.writeFileSync(path.join(outDir, "fo-init-ray.txt"), ray);
+    fs.writeFileSync(
+      path.join(outDir, "fo-init-response-meta.json"),
+      JSON.stringify({ ...meta, saved: len }, null, 2),
+    );
+    meta.saved = len;
+    foInitResponse = meta;
+  } catch (e) {
+    note("foResponseSaveErr", { error: String(e).slice(0, 160) });
+  }
+  return meta;
 }
 
 async function onFetchPaused(session, evt) {
@@ -1319,6 +3571,59 @@ async function onFetchPaused(session, evt) {
       const text = body.base64Encoded
         ? Buffer.from(body.body, "base64").toString("utf8")
         : body.body;
+      iframeRewrites++;
+      fs.writeFileSync(
+        path.join(outDir, `iframe-${iframeRewrites}.html`),
+        text.slice(0, 400000),
+      );
+      if (skipIframeRewrite) {
+        if (injectIframe && fetchTuples && iframeRewrites === 1) {
+          const inj = injectOpcodeLog(text);
+          if (inj.injected && inj.html.includes("__cfOp.push")) {
+            const headers = (evt.responseHeaders || []).filter(
+              (h) => !/^(content-encoding|content-length)$/i.test(h.name),
+            );
+            headers.push({
+              name: "Content-Length",
+              value: String(Buffer.byteLength(inj.html)),
+            });
+            await session.send("Fetch.fulfillRequest", {
+              requestId: evt.requestId,
+              responseCode: evt.responseStatusCode || 200,
+              responseHeaders: headers,
+              body: Buffer.from(inj.html).toString("base64"),
+            });
+            try {
+              fs.writeFileSync(
+                path.join(outDir, `iframe-rewritten-${iframeRewrites}.html`),
+                inj.html.slice(0, 400000),
+              );
+            } catch {}
+            note("iframeRewrite", {
+              url: reqUrl,
+              injected: true,
+              replacements: inj.replacements,
+              bytes: inj.html.length,
+              via: "fetchTuplesInject",
+              fetchSchedule: extractFetchSchedule(text),
+              hasRunProgram: text.includes("runProgram"),
+            });
+            return;
+          }
+        }
+        note("iframeSavedNoRewrite", {
+          url: reqUrl,
+          bytes: text.length,
+          has56907: text.includes("56907"),
+          has27076: text.includes("27076"),
+          hasRunProgram: text.includes("runProgram"),
+          fetchSchedule: extractFetchSchedule(text),
+        });
+        await session
+          .send("Fetch.continueRequest", { requestId: evt.requestId })
+          .catch(() => {});
+        return;
+      }
       const { html, injected, replacements, snippet } = injectOpcodeLog(text);
       const headers = (evt.responseHeaders || []).filter(
         (h) => !/^(content-encoding|content-length)$/i.test(h.name),
@@ -1333,11 +3638,6 @@ async function onFetchPaused(session, evt) {
         responseHeaders: headers,
         body: Buffer.from(html).toString("base64"),
       });
-      iframeRewrites++;
-      fs.writeFileSync(
-        path.join(outDir, `iframe-${iframeRewrites}.html`),
-        text.slice(0, 400000),
-      );
       fs.writeFileSync(
         path.join(outDir, `iframe-rewritten-${iframeRewrites}.html`),
         html.slice(0, 400000),
@@ -1356,7 +3656,7 @@ async function onFetchPaused(session, evt) {
         has19663: text.includes("19663"),
         has36163: text.includes("36163"),
         has56907: text.includes("56907"),
-        has8904: text.includes("8904"),
+        has8904: /(?<!\d)8904(?!\d)/.test(text),
         has232: text.includes("-232"),
         fetchSchedule: extractFetchSchedule(text),
         has36376: text.includes("36376"),
@@ -1364,6 +3664,28 @@ async function onFetchPaused(session, evt) {
         hasRunProgram: text.includes("runProgram"),
         snippet,
       });
+      return;
+    }
+    const isFo =
+      evt.responseStatusCode && /\/fo\//.test(reqUrl);
+    if (isFo) {
+      try {
+        const body = await session.send("Fetch.getResponseBody", {
+          requestId: evt.requestId,
+        });
+        const text = body.base64Encoded
+          ? Buffer.from(body.body, "base64").toString("utf8")
+          : body.body;
+        saveFoResponse(reqUrl, text, evt.responseStatusCode, "fetch");
+      } catch (e) {
+        note("foFetchBodyErr", {
+          url: reqUrl.slice(0, 160),
+          error: String(e).slice(0, 160),
+        });
+      }
+      await session
+        .send("Fetch.continueRequest", { requestId: evt.requestId })
+        .catch(() => {});
       return;
     }
   } catch (e) {
@@ -1404,7 +3726,663 @@ function wireNetwork(session, label) {
     rec.encodedDataLength = evt.encodedDataLength;
     network.push(redactedPost(rec));
     pending.delete(evt.requestId);
+    const wantFo = /\/fo\//.test(rec.url || "") && rec.status === 200;
+    if (!wantFo || selfTest || foInitResponse?.saved) return;
+    session
+      .send("Network.getResponseBody", { requestId: evt.requestId })
+      .then((body) => {
+        const text = body.base64Encoded
+          ? Buffer.from(body.body, "base64").toString("utf8")
+          : body.body;
+        saveFoResponse(rec.url, text, rec.status, "network");
+      })
+      .catch((e) => {
+        note("foRespBodyErr", {
+          encoded: rec.encodedDataLength,
+          error: String(e).slice(0, 160),
+        });
+      });
   });
+}
+
+async function patchExecutedFetchScript(session, s, scriptSource) {
+  const inj = injectOpcodeLog(scriptSource, { jsOnly: true });
+  if (!inj.injected) {
+    note("scriptPatchSkip", {
+      replacements: inj.replacements,
+      url: (s.url || "").slice(0, 80),
+    });
+    return false;
+  }
+  try {
+    const result = await session.send("Debugger.setScriptSource", {
+      scriptId: s.scriptId,
+      scriptSource: inj.html,
+      allowTopFrameEditing: true,
+    });
+    const status = result?.status || "unknown";
+    note("scriptPatched", {
+      url: (s.url || "").slice(0, 140),
+      replacements: inj.replacements,
+      status,
+      hasPush: inj.html.includes("__cfOp.push"),
+    });
+    return status === "Ok" || status === "Compiled" || status === "ok";
+  } catch (e) {
+    note("scriptPatchErr", { error: String(e).slice(0, 220) });
+    return false;
+  }
+}
+
+function fetchLoopBreakpointSites(src, markerIdx) {
+  if (!src || markerIdx == null || markerIdx < 0) return [];
+  const sites = [];
+  const seen = new Set();
+  const add = (idx, why, caseOp) => {
+    if (idx == null || idx < 0 || seen.has(idx)) return;
+    seen.add(idx);
+    const op = caseOp != null ? caseOp : caseOpAt(src, idx);
+    sites.push({ idx, why, caseOp: op, ...sourceLineCol(src, idx) });
+  };
+  const window = src.slice(Math.max(0, markerIdx - 400), markerIdx + 25000);
+  const winStart = Math.max(0, markerIdx - 400);
+  let from = 0;
+  let n = 0;
+  while (n < 80) {
+    const i = window.indexOf("case ", from);
+    if (i < 0) break;
+    const slice = window.slice(i, i + 12);
+    const m = slice.match(/^case (\d+):/);
+    if (m) {
+      const abs = winStart + i;
+      const op = Number(m[1]);
+      const colon = window.indexOf(":", i);
+      let callIdx = abs;
+      if (colon >= 0) {
+        let j = colon + 1;
+        while (j < window.length && window[j] === " ") j++;
+        callIdx = winStart + j;
+      }
+      add(callIdx, "caseCall", op);
+      add(abs, "case", op);
+      n++;
+    }
+    from = i + 5;
+  }
+  const sw = window.lastIndexOf("switch(", markerIdx - winStart);
+  if (sw >= 0) add(winStart + sw, "switch");
+  const iff = window.lastIndexOf("if(", markerIdx - winStart);
+  if (iff >= 0) add(winStart + iff, "if");
+  return sites;
+}
+
+function collectHandlerCaseOps(src, markerIdx) {
+  const byName = new Map();
+  if (!src || markerIdx == null || markerIdx < 0) return byName;
+  const window = src.slice(Math.max(0, markerIdx - 400), markerIdx + 25000);
+  const re = /case (\d+):(\w+)[\[(]/g;
+  let m;
+  while ((m = re.exec(window))) {
+    const op = Number(m[1]);
+    const name = m[2];
+    if (!byName.has(name)) byName.set(name, new Set());
+    byName.get(name).add(op);
+  }
+  return byName;
+}
+
+function recordAmbiguousHandlerNames(src, markerIdx) {
+  const byName = collectHandlerCaseOps(src, markerIdx);
+  for (const [name, ops] of byName) {
+    if (ops.size !== 1) {
+      ambiguousHandlerNames.add(name);
+      handlerNameToOp.delete(name);
+    }
+  }
+  return byName;
+}
+
+function uniqueNamedFunctionIdx(src, name) {
+  if (!src || !name) return null;
+  const pat = `function ${name}(`;
+  let from = 0;
+  let count = 0;
+  let first = -1;
+  while (from < src.length) {
+    const i = src.indexOf(pat, from);
+    if (i < 0) break;
+    if (first < 0) first = i;
+    count++;
+    from = i + pat.length;
+  }
+  if (count !== 1 || first < 0) return null;
+  return first;
+}
+
+/** `this.g` inside a unique handler. Body BPs snap past PW++; live capture uses call sites. */
+function uniqueHandlerEntryIdx(src, name) {
+  if (!src || !name) return null;
+  const first = uniqueNamedFunctionIdx(src, name);
+  if (first == null) return null;
+  const brace = src.indexOf("{", first);
+  if (brace < 0) return null;
+  const nextFn = src.indexOf("function ", brace + 1);
+  const thisG = src.indexOf("this.g", brace);
+  if (
+    thisG >= 0 &&
+    (nextFn < 0 || thisG < nextFn) &&
+    thisG - brace < 4000
+  ) {
+    return thisG;
+  }
+  return brace;
+}
+
+/** Unique `case N:name[` in the fetch switch (after decode, before handler). */
+function fetchLoopUniqueCallSites(src, markerIdx) {
+  if (!src || markerIdx == null || markerIdx < 0) return [];
+  const byName = collectHandlerCaseOps(src, markerIdx);
+  const winStart = Math.max(0, markerIdx - 400);
+  const window = src.slice(winStart, markerIdx + 25000);
+  const sites = [];
+  const seenOp = new Set();
+  const re = /case (\d+):(\w+)[\[(]/g;
+  let m;
+  while ((m = re.exec(window))) {
+    const op = Number(m[1]);
+    const name = m[2];
+    const ops = byName.get(name);
+    if (!ops || ops.size !== 1 || [...ops][0] !== op) continue;
+    if (uniqueNamedFunctionIdx(src, name) == null) continue;
+    if (seenOp.has(op)) continue;
+    seenOp.add(op);
+    const idx = winStart + m.index;
+    sites.push({
+      idx,
+      why: "handlerCall",
+      caseOp: op,
+      name,
+      ...sourceLineCol(src, idx),
+    });
+  }
+  return sites;
+}
+
+function matchingBraceIdx(src, brace) {
+  if (brace == null || brace < 0) return -1;
+  let depth = 0;
+  for (let i = brace; i < src.length; i++) {
+    const c = src[i];
+    if (c === "{") depth++;
+    else if (c === "}") {
+      depth--;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
+}
+
+function handlerImmediateBound(src, name) {
+  const first = uniqueNamedFunctionIdx(src, name);
+  if (first == null) return null;
+  const brace = src.indexOf("{", first);
+  if (brace < 0) return null;
+  const end = matchingBraceIdx(src, brace);
+  const thisG = src.indexOf("this.g", brace);
+  const plus =
+    thisG >= 0 && (end < 0 || thisG < end) ? src.indexOf("++", thisG) : -1;
+  return { brace, end, thisG, plus };
+}
+
+/** Function `{` for unique handlers — VM slots are post-fetch, body has not run PW++. */
+function fetchLoopUniqueBraceSites(src, markerIdx) {
+  if (!src || markerIdx == null || markerIdx < 0) return [];
+  const byName = collectHandlerCaseOps(src, markerIdx);
+  const sites = [];
+  const seenIdx = new Set();
+  for (const [name, ops] of byName) {
+    if (ops.size !== 1) continue;
+    if (uniqueNamedFunctionIdx(src, name) == null) continue;
+    const first = uniqueNamedFunctionIdx(src, name);
+    const brace = src.indexOf("{", first);
+    if (brace < 0 || seenIdx.has(brace)) continue;
+    seenIdx.add(brace);
+    sites.push({
+      idx: brace,
+      why: "handlerFn",
+      caseOp: [...ops][0],
+      name,
+      ...sourceLineCol(src, brace),
+    });
+  }
+  return sites;
+}
+
+function fetchLoopHandlerSites(src, markerIdx) {
+  if (!src || markerIdx == null || markerIdx < 0) return [];
+  const byName = collectHandlerCaseOps(src, markerIdx);
+  const sites = [];
+  const seenIdx = new Set();
+  for (const [name, ops] of byName) {
+    if (ops.size !== 1) continue;
+    if (uniqueNamedFunctionIdx(src, name) == null) continue;
+    const idx = uniqueHandlerEntryIdx(src, name);
+    if (idx == null || seenIdx.has(idx)) continue;
+    seenIdx.add(idx);
+    sites.push({
+      idx,
+      why: "handlerFn",
+      caseOp: [...ops][0],
+      name,
+      ...sourceLineCol(src, idx),
+    });
+  }
+  return sites;
+}
+
+async function resolveBreakpointLocation(session, loc) {
+  try {
+    const r = await session.send("Debugger.getPossibleBreakpoints", {
+      start: {
+        scriptId: loc.scriptId,
+        lineNumber: loc.lineNumber,
+        columnNumber: Math.max(0, loc.columnNumber),
+      },
+      end: {
+        scriptId: loc.scriptId,
+        lineNumber: loc.lineNumber,
+        columnNumber: loc.columnNumber + 64,
+      },
+    });
+    const hit = (r.locations || []).find((l) => l && typeof l.columnNumber === "number");
+    if (hit) {
+      return {
+        scriptId: hit.scriptId || loc.scriptId,
+        lineNumber: hit.lineNumber,
+        columnNumber: hit.columnNumber,
+        why: loc.why,
+        caseOp: loc.caseOp,
+        name: loc.name,
+        condition: loc.condition,
+        idx: loc.idx,
+        switchLog: loc.switchLog,
+        resolvedFrom: "possible",
+      };
+    }
+  } catch {}
+  return loc;
+}
+
+async function trySetFetchLoopBp(session, s, scriptSource, loc) {
+  const resolved = await resolveBreakpointLocation(session, loc);
+  const attempts = [];
+  const seenAttempt = new Set();
+  for (const attempt of [loc, resolved]) {
+    if (!attempt) continue;
+    const k = `${attempt.lineNumber}:${attempt.columnNumber}`;
+    if (seenAttempt.has(k)) continue;
+    seenAttempt.add(k);
+    attempts.push(attempt);
+  }
+  for (let i = 0; i < attempts.length; i++) {
+    const attempt = attempts[i];
+    try {
+      const bp = await session.send("Debugger.setBreakpoint", {
+        location: {
+          scriptId: attempt.scriptId || s.scriptId,
+          lineNumber: attempt.lineNumber,
+          columnNumber: attempt.columnNumber,
+        },
+        condition: attempt.condition || loc.condition || FETCH_LOOP_BP_CONDITION,
+      });
+      if (!bp?.breakpointId) continue;
+      const actual = bp.actualLocation;
+      const reqIdx = indexFromLineCol(
+        scriptSource,
+        attempt.lineNumber,
+        attempt.columnNumber,
+      );
+      const actIdx =
+        actual && typeof actual.columnNumber === "number"
+          ? indexFromLineCol(scriptSource, actual.lineNumber, actual.columnNumber)
+          : reqIdx;
+      const bound =
+        loc.why === "switchBrace" || loc.switchLog
+          ? null
+          : loc.name
+            ? handlerImmediateBound(scriptSource, loc.name)
+            : null;
+      const snappedPastImm =
+        bound &&
+        bound.plus >= 0 &&
+        actIdx != null &&
+        actIdx >= bound.plus;
+      const snappedOutside =
+        bound &&
+        actIdx != null &&
+        (actIdx < bound.brace || (bound.end >= 0 && actIdx > bound.end));
+      const braceIdx = loc.idx;
+      const snappedBeforeSwitchBrace =
+        loc.why === "switchBrace" &&
+        actIdx != null &&
+        braceIdx != null &&
+        actIdx < braceIdx;
+      const snappedIntoCaseBody =
+        loc.why === "switchBrace" &&
+        actIdx != null &&
+        braceIdx != null &&
+        actIdx > braceIdx + 12;
+      const snappedToHandlerFn =
+        loc.why === "caseCallLog" &&
+        actIdx != null &&
+        loc.idx != null &&
+        Math.abs(actIdx - loc.idx) > 80;
+      if (
+        snappedPastImm ||
+        snappedOutside ||
+        snappedBeforeSwitchBrace ||
+        snappedIntoCaseBody ||
+        snappedToHandlerFn
+      ) {
+        await session
+          .send("Debugger.removeBreakpoint", { breakpointId: bp.breakpointId })
+          .catch(() => {});
+        fetchLoopBpFailed++;
+        note("fetchLoopBpSnapped", {
+          why: loc.why,
+          name: loc.name || null,
+          caseOp: loc.caseOp ?? null,
+          req: reqIdx,
+          act: actIdx,
+          plus: bound && bound.plus,
+          brace: bound && bound.brace,
+          pastImm: !!snappedPastImm,
+          outside: !!snappedOutside,
+          beforeSwitchBrace: !!snappedBeforeSwitchBrace,
+          intoCaseBody: !!snappedIntoCaseBody,
+          toHandlerFn: !!snappedToHandlerFn,
+        });
+        continue;
+      }
+      fetchLoopBreakpoints.add(bp.breakpointId);
+      fetchLoopBpRows.push({ session, breakpointId: bp.breakpointId });
+      const resolvedOp =
+        loc.caseOp != null
+          ? loc.caseOp
+          : caseOpAt(
+              scriptSource,
+              indexFromLineCol(scriptSource, attempt.lineNumber, attempt.columnNumber),
+            );
+      fetchLoopBpMeta.set(bp.breakpointId, {
+        caseOp: loc.why === "switchBrace" ? null : resolvedOp,
+        why: loc.why,
+        name: loc.name,
+        switchLog: !!(
+          loc.switchLog ||
+          loc.why === "switchBrace" ||
+          loc.why === "switchKw"
+        ),
+        opVar: loc.opVar || null,
+        mixVar: loc.mixVar || null,
+        lineNumber: actual?.lineNumber ?? attempt.lineNumber,
+        columnNumber: actual?.columnNumber ?? attempt.columnNumber,
+        scriptId: s.scriptId,
+      });
+      if (
+        (loc.why === "handlerFn" || loc.why === "handlerCall") &&
+        loc.name &&
+        resolvedOp != null
+      ) {
+        handlerNameToOp.set(loc.name, resolvedOp);
+      }
+      fetchLoopBpPlaced++;
+      note("fetchLoopBp", {
+        url: (s.url || "").slice(0, 140),
+        why: loc.why,
+        name: loc.name || null,
+        caseOp: resolvedOp ?? null,
+        lineNumber: attempt.lineNumber,
+        columnNumber: attempt.columnNumber,
+        actualLine: actual?.lineNumber ?? null,
+        actualColumn: actual?.columnNumber ?? null,
+        breakpointId: bp.breakpointId,
+        resolvedFrom: attempt.resolvedFrom || "exact",
+      });
+      return `${attempt.lineNumber}:${attempt.columnNumber}`;
+    } catch (e) {
+      fetchLoopBpFailed++;
+      note("bpErr", {
+        error: String(e).slice(0, 180),
+        why: loc.why,
+        caseOp: loc.caseOp ?? null,
+        lineNumber: attempt.lineNumber,
+        columnNumber: attempt.columnNumber,
+      });
+    }
+  }
+  return null;
+}
+
+function rememberSwitchVars(scriptId, switchSites) {
+  if (!scriptId || !switchSites || !switchSites.length) return;
+  const vars = [];
+  const seen = new Set();
+  for (const site of switchSites) {
+    const opVar = site.opVar;
+    if (!opVar || !/^[A-Za-z_$][\w$]*$/.test(opVar)) continue;
+    const mixVar =
+      site.mixVar && /^[A-Za-z_$][\w$]*$/.test(site.mixVar) ? site.mixVar : null;
+    const k = `${opVar}:${mixVar || ""}`;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    vars.push({ opVar, mixVar });
+  }
+  if (vars.length) scriptSwitchVars.set(scriptId, vars);
+}
+
+async function evaluateSwitchLocals(session, frame, switchVars) {
+  const out = [];
+  if (!session || !frame?.callFrameId || !switchVars || !switchVars.length) return out;
+  for (const sv of switchVars) {
+    if (!sv.opVar || !/^[A-Za-z_$][\w$]*$/.test(sv.opVar)) continue;
+    const mixVar =
+      sv.mixVar && /^[A-Za-z_$][\w$]*$/.test(sv.mixVar) ? sv.mixVar : null;
+    const expr =
+      `({op:typeof ${sv.opVar}==="number"?(${sv.opVar}&255):null` +
+      (mixVar ? `,mix:typeof ${mixVar}==="number"?${mixVar}:null` : "") +
+      `})`;
+    try {
+      const got = await session.send("Debugger.evaluateOnCallFrame", {
+        callFrameId: frame.callFrameId,
+        expression: expr,
+        returnByValue: true,
+      });
+      const v = got.result?.value;
+      if (v && typeof v.op === "number") {
+        out.push({
+          fn: frame.functionName || "",
+          opVar: sv.opVar,
+          mixVar,
+          op: v.op & 255,
+          mix: typeof v.mix === "number" ? v.mix : null,
+        });
+      }
+    } catch {}
+  }
+  return out;
+}
+
+function packedBytecodeDumpExpr(off, end) {
+  const range =
+    off == null
+      ? `if(!bc)return {err:"no-bc"}; return {len:bc.length};`
+      : `if(!bc)return null; var a=[]; for(var i=${off};i<${end};i++)a.push(bc[i]&255); return a;`;
+  return (
+    `(function(){` +
+    `function pick(obj){` +
+    `if(!obj||!obj.g)return null;` +
+    `var g=obj.g,bc;` +
+    `if(typeof obj.l==="number"&&g[obj.l]&&g[obj.l].length>10000)bc=g[obj.l];` +
+    `if(!bc){for(var i=0;i<Math.min(g.length||0,64);i++){var v=g[i];if(v&&v.length>10000&&typeof v[0]==="number"){bc=v;break;}}}` +
+    `return bc;` +
+    `}` +
+    `var bc=pick(this);` +
+    range +
+    `}).call(this)`
+  );
+}
+
+async function dumpPackedBytecode(session, callFrameId, bcLen) {
+  if (packedBytecodeDump || selfTest || !callFrameId) return false;
+  if ((bcLen || 0) <= 10000) return false;
+  try {
+    const got = await session.send("Debugger.evaluateOnCallFrame", {
+      callFrameId,
+      expression: packedBytecodeDumpExpr(null),
+      returnByValue: true,
+    });
+    if (got.exceptionDetails) {
+      note("packedDumpErr", {
+        error: String(got.exceptionDetails.text || "").slice(0, 180),
+      });
+      return false;
+    }
+    const meta = got.result?.value;
+    if (!meta || !(meta.len > 10000)) {
+      note("packedDumpSkip", { meta: meta || null });
+      return false;
+    }
+    const chunks = [];
+    const step = 8192;
+    for (let off = 0; off < meta.len; off += step) {
+      const end = Math.min(meta.len, off + step);
+      const part = await session.send("Debugger.evaluateOnCallFrame", {
+        callFrameId,
+        expression: packedBytecodeDumpExpr(off, end),
+        returnByValue: true,
+      });
+      const arr = part.result?.value;
+      if (!Array.isArray(arr) || !arr.length) {
+        note("packedDumpChunkSkip", { off, end });
+        return false;
+      }
+      chunks.push(Buffer.from(arr));
+    }
+    const buf = Buffer.concat(chunks);
+    fs.writeFileSync(path.join(outDir, "packed-bytecode.bin"), buf);
+    packedBytecodeDump = true;
+    note("packedDump", { len: buf.length, path: "packed-bytecode.bin" });
+    return true;
+  } catch (e) {
+    note("packedDumpErr", { error: String(e).slice(0, 180) });
+    return false;
+  }
+}
+
+async function setFetchLoopBreakpointNear(session, s, scriptSource, idx) {
+  scriptSources.set(s.scriptId, scriptSource);
+  recordAmbiguousHandlerNames(scriptSource, idx);
+  if (fetchTuples) {
+    const switchSites = fetchLoopSwitchLogSites(scriptSource, idx);
+    rememberSwitchVars(s.scriptId, switchSites);
+    const sched = extractFetchSchedule(scriptSource);
+    if (sched && sched.byteBias != null) scriptFetchSchedule.set(s.scriptId, sched);
+    note("fetchLoopSwitchSites", {
+      n: switchSites.length,
+      sites: switchSites.map((x) => ({
+        why: x.why,
+        opVar: x.opVar,
+        mixVar: x.mixVar,
+        caseOp: x.caseOp,
+        lineNumber: x.lineNumber,
+        columnNumber: x.columnNumber,
+      })),
+    });
+    const kwSites = fetchLoopSwitchKeywordSites(scriptSource, switchSites);
+    const tries = [...switchSites, ...kwSites];
+    let n = 0;
+    const seen = new Set();
+    for (const site of tries) {
+      const colKey = `${site.lineNumber}:${site.columnNumber}`;
+      if (seen.has(colKey)) continue;
+      const used = await trySetFetchLoopBp(session, s, scriptSource, {
+        scriptId: s.scriptId,
+        lineNumber: site.lineNumber,
+        columnNumber: site.columnNumber,
+        why: site.why,
+        caseOp: site.caseOp,
+        name: site.opVar,
+        opVar: site.opVar,
+        mixVar: site.mixVar,
+        condition: FETCH_LOOP_BP_CONDITION,
+        idx: site.idx,
+        switchLog: true,
+      });
+      if (used) {
+        seen.add(used);
+        seen.add(colKey);
+        n++;
+      }
+    }
+    note("fetchLoopBpSummary", {
+      placed: fetchLoopBpPlaced,
+      failed: fetchLoopBpFailed,
+      thisScript: n,
+      via: "switchPause",
+    });
+  }
+  const sites = fetchLoopBreakpointSites(scriptSource, idx);
+  const uniqueCalls = fetchLoopUniqueCallSites(scriptSource, idx);
+  const braces = fetchLoopUniqueBraceSites(scriptSource, idx);
+  const handlers = fetchLoopHandlerSites(scriptSource, idx);
+  const { lineNumber, columnNumber } = sourceLineCol(scriptSource, idx);
+  const caseCalls = sites.filter((x) => x.why === "caseCall");
+  const cases = sites.filter((x) => x.why === "case");
+  const rest = sites.filter((x) => x.why !== "caseCall" && x.why !== "case");
+  const fallback = [
+    ...cases.slice(12),
+    ...caseCalls.slice(12),
+    { scriptId: s.scriptId, lineNumber, columnNumber, why: "marker", caseOp: null },
+    ...rest,
+  ];
+  const preferred = braces.length ? braces : uniqueCalls.length ? uniqueCalls : handlers;
+  const tries = (preferred.length ? preferred : fallback).map((site) => ({
+    scriptId: s.scriptId,
+    lineNumber: site.lineNumber,
+    columnNumber: site.columnNumber,
+    why: site.why,
+    caseOp: site.caseOp,
+    name: site.name,
+  }));
+  note("fetchLoopSites", {
+    n: sites.length,
+    uniqueCalls: uniqueCalls.length,
+    braces: braces.length,
+    handlers: handlers.length,
+    handlerOps: preferred.map((h) => h.caseOp).slice(0, 12),
+    whys: tries.map((x) => x.why).slice(0, 8),
+    firstCaseCol: sites.find((x) => x.why === "case")?.columnNumber ?? null,
+    firstCaseOp: sites.find((x) => x.why === "case")?.caseOp ?? null,
+  });
+  let placed = 0;
+  const seenCol = new Set();
+  for (const loc of tries) {
+    if (placed >= 48) break;
+    const colKey = `${loc.lineNumber}:${loc.columnNumber}`;
+    if (seenCol.has(colKey)) continue;
+    const used = await trySetFetchLoopBp(session, s, scriptSource, loc);
+    if (used) {
+      seenCol.add(used);
+      seenCol.add(colKey);
+      placed++;
+    }
+  }
+  note("fetchLoopBpSummary", {
+    placed: fetchLoopBpPlaced,
+    failed: fetchLoopBpFailed,
+    thisScript: placed,
+  });
+  return placed > 0;
 }
 
 async function attachSession(session, targetInfo, waitingForDebugger) {
@@ -1438,100 +4416,100 @@ async function attachSession(session, targetInfo, waitingForDebugger) {
       const rec = evt.args?.[1]?.value;
       if (first === "__cfOp" && rec && liveOps.length < 400) liveOps.push(rec);
     });
-    session.on("Debugger.scriptParsed", async (s) => {
-      try {
-        if (scriptNotes.length < 24) {
-          scriptNotes.push({
-            phase: "parsed",
-            url: (s.url || "").slice(0, 140),
-            endLine: s.endLine,
-            endColumn: s.endColumn,
-          });
-        }
-        const huge = (s.endColumn || 0) > 8000 || (s.endLine || 0) > 30;
-        if (!huge && !(s.url || "").includes("challenges.cloudflare.com")) return;
-        const { scriptSource } = await session.send("Debugger.getScriptSource", {
-          scriptId: s.scriptId,
-        });
-        const idxQ = scriptSource.indexOf("56907");
-        const idx = scriptSource.indexOf("36163");
-        const idxG = scriptSource.indexOf("19663");
-        const idxLin = scriptSource.indexOf("28814");
-        const idxEveQ = scriptSource.indexOf("I*I*8904") >= 0
-          ? scriptSource.indexOf("I*I*8904")
-          : scriptSource.indexOf("*8904,");
-        const idx31579 = scriptSource.indexOf("31579");
-        const idx59205 = scriptSource.indexOf("59205");
-        const schedule = extractFetchSchedule(scriptSource);
-        const hasFetch =
-          idxQ >= 0 ||
-          idx >= 0 ||
-          idxG >= 0 ||
-          idxLin >= 0 ||
-          idxEveQ >= 0 ||
-          idx31579 >= 0 ||
-          idx59205 >= 0 ||
-          !!schedule;
-        const compressor = compressorBreakpointAt(scriptSource);
-        const sendHelper = sendHelperBreakpointAt(scriptSource);
-        if (!hasFetch && !compressor && !sendHelper) return;
-        const hasInject = scriptSource.includes("__cfOp.push");
-        if (hasFetch) {
-          const marker =
-            idx31579 >= 0
-              ? "31579"
-              : idx59205 >= 0
-                ? "59205"
-                : idxEveQ >= 0
-                  ? (scriptSource.includes("I*I*8904") ? "I*I*8904" : "*8904,")
-                  : idxQ >= 0
-                    ? "56907"
-                    : idx >= 0
-                      ? "36163"
-                      : idxG >= 0
-                        ? "19663"
-                        : "28814";
-          const at = scriptSource.indexOf(marker);
-          note("scriptFetchConst", {
-            url: (s.url || "").slice(0, 140),
-            len: scriptSource.length,
-            hasInject,
-            idx: at,
-            marker,
-            fetchSchedule: schedule,
-          });
-          const { lineNumber, columnNumber } = sourceLineCol(scriptSource, at);
-          if (!hasInject) {
-            await session.send("Debugger.setBreakpoint", {
-              location: { scriptId: s.scriptId, lineNumber, columnNumber },
-            });
-          }
-        }
-        for (const bpInfo of [compressor, sendHelper]) {
-          if (!bpInfo) continue;
-          const tag = `${s.scriptId}:${bpInfo.pat}`;
-          if (compressorScripts.has(tag)) continue;
-          compressorScripts.add(tag);
-          const bp = await session.send("Debugger.setBreakpoint", {
-            location: {
+    const parsedJobs = [];
+    session.on("Debugger.scriptParsed", (s) => {
+      parsedJobs.push(
+        (async () => {
+          try {
+            if (scriptNotes.length < 24) {
+              scriptNotes.push({
+                phase: "parsed",
+                url: (s.url || "").slice(0, 140),
+                endLine: s.endLine,
+                endColumn: s.endColumn,
+              });
+            }
+            const huge = (s.endColumn || 0) > 8000 || (s.endLine || 0) > 30;
+            if (!huge && !(s.url || "").includes("challenges.cloudflare.com")) return;
+            const { scriptSource } = await session.send("Debugger.getScriptSource", {
               scriptId: s.scriptId,
-              lineNumber: bpInfo.lineNumber,
-              columnNumber: bpInfo.columnNumber,
-            },
-          });
-          if (bp?.breakpointId) compressorBreakpoints.add(bp.breakpointId);
-          note(bpInfo.name ? "sendHelperBp" : "compressorBp", {
-            url: (s.url || "").slice(0, 140),
-            pat: bpInfo.pat,
-            name: bpInfo.name || null,
-            lineNumber: bpInfo.lineNumber,
-            columnNumber: bpInfo.columnNumber,
-            breakpointId: bp?.breakpointId || null,
-          });
-        }
-      } catch (e) {
-        note("bpErr", { error: String(e), url: (s.url || "").slice(0, 80) });
-      }
+            });
+            const hit = fetchMarkerInSource(scriptSource);
+            const compressor = compressorBreakpointAt(scriptSource);
+            const encoder = encoderBreakpointAt(scriptSource);
+            const sendHelper = sendHelperBreakpointAt(scriptSource);
+            if (!hit && !compressor && !encoder && !sendHelper) return;
+            const hasInject =
+              !!(hit && hit.hasInject) || scriptSource.includes("__cfOp.push");
+            if (hit) {
+              scriptSources.set(s.scriptId, scriptSource);
+              try {
+                fs.writeFileSync(
+                  path.join(outDir, `executed-fetch-${s.scriptId}.js`),
+                  scriptSource.slice(0, 500000),
+                );
+              } catch {}
+              note("scriptFetchConst", {
+                url: (s.url || "").slice(0, 140),
+                len: scriptSource.length,
+                hasInject,
+                idx: hit.idx,
+                marker: hit.marker,
+                fetchSchedule: hit.schedule,
+              });
+              if (wantFetchLoopBp && !hasInject) {
+                const packedHits = liveFetchRaw.filter((r) => (r.bcLen || 0) > 10000).length;
+                if (packedHits >= fetchTupleCap && !fetchTuples) {
+                  note("fetchLoopSkipNewScript", { reason: "cap", packedHits });
+                } else {
+              const patched = fetchTuples
+                ? false
+                : await patchExecutedFetchScript(session, s, scriptSource);
+                  if (!patched) {
+                    await setFetchLoopBreakpointNear(session, s, scriptSource, hit.idx);
+                  }
+                }
+              }
+            }
+            for (const bpInfo of [compressor, encoder, sendHelper]) {
+              if (!bpInfo) continue;
+              const tag = `${s.scriptId}:${bpInfo.pat}`;
+              if (compressorScripts.has(tag)) continue;
+              compressorScripts.add(tag);
+              const logpoint =
+                bpInfo.role === "encoder" || !!bpInfo.name;
+              const bp = await session.send("Debugger.setBreakpoint", {
+                location: {
+                  scriptId: s.scriptId,
+                  lineNumber: bpInfo.lineNumber,
+                  columnNumber: bpInfo.columnNumber,
+                },
+                ...(logpoint ? { condition: ENCODER_LOGPOINT_CONDITION } : {}),
+              });
+              if (bp?.breakpointId && !logpoint) {
+                compressorBreakpoints.add(bp.breakpointId);
+              }
+              const kind =
+                bpInfo.role === "encoder"
+                  ? "encoderLogpoint"
+                  : bpInfo.name
+                    ? "sendHelperLogpoint"
+                    : "compressorBp";
+              note(kind, {
+                url: (s.url || "").slice(0, 140),
+                pat: bpInfo.pat,
+                name: bpInfo.name || null,
+                logpoint,
+                lineNumber: bpInfo.lineNumber,
+                columnNumber: bpInfo.columnNumber,
+                breakpointId: bp?.breakpointId || null,
+              });
+            }
+          } catch (e) {
+            note("bpErr", { error: String(e), url: (s.url || "").slice(0, 80) });
+          }
+        })(),
+      );
     });
     session.on("Debugger.paused", async (evt) => {
       try {
@@ -1540,8 +4518,7 @@ async function attachSession(session, targetInfo, waitingForDebugger) {
         const hit = evt.hitBreakpoints || [];
         const compressorHit =
           hit.some((id) => compressorBreakpoints.has(id)) ||
-          fname === "f4" ||
-          fname === "wZ";
+          fname === "f4";
         if (compressorHit && frame && liveFo.length < 12) {
           try {
             const got = await session.send("Debugger.evaluateOnCallFrame", {
@@ -1550,8 +4527,18 @@ async function attachSession(session, targetInfo, waitingForDebugger) {
               returnByValue: true,
             });
             const v = got.result?.value;
-            if (v && v.keyCount >= 20) {
+            if (v && (v.keyCount >= 40 || (v.numericKeyCount || 0) > 0)) {
               liveFo.push(v);
+              if (Array.isArray(v.writes)) {
+                for (const w of v.writes) {
+                  if (
+                    liveWrites.length < 80 &&
+                    !liveWrites.some((x) => x.key === w.key && x.via === w.via)
+                  ) {
+                    liveWrites.push(w);
+                  }
+                }
+              }
               note("foShape", {
                 via: v.via,
                 keyCount: v.keyCount,
@@ -1564,42 +4551,384 @@ async function attachSession(session, targetInfo, waitingForDebugger) {
           }
           return;
         }
-        if (frame && liveOps.length < 80) {
-          const row = { via: "breakpoint" };
-          try {
-            const got = await session.send("Debugger.evaluateOnCallFrame", {
-              callFrameId: frame.callFrameId,
-              expression: `(() => {
-                const g = this && this.g;
-                const pc = g && typeof this.j === 'number' ? g[this.j] : undefined;
-                const keySlot = g && typeof this.i === 'number' ? g[this.i] : undefined;
-                return { pc, keySlot, gLen: g && g.length };
-              })()`,
-              returnByValue: true,
+        const fetchHit = hit.some((id) => fetchLoopBreakpoints.has(id));
+        const switchMeta = (() => {
+          for (const id of hit) {
+            const meta = fetchLoopBpMeta.get(id);
+            if (
+              meta &&
+              (meta.switchLog ||
+                meta.why === "switchBrace" ||
+                meta.why === "switchKw")
+            ) {
+              return meta;
+            }
+          }
+          return null;
+        })();
+        if (fetchHit && frame && liveFetchRaw.length < fetchTupleCap) {
+          let callMeta = null;
+          for (const id of hit) {
+            const meta = fetchLoopBpMeta.get(id);
+            if (
+              meta &&
+              (meta.why === "handlerCall" || meta.why === "handlerFn") &&
+              meta.caseOp != null
+            ) {
+              callMeta = meta;
+              break;
+            }
+          }
+          const frames = (evt.callFrames || []).slice(0, 6);
+          const frameNames = frames.map((f) => f.functionName || "");
+          const pausedH = pausedUniqueHandler(frameNames);
+          const bpName = (callMeta && callMeta.name) || (pausedH && pausedH.name);
+          const calleeFn = fetchLoopCalleeOnStack(frameNames, bpName);
+          if (!switchMeta && !callMeta && !pausedH) {
+            if (fname && ambiguousHandlerNames.has(fname)) {
+              note("fetchLoopSkipAmbiguous", { fn: fname });
+              return;
+            }
+            if (fname && String(fname).includes("<computed>")) {
+              note("fetchLoopSkipComputed", { fn: fname });
+              return;
+            }
+            if (!fname || !handlerNameToOp.has(fname)) {
+              note("fetchLoopSkipNonUniqueFn", { fn: fname || "" });
+              return;
+            }
+            if (frame.location) {
+              const srcForFn =
+                scriptSources.get(frame.location.scriptId) ||
+                scriptSources.get(String(frame.location.scriptId));
+              const entry = srcForFn ? uniqueHandlerEntryIdx(srcForFn, fname) : null;
+              const pauseIdx = srcForFn
+                ? indexFromLineCol(
+                    srcForFn,
+                    frame.location.lineNumber,
+                    frame.location.columnNumber,
+                  )
+                : null;
+              if (
+                entry != null &&
+                pauseIdx != null &&
+                Math.abs(pauseIdx - entry) > 240
+              ) {
+                note("fetchLoopSkipDeepHandler", {
+                  fn: fname,
+                  pauseIdx,
+                  entry,
+                  delta: pauseIdx - entry,
+                });
+                return;
+              }
+            }
+          }
+          const harvestName =
+            (callMeta && callMeta.name) || (pausedH && pausedH.name) || fname;
+          const row = { via: "fetchLoop", fn: harvestName };
+          row.frameNames = frameNames;
+          row.hitBreakpoints = hit;
+          if (callMeta && callMeta.name) row.bpName = callMeta.name;
+          if (frame.location) {
+            row.lineNumber = frame.location.lineNumber;
+            row.columnNumber = frame.location.columnNumber;
+            row.scriptId = frame.location.scriptId;
+          }
+          let caseOp;
+          if (switchMeta) {
+            row.bpWhy = switchMeta.why;
+            row.opFrom = "switchLocal";
+            row.bpName = switchMeta.opVar || row.bpName;
+          } else if (callMeta && callMeta.caseOp != null) {
+            caseOp = callMeta.caseOp;
+            row.bpWhy = callMeta.why;
+            row.opFrom = "caseLabel";
+            if (pausedH && pausedH.op !== callMeta.caseOp) {
+              row.stackOp = pausedH.op;
+              row.stackFn = pausedH.name;
+            }
+          } else if (pausedH) {
+            caseOp = pausedH.op;
+            row.bpWhy = "pausedFn";
+            row.opFrom = "pausedFn";
+          } else {
+            for (const id of hit) {
+              const meta = fetchLoopBpMeta.get(id);
+              if (meta && meta.caseOp != null) {
+                caseOp = meta.caseOp;
+                row.bpWhy = meta.why;
+                if (meta.name) row.bpName = meta.name;
+                break;
+              }
+            }
+            const uniqueOp = handlerNameToOp.get(fname);
+            if (caseOp != null && uniqueOp != null && caseOp !== uniqueOp) {
+              row.bpCaseOp = caseOp;
+              row.bpWhy = "pausedFn";
+            } else {
+              row.bpWhy = row.bpWhy || "handlerFn";
+            }
+            caseOp = uniqueOp != null ? uniqueOp : caseOp;
+            if (caseOp != null) row.opFrom = "caseLabel";
+          }
+          if (caseOp != null && !switchMeta) {
+            row.caseOp = caseOp;
+            row.op = caseOp & 255;
+            row.opFrom = row.opFrom || "caseLabel";
+          }
+          const harvestFrames = [
+            frame,
+            ...frames.filter((fr) => fr && fr.callFrameId !== frame.callFrameId),
+          ];
+          for (const fr of harvestFrames) {
+            const frName = fr.functionName || "";
+            if (
+              fr.callFrameId !== frame.callFrameId &&
+              handlerNameToOp.has(frName) &&
+              frName !== fname
+            ) {
+              continue;
+            }
+            try {
+              const got = await session.send("Debugger.evaluateOnCallFrame", {
+                callFrameId: fr.callFrameId,
+                expression: TUPLE_HARVEST_EXPR,
+                returnByValue: true,
+              });
+              if (got.exceptionDetails) {
+                row.evalEx = String(got.exceptionDetails.text || "").slice(0, 120);
+                continue;
+              }
+              const v = got.result?.value;
+              if (v && typeof v === "object" && (v.hasG || v.gLen || v.pcSlot != null)) {
+                Object.assign(row, v);
+                row.fn = harvestName || fname || frName || row.fn;
+                row.vmCallFrameId = fr.callFrameId;
+                break;
+              }
+              if (v && typeof v === "object" && row.thisType == null) {
+                Object.assign(row, v);
+              }
+            } catch (e) {
+              row.evalErr = String(e).slice(0, 120);
+            }
+          }
+          if (switchMeta && switchMeta.opVar && /^[A-Za-z_$][\w$]*$/.test(switchMeta.opVar)) {
+            const mixVar =
+              switchMeta.mixVar && /^[A-Za-z_$][\w$]*$/.test(switchMeta.mixVar)
+                ? switchMeta.mixVar
+                : null;
+            try {
+              const got = await session.send("Debugger.evaluateOnCallFrame", {
+                callFrameId: frame.callFrameId,
+                expression:
+                  `({op:typeof ${switchMeta.opVar}==="number"?(${switchMeta.opVar}&255):null` +
+                  (mixVar
+                    ? `,mix:typeof ${mixVar}==="number"?${mixVar}:null,key:typeof ${mixVar}==="number"?((${mixVar}-${switchMeta.opVar})&255):null`
+                    : "") +
+                  `})`,
+                returnByValue: true,
+              });
+              const v = got.result?.value;
+              if (v && typeof v.op === "number") {
+                row.op = v.op & 255;
+                row.opFrom = "switchLocal";
+                caseOp = undefined;
+                if (typeof v.mix === "number") row.mixLocal = v.mix;
+                if (typeof v.key === "number") row.key = v.key & 255;
+              } else if (got.exceptionDetails) {
+                row.switchEvalEx = String(got.exceptionDetails.text || "").slice(0, 120);
+              }
+            } catch (e) {
+              row.switchEvalErr = String(e).slice(0, 120);
+            }
+          }
+          if (caseOp != null && row.opFrom !== "switchLocal") {
+            row.caseOp = caseOp;
+            row.op = caseOp & 255;
+            row.opFrom = "caseLabel";
+          }
+          if ((row.bcLen || 0) <= 10000) {
+            return;
+          }
+          if (!Number.isFinite(row.pcSlot) || row.pcSlot === 0) {
+            note("fetchLoopSkipUninitPc", {
+              fn: fname,
+              pcSlot: row.pcSlot,
+              keySlot: row.keySlot,
             });
-            const v = got.result?.value;
-            if (v && typeof v === "object") Object.assign(row, v);
-          } catch {}
-          if (row.op == null) {
-            const local = frame.scopeChain?.find((sc) => sc.type === "local");
-            if (local?.object?.objectId) {
+            if (callMeta && callMeta.caseOp != null) {
+              await removeFetchLoopBreakpointsForCaseOp(callMeta.caseOp);
+            }
+            return;
+          }
+          if (!switchMeta) {
+            const switchVars =
+              scriptSwitchVars.get(row.scriptId) ||
+              scriptSwitchVars.get(String(row.scriptId)) ||
+              [];
+            const parentEvals = [];
+            for (const fr of frames) {
+              if (!fr || fr.callFrameId === frame.callFrameId) continue;
+              const frName = fr.functionName || "";
+              if (
+                frName &&
+                !String(frName).includes("<computed>") &&
+                handlerNameToOp.has(frName) &&
+                !ambiguousHandlerNames.has(frName)
+              ) {
+                continue;
+              }
+              const got = await evaluateSwitchLocals(session, fr, switchVars);
+              for (const e of got) parentEvals.push(e);
+            }
+            if (parentEvals.length) row.parentSwitch = parentEvals.slice(0, 8);
+            const sched =
+              scriptFetchSchedule.get(row.scriptId) ||
+              scriptFetchSchedule.get(String(row.scriptId));
+            const srcForBias =
+              scriptSources.get(row.scriptId) ||
+              scriptSources.get(String(row.scriptId));
+            const bias =
+              sched && typeof sched.byteBias === "number"
+                ? sched.byteBias
+                : byteBiasFromSource(srcForBias);
+            const byte = Number.isFinite(row.byteAtPcMinus1)
+              ? row.byteAtPcMinus1
+              : row.byteAtPc;
+            const disc = pickSwitchDiscriminant(
+              parentEvals,
+              row.keySlot,
+              calleeFn ? null : caseOp,
+              byte,
+              bias,
+            );
+            if (disc && typeof disc.op === "number") {
+              row.bpCaseOp = caseOp;
+              caseOp = disc.op;
+              row.caseOp = disc.op;
+              row.op = disc.op & 255;
+              row.opFrom = "switchParent";
+              if (typeof disc.mix === "number") {
+                row.mixLocal = disc.mix;
+                row.key = (disc.mix - disc.op) & 255;
+              }
+              row.switchFn = disc.fn;
+              row.switchOpVar = disc.opVar;
+              if (
+                bias != null &&
+                Number.isFinite(row.key) &&
+                Number.isFinite(byte) &&
+                decodeFetchOp(row.key, byte, bias) !== (disc.op & 255)
+              ) {
+                note("fetchLoopSkipDecode", {
+                  fn: fname,
+                  byte,
+                  bias,
+                  key: row.key,
+                  op: disc.op,
+                  dec: decodeFetchOp(row.key, byte, bias),
+                });
+                if (callMeta && callMeta.caseOp != null) {
+                  await removeFetchLoopBreakpointsForCaseOp(callMeta.caseOp);
+                }
+                return;
+              }
+            } else if (bias != null && Number.isFinite(byte)) {
+              note("fetchLoopSkipDecode", {
+                fn: fname,
+                byte,
+                bias,
+                parentOps: parentEvals.map((e) => e.op).slice(0, 8),
+              });
+              if (callMeta && callMeta.caseOp != null) {
+                await removeFetchLoopBreakpointsForCaseOp(callMeta.caseOp);
+              }
+              return;
+            } else if (calleeFn) {
+              note("fetchLoopSkipCallee", {
+                fn: fname,
+                callee: calleeFn,
+                caller: frameNames[1],
+                bpName: bpName || null,
+              });
+              if (callMeta && callMeta.caseOp != null) {
+                await removeFetchLoopBreakpointsForCaseOp(callMeta.caseOp);
+              }
+              return;
+            }
+          }
+          if (caseOp != null && row.opFrom !== "switchLocal") {
+            row.caseOp = caseOp;
+            row.op = caseOp & 255;
+            if (row.opFrom !== "switchParent") row.opFrom = "caseLabel";
+          }
+          if (
+            row.opFrom !== "switchLocal" &&
+            row.caseOp != null &&
+            liveFetchRaw.some(
+              (x) =>
+                x.caseOp === row.caseOp &&
+                (x.bcLen || 0) > 10000 &&
+                x.pcSlot === row.pcSlot,
+            )
+          ) {
+            const removeOp = row.bpCaseOp != null ? row.bpCaseOp : row.caseOp;
+            await removeFetchLoopBreakpointsForCaseOp(removeOp);
+            return;
+          }
+          const locals = {};
+          for (const sc of frame.scopeChain || []) {
+            if (!sc.object?.objectId) continue;
+            if (sc.type === "global" || sc.type === "with") continue;
+            try {
               const got = await session.send("Runtime.getProperties", {
-                objectId: local.object.objectId,
+                objectId: sc.object.objectId,
                 ownProperties: true,
               });
               for (const p of got.result || []) {
                 if (p.value?.type === "number" && typeof p.value.value === "number") {
-                  row[p.name] = p.value.value;
+                  locals[p.name] = p.value.value;
                 }
               }
-              if (typeof row.A === "number") row.op = row.A & 255;
-              if (typeof row.D === "number") row.mix = row.D;
-            }
+            } catch {}
           }
-          if (typeof row.op === "number" && typeof row.mix === "number") {
-            row.key = (row.mix - row.op) & 255;
+          row.locals = locals;
+          if (Number.isFinite(row.keySlot)) row.nextKey = row.keySlot & 255;
+          liveFetchRaw.push(row);
+          if (row.vmCallFrameId) {
+            await dumpPackedBytecode(session, row.vmCallFrameId, row.bcLen);
           }
-          liveOps.push(row);
+          const removeOp =
+            row.bpCaseOp != null
+              ? row.bpCaseOp
+              : callMeta && callMeta.caseOp != null
+                ? callMeta.caseOp
+                : row.caseOp;
+          if (removeOp != null) {
+            await removeFetchLoopBreakpointsForCaseOp(removeOp);
+          }
+          if (liveFetchRaw.length === 1 || liveFetchRaw.length >= fetchTupleCap) {
+            note("fetchLoopTuple", {
+              n: liveFetchRaw.length,
+              fn: row.fn,
+              vmFrom: row.vmFrom,
+              thisType: row.thisType,
+              hasG: row.hasG,
+              pcSlot: row.pcSlot,
+              caseOp: row.caseOp,
+              opFrom: row.opFrom,
+              nextKey: row.nextKey,
+              key: row.key,
+              bcLen: row.bcLen,
+              byteAtPcMinus1: row.byteAtPcMinus1,
+              localCount: Object.keys(row.locals || {}).length,
+            });
+          }
+          if (liveFetchRaw.length >= fetchTupleCap) {
+            await clearFetchLoopBreakpoints();
+          }
         }
       } catch (e) {
         note("pausedErr", { error: String(e) });
@@ -1608,6 +4937,10 @@ async function attachSession(session, targetInfo, waitingForDebugger) {
       }
     });
     await session.send("Debugger.enable").catch(() => {});
+    if (waitingForDebugger) {
+      await new Promise((r) => setTimeout(r, 150));
+    }
+    await Promise.all(parsedJobs);
   } catch (e) {
     note("attachErr", { label, error: String(e) });
   } finally {
@@ -1672,10 +5005,14 @@ async function harvestSessions(tag) {
           label: ${JSON.stringify(label)},
           type: ${JSON.stringify(type)},
           opCount: (globalThis.__cfOp||[]).length,
+          switchHit: globalThis.__cfSwitchHit||0,
+          switchErr: globalThis.__cfSwitchErr||null,
           ops: (globalThis.__cfOp||[]).slice(0,400),
           xhr: globalThis.__cfXhr||[],
           runProgramCalls: globalThis.__cfRP||[],
-          fo: (globalThis.__cfFo||[]).slice(0,12)
+          fo: (globalThis.__cfFo||[]).slice(0,12),
+          writes: (globalThis.__cfWrites||[]).slice(0,80),
+          packedMeta: globalThis.__cfPackedMeta||null
         })`,
         returnByValue: true,
       });
@@ -1685,14 +5022,29 @@ async function harvestSessions(tag) {
           if (liveFo.length < 12) liveFo.push(s);
         }
       }
+      if (v?.writes?.length) {
+        for (const w of v.writes) {
+          if (
+            liveWrites.length < 80 &&
+            !liveWrites.some((x) => x.key === w.key && x.via === w.via)
+          ) {
+            liveWrites.push(w);
+          }
+        }
+      }
       if (v?.ops?.length) {
         for (const o of v.ops) {
           if (liveOps.length < 400) liveOps.push(o);
         }
-        note("harvest", { tag, label, opCount: v.opCount });
+      }
+      if (v?.switchHit || v?.ops?.length) {
+        note("harvest", { tag, label, opCount: v.opCount, switchHit: v.switchHit, switchErr: v.switchErr });
       }
     } catch (e) {
-      note("harvestErr", { tag, label, error: String(e).slice(0, 160) });
+      const msg = String(e).slice(0, 160);
+      if (!/Session closed|Target closed/i.test(msg)) {
+        note("harvestErr", { tag, label, error: msg });
+      }
     }
   }
 }
@@ -1705,6 +5057,7 @@ while (Date.now() < harvestDeadline) {
 await harvestSessions("final");
 
 const frameDumps = [];
+let packedFromFrames = false;
 for (const frame of page.frames()) {
   const fu = frame.url();
   if (!interestingUrl(fu) && frame !== page.mainFrame()) continue;
@@ -1718,9 +5071,23 @@ for (const frame of page.frames()) {
       xhr: globalThis.__cfXhr || [],
       runProgramCalls: globalThis.__cfRP || [],
       fo: (globalThis.__cfFo || []).slice(0, 8),
+      writes: (globalThis.__cfWrites || []).slice(0, 80),
+      packedMeta: globalThis.__cfPackedMeta || null,
       hookErr: globalThis.__cfHookErr || null,
     }));
     frameDumps.push(dump);
+    if (!packedFromFrames && dump.packedMeta?.packedLen) {
+      try {
+        const packed = await frame.evaluate(
+          () => (typeof globalThis.__cfPacked === "string" ? globalThis.__cfPacked : null),
+        );
+        if (typeof packed === "string" && packed.length > 50000) {
+          fs.writeFileSync(path.join(outDir, "packed-runprogram.txt"), packed);
+          dump.packedMeta.saved = packed.length;
+          packedFromFrames = true;
+        }
+      } catch {}
+    }
   } catch (e) {
     frameDumps.push({ href: fu, error: String(e) });
   }
@@ -1733,10 +5100,14 @@ for (const { session, label, type } of cdpSessions) {
         label: ${JSON.stringify(label)},
         type: ${JSON.stringify(type)},
         opCount: (globalThis.__cfOp||[]).length,
+        switchHit: globalThis.__cfSwitchHit||0,
+        switchErr: globalThis.__cfSwitchErr||null,
         ops: (globalThis.__cfOp||[]).slice(0,400),
         xhr: globalThis.__cfXhr||[],
         runProgramCalls: globalThis.__cfRP||[],
         fo: (globalThis.__cfFo||[]).slice(0,12),
+        writes: (globalThis.__cfWrites||[]).slice(0,80),
+        packedMeta: globalThis.__cfPackedMeta||null,
         hookErr: globalThis.__cfHookErr||null
       })`,
       returnByValue: true,
@@ -1779,16 +5150,78 @@ const token = await page
   })
   .catch(() => ({ tokenLen: 0 }));
 
+let packedMeta = frameDumps.map((f) => f.packedMeta).find((m) => m && m.packedLen);
+for (const { session } of cdpSessions) {
+  if (packedMeta) break;
+  try {
+    const { result } = await session.send("Runtime.evaluate", {
+      expression: `globalThis.__cfPackedMeta || null`,
+      returnByValue: true,
+    });
+    if (result?.value?.packedLen) packedMeta = result.value;
+  } catch {}
+}
+if (packedMeta?.packedLen) {
+  for (const { session } of cdpSessions) {
+    try {
+      const { result } = await session.send("Runtime.evaluate", {
+        expression: `typeof globalThis.__cfPacked === "string" ? globalThis.__cfPacked : null`,
+        returnByValue: true,
+      });
+      const packed = result?.value;
+      if (typeof packed === "string" && packed.length > 50000) {
+        fs.writeFileSync(path.join(outDir, "packed-runprogram.txt"), packed);
+        packedMeta.saved = packed.length;
+        break;
+      }
+    } catch (e) {
+      note("packedSaveErr", { error: String(e).slice(0, 160) });
+    }
+  }
+}
+
 await browser.close();
 
+let packedStr = null;
+try {
+  packedStr = fs.readFileSync(path.join(outDir, "packed-runprogram.txt"), "utf8");
+} catch {
+  packedStr = null;
+}
+const fetchLoopFinal = fillBytesFromPacked(finalizeFetchLoopRows(liveFetchRaw), packedStr);
+try {
+  fs.writeFileSync(
+    path.join(outDir, "fetch-loop-raw.json"),
+    JSON.stringify({ raw: liveFetchRaw, final: fetchLoopFinal }, null, 2),
+  );
+} catch {}
+const harvestTuples = fetchLoopFinal.filter(isHarvestTuple);
+const completeTuples = fetchLoopFinal.filter(isCompleteTuple);
 const foNet = network.filter((n) => /\/fo\//.test(n.url || ""));
 const firstFo = foNet[0] || null;
 const ops = normalizeBreakpointOps([
+  ...harvestTuples,
   ...frameDumps.flatMap((f) => f.ops || []),
   ...liveOps,
 ]);
+const switchLogRows = ops.filter(
+  (r) => r && r.via === "switchLog" && (isHarvestTuple(r) || isCompleteTuple(r)),
+);
+const publishedHarvest = harvestTuples.length ? harvestTuples : switchLogRows;
+const publishedComplete = completeTuples.length
+  ? completeTuples
+  : switchLogRows.filter(isCompleteTuple);
 const reads = frameDumps.flatMap((f) => f.reads || []);
 const xhr = frameDumps.flatMap((f) => f.xhr || []);
+const writes = [];
+const seenWrite = new Set();
+for (const w of [...liveWrites, ...frameDumps.flatMap((f) => f.writes || [])]) {
+  if (!w || w.key == null) continue;
+  const id = `${w.via || ""}:${w.key}`;
+  if (seenWrite.has(id)) continue;
+  seenWrite.add(id);
+  writes.push(w);
+}
 for (const s of frameDumps.flatMap((f) => f.fo || [])) {
   if (s && s.keyCount >= 20 && liveFo.length < 12) liveFo.push(s);
 }
@@ -1822,7 +5255,22 @@ try {
 const bodyShape = foBodyShape(foNet, xhr, iframeHtml);
 const followUpShape = foFollowUpShape(foNet, xhr);
 const initJson = extractInitJsonKeys(iframeHtml);
-const fetchSchedule = extractFetchSchedule(iframeHtml);
+function fetchScheduleFromCapture(iframeHtml) {
+  const fromIframe = extractFetchSchedule(iframeHtml);
+  let bestLinear = fromIframe && fromIframe.keyMul ? fromIframe : null;
+  try {
+    for (const n of fs.readdirSync(outDir)) {
+      if (!n.startsWith("executed-fetch-") || !n.endsWith(".js")) continue;
+      const s = extractFetchSchedule(
+        fs.readFileSync(path.join(outDir, n), "utf8"),
+      );
+      if (s && s.keyMul && s.keyQuadB) return s;
+      if (s && s.keyMul && !bestLinear) bestLinear = s;
+    }
+  } catch {}
+  return bestLinear || fromIframe;
+}
+const fetchSchedule = fetchScheduleFromCapture(iframeHtml);
 const followUpJson = pickFollowUpShape(foShapes, initJson?.keys || []);
 const foPlaintextRows = foShapes.map((s) =>
   classifyFoPlaintext(s, initJson?.keys || []),
@@ -1868,12 +5316,26 @@ const summary = {
         extraIdentCount: followUpJson.extraIdentCount,
         extraIdent: followUpJson.extraIdent,
         extraIdentKinds: followUpJson.extraIdentKinds || {},
+        numericSlotKind: followUpJson.numericSlotKind || null,
+        numericSlotKeyCountMin: followUpJson.numericSlotKeyCountMin ?? null,
+        numericSlotKeyCountMax: followUpJson.numericSlotKeyCountMax ?? null,
         droppedInit: followUpJson.droppedInit || [],
         droppedInitCount: followUpJson.droppedInitCount || 0,
         identKeys: followUpJson.identKeys,
         note: "key names and value kinds only; do not dump values or POST",
       }
     : null,
+  leftoverProbe: leftoverProbeSummary(writes, followUpJson?.extraIdent || []),
+  packedMeta: packedMeta || null,
+  foInitResponse: foInitResponse || null,
+  fetchTuples,
+  fetchTupleCap,
+  fetchLoopBpPlaced,
+  fetchLoopBpFailed,
+  fetchLoopRawCount: liveFetchRaw.length,
+  harvestTupleCount: publishedHarvest.length,
+  completeTupleCount: publishedComplete.length,
+  fetchLoopTuples: publishedHarvest.slice(0, 128),
   foPlaintextShapes: foShapes.map((s) => ({
     via: s.via,
     keyCount: s.keyCount,
@@ -1915,10 +5377,13 @@ const summary = {
     error: f.error || null,
     hookErr: f.hookErr || null,
   })),
-  events: events.slice(0, 50),
+  events: events.slice(0, fetchTuples ? 400 : 50),
 };
 
 fs.writeFileSync(path.join(outDir, "oracle.json"), JSON.stringify(summary, null, 2));
+try {
+  fs.writeFileSync(path.join(outDir, "events.json"), JSON.stringify(events, null, 2));
+} catch {}
 fs.writeFileSync(
   path.join(outDir, "network.json"),
   JSON.stringify({ fo: foNet, allChallenge: network }, null, 2),
@@ -1927,11 +5392,19 @@ fs.writeFileSync(
 console.log(
   JSON.stringify(
     {
-      ok: foNet.length > 0 || ops.length > 0,
+      ok: foNet.length > 0 || ops.length > 0 || publishedComplete.length > 0,
       headed,
+      fetchTuples,
       iframeRewrites,
       foCount: foNet.length,
       opcodeCount: ops.length,
+      harvestTupleCount: publishedHarvest.length,
+      completeTupleCount: publishedComplete.length,
+      fetchLoopRawCount: liveFetchRaw.length,
+      fetchLoopBpPlaced,
+      fetchLoopBpFailed,
+      firstHarvestTuple: publishedHarvest[0] || null,
+      firstCompleteTuple: publishedComplete[0] || null,
       readCount: reads.length,
       firstOpcode: ops[0] || null,
       firstWidths: deltas.slice(0, 12),
@@ -1962,8 +5435,11 @@ console.log(
             numericKeyCount: followUpJson.numericKeyCount,
             extraIdent: followUpJson.extraIdent,
             droppedInit: followUpJson.droppedInit,
+            numericSlotKind: followUpJson.numericSlotKind || null,
           }
         : null,
+      leftoverProbe: summary.leftoverProbe,
+      packedMeta: packedMeta || null,
       headerCompare: summary.headerCompare,
       firstFo: foNet[0]
         ? {

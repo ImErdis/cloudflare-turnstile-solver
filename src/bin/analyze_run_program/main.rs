@@ -8,12 +8,15 @@
 //! ```text
 //! cargo run --locked --bin analyze_run_program -- --ray <c_ray> path/to/fo_body.js
 //! cargo run --locked --bin analyze_run_program -- --decode 16 packed.txt
+//! cargo run --locked --bin analyze_run_program -- --skip-harvest packed.txt
 //! cargo run --locked --bin analyze_run_program -- --oracle scripts/fixtures/headed_chrome_oracle.json
+//! cargo run --locked --bin analyze_run_program -- --verify-case-tuples artifacts/re-out/chrome-oracle-tuples6/oracle.json
 //! ```
 
 use anyhow::{Context, Result, bail};
 use cf::reverse::encryption::decrypt_cloudflare_response;
 use cf::solver::run_program::unpack_packed_run_program;
+use cf::solver::run_program_skip::skip_harvest_live;
 use cf::solver::run_program_ops::{
     CALL_IMM_ROLES_B_LATE, DN_OPCODE, DN_TAG_STRING, HANDLER_LAYOUT_B_LATE, JUMP_IMM_ROLES_B_LATE,
     LATE_DIRECT_HANDLER_COUNT, LEB_OBJECT_ROLES_B_LATE, PROPERTY_IMM_ROLES_B_LATE, S1_CASES_B_LATE,
@@ -22,8 +25,9 @@ use cf::solver::run_program_ops::{
     first_dn_tag_b, first_xf_tag_late, operand_from_byte,
 };
 use cf::solver::run_program_vm::{
-    FETCH_BRANCH_B, FETCH_LIVE, naive_one_byte_fetches, opcode_def_in, params_for_magic,
-    params_from_oracle_fetch, verify_oracle_tuple,
+    FETCH_BRANCH_B, FETCH_LIVE, FetchParams, naive_one_byte_fetches, opcode_def_in,
+    next_key, params_for_magic, params_from_oracle_fetch, verify_oracle_tuple,
+    verify_oracle_tuple_next_key,
 };
 use cf::solver::fo_body::{
     CHARSET_BRANCH_B, body_chars_in_charset, charset_is_well_formed, classify_fo_body_len,
@@ -61,6 +65,8 @@ fn run() -> Result<Value> {
     let mut ray = None;
     let mut decode_n: usize = 0;
     let mut oracle: Option<PathBuf> = None;
+    let mut case_tuples: Option<PathBuf> = None;
+    let mut skip_harvest = false;
     let mut files = Vec::<PathBuf>::new();
     let mut args = env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -73,6 +79,12 @@ fn run() -> Result<Value> {
             oracle = Some(PathBuf::from(
                 args.next().context("--oracle needs a json path")?,
             ));
+        } else if arg == "--verify-case-tuples" {
+            case_tuples = Some(PathBuf::from(
+                args.next().context("--verify-case-tuples needs an oracle.json path")?,
+            ));
+        } else if arg == "--skip-harvest" {
+            skip_harvest = true;
         } else if arg.starts_with('-') {
             bail!("unknown flag {arg}");
         } else {
@@ -83,9 +95,12 @@ fn run() -> Result<Value> {
     if let Some(path) = oracle {
         return verify_oracle_file(&path);
     }
+    if let Some(path) = case_tuples {
+        return verify_case_tuples_file(&path);
+    }
 
-    if files.is_empty() {
-        bail!("usage: analyze_run_program [--ray <c_ray>] [--decode N] [--oracle json] <file>...");
+        if files.is_empty() {
+        bail!("usage: analyze_run_program [--ray <c_ray>] [--decode N] [--skip-harvest] [--oracle json] [--verify-case-tuples oracle.json] <file>...");
     }
 
     let mut reports = Vec::new();
@@ -112,6 +127,32 @@ fn run() -> Result<Value> {
             "analysis": analysis,
             "summary": analysis.summary(),
         });
+        if skip_harvest && analysis.decode_ok {
+            let bytecode = unpack_packed_run_program(&packed)?;
+            let h = skip_harvest_live(&bytecode);
+            let extra: Vec<&str> = cf::FOLLOWUP_EXTRA_IDENT_B
+                .iter()
+                .copied()
+                .filter(|n| h.contains_ident(n))
+                .collect();
+            let unseen: Vec<&str> = cf::FOLLOWUP_UNSEEN_EXTRA_IDENT_B
+                .iter()
+                .copied()
+                .filter(|n| h.contains_ident(n))
+                .collect();
+            row["skipHarvest"] = json!({
+                "note": "width-aware skip of immediates; does not execute handlers",
+                "paramsLabel": h.params_label,
+                "instructions": h.instructions,
+                "lastPc": h.last_pc,
+                "lastOpcode": h.last_opcode,
+                "stopped": h.stopped,
+                "stringCount": h.strings.len(),
+                "geKeyImm1to39": h.ge_key_imms.iter().any(|k| (1..=39).contains(k)),
+                "extraIdentHits": extra,
+                "unseenIdentHits": unseen,
+            });
+        }
         if decode_n > 0 && analysis.decode_ok {
             let bytecode = unpack_packed_run_program(&packed)?;
             let (params, table) = params_for_magic(&bytecode).unwrap_or((FETCH_LIVE, cf::solver::run_program_vm::OPCODE_TABLE));
@@ -146,6 +187,252 @@ fn run() -> Result<Value> {
         "ok": true,
         "header_compare": compare_chrome_and_crate_fo_post(),
         "reports": reports,
+    }))
+}
+
+/// HTML spelling seen on the 2026-08-22 SolveGate iframe (`23196*(mix*mix)+mix*32619+19372`).
+/// Candidate only — not `FETCH_LIVE`. Used to test case-label harvest rows.
+const HTML_CANDIDATE_23196: FetchParams = FetchParams {
+    label: "html-candidate-23196",
+    init_pc: 0,
+    init_key: 63,
+    byte_bias: 217,
+    key_mul: 23_196,
+    key_add: 19_372,
+    key_quad_b: 32_619,
+};
+
+fn row_has_op_byte(f: &Value) -> bool {
+    let op = f.get("op").or_else(|| f.get("caseOp")).and_then(|x| x.as_u64());
+    let byte = f.get("byte").and_then(|x| x.as_u64());
+    op.is_some() && byte.is_some()
+}
+
+fn row_has_fetch_key(f: &Value) -> bool {
+    f.get("key").and_then(|x| x.as_u64()).is_some()
+}
+
+fn row_has_next_key(f: &Value) -> bool {
+    f.get("nextKey")
+        .or_else(|| f.get("next_key"))
+        .and_then(|x| x.as_u64())
+        .is_some()
+}
+
+/// All harvest rows with `op`+`byte` and either fetch `key` or `nextKey`.
+/// A single complete `{pc,op,key,byte}` row must not hide nextKey-only rows.
+fn harvest_tuple_rows(v: &Value) -> Vec<Value> {
+    let loop_rows = v
+        .get("fetchLoopTuples")
+        .and_then(|x| x.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let op_rows = v
+        .get("opcodeFetches")
+        .and_then(|x| x.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let complete: Vec<Value> = op_rows
+        .iter()
+        .chain(loop_rows.iter())
+        .filter(|f| row_has_op_byte(f) && row_has_fetch_key(f))
+        .cloned()
+        .collect();
+    let rest: Vec<Value> = op_rows
+        .iter()
+        .chain(loop_rows.iter())
+        .filter(|f| row_has_op_byte(f) && row_has_next_key(f) && !row_has_fetch_key(f))
+        .cloned()
+        .collect();
+    let mut out = dedup_tuple_rows(complete);
+    let mut seen: std::collections::HashSet<(u64, u64, u64)> = out
+        .iter()
+        .map(|f| {
+            (
+                f.get("pc").and_then(|x| x.as_u64()).unwrap_or(0),
+                f.get("op")
+                    .or_else(|| f.get("caseOp"))
+                    .and_then(|x| x.as_u64())
+                    .unwrap_or(0),
+                f.get("byte").and_then(|x| x.as_u64()).unwrap_or(0),
+            )
+        })
+        .collect();
+    for f in rest {
+        let pc = f.get("pc").and_then(|x| x.as_u64()).unwrap_or(0);
+        let op = f
+            .get("op")
+            .or_else(|| f.get("caseOp"))
+            .and_then(|x| x.as_u64())
+            .unwrap_or(0);
+        let byte = f.get("byte").and_then(|x| x.as_u64()).unwrap_or(0);
+        if !seen.insert((pc, op, byte)) {
+            continue;
+        }
+        out.push(f);
+    }
+    out
+}
+
+fn dedup_tuple_rows(rows: Vec<Value>) -> Vec<Value> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for f in rows {
+        let pc = f.get("pc").and_then(|x| x.as_u64()).unwrap_or(0);
+        let op = f
+            .get("op")
+            .or_else(|| f.get("caseOp"))
+            .and_then(|x| x.as_u64())
+            .unwrap_or(0);
+        let byte = f.get("byte").and_then(|x| x.as_u64()).unwrap_or(0);
+        let key = f.get("key").and_then(|x| x.as_u64()).unwrap_or(0);
+        if seen.insert((pc, op, byte, key)) {
+            out.push(f);
+        }
+    }
+    out
+}
+
+fn html_candidate_from_oracle(v: &Value) -> Option<FetchParams> {
+    let fs = v.get("fetchSchedule")?;
+    let mul = fs.get("keyMul")?.as_u64()? as u32;
+    let add = fs.get("keyAdd")?.as_u64()? as u32;
+    let bias = fs.get("byteBias")?.as_u64()? as u8;
+    let init = fs.get("initKeyCandidate")?.as_u64()? as u8;
+    let quad = fs.get("keyQuadB").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
+    if mul == 0 {
+        return None;
+    }
+    Some(FetchParams {
+        label: "html-candidate",
+        init_pc: 0,
+        init_key: init,
+        byte_bias: bias,
+        key_mul: mul,
+        key_add: add,
+        key_quad_b: quad,
+    })
+}
+
+fn verify_case_tuples_file(path: &PathBuf) -> Result<Value> {
+    let raw = fs::read_to_string(path).with_context(|| path.display().to_string())?;
+    let v: Value = serde_json::from_str(&raw)?;
+    let rows = harvest_tuple_rows(&v);
+    let marker = v
+        .get("events")
+        .and_then(|e| e.as_array())
+        .into_iter()
+        .flatten()
+        .find(|e| e.get("kind").and_then(|k| k.as_str()) == Some("scriptFetchConst"))
+        .and_then(|e| e.get("marker").and_then(|m| m.as_str()))
+        .unwrap_or("");
+    let mut candidates = vec![FETCH_LIVE];
+    if let Some(html) = html_candidate_from_oracle(&v) {
+        if html.key_mul != FETCH_LIVE.key_mul {
+            candidates.push(html);
+        }
+    } else if marker == "23196" {
+        candidates.push(HTML_CANDIDATE_23196);
+    }
+    let mut reports = Vec::new();
+    for params in candidates {
+        let mut ok = 0u32;
+        let mut fail = Vec::new();
+        let mut recovered = Vec::new();
+        for (i, f) in rows.iter().enumerate() {
+            let pc = f.get("pc").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
+            let byte = f.get("byte").and_then(|x| x.as_u64()).unwrap_or(0) as u8;
+            let op = f
+                .get("op")
+                .or_else(|| f.get("caseOp"))
+                .and_then(|x| x.as_u64())
+                .unwrap_or(0) as u8;
+            let fetch_key = f.get("key").and_then(|x| x.as_u64()).map(|n| n as u8);
+            let next_k = f
+                .get("nextKey")
+                .or_else(|| f.get("next_key"))
+                .and_then(|x| x.as_u64())
+                .map(|n| n as u8);
+            let result = if let Some(key) = fetch_key {
+                verify_oracle_tuple(params, pc, key, byte, op).map(|()| key)
+            } else if let Some(nk) = next_k {
+                verify_oracle_tuple_next_key(params, pc, op, byte, nk)
+            } else {
+                Err("missing key and nextKey".to_string())
+            };
+            match result {
+                Ok(key) => {
+                    ok += 1;
+                    recovered.push(json!({
+                        "i": i,
+                        "pc": pc,
+                        "op": op,
+                        "byte": byte,
+                        "nextKey": next_k,
+                        "fetchKey": key,
+                    }));
+                }
+                Err(e) => fail.push(json!({
+                    "i": i,
+                    "pc": pc,
+                    "op": op,
+                    "byte": byte,
+                    "nextKey": next_k,
+                    "key": fetch_key,
+                    "error": e,
+                })),
+            }
+        }
+        let mut chain_fail = Vec::new();
+        if rows.len() >= 2 {
+            for w in rows.windows(2) {
+                let k0 = w[0].get("key").and_then(|x| x.as_u64()).map(|n| n as u8);
+                let nk0 = w[0]
+                    .get("nextKey")
+                    .or_else(|| w[0].get("next_key"))
+                    .and_then(|x| x.as_u64())
+                    .map(|n| n as u8);
+                let k1 = w[1].get("key").and_then(|x| x.as_u64()).map(|n| n as u8);
+                let (Some(k0), Some(nk0), Some(k1)) = (k0, nk0, k1) else {
+                    continue;
+                };
+                if nk0 != k1 {
+                    continue;
+                }
+                let op0 = w[0]
+                    .get("op")
+                    .or_else(|| w[0].get("caseOp"))
+                    .and_then(|x| x.as_u64())
+                    .unwrap_or(0) as u8;
+                let got = next_key(params, k0, op0);
+                if got != k1 {
+                    chain_fail.push(json!({
+                        "pc": w[0].get("pc"),
+                        "op": op0,
+                        "key": k0,
+                        "nextRowKey": k1,
+                        "expectedNextKey": got,
+                    }));
+                }
+            }
+        }
+        reports.push(json!({
+            "label": params.label,
+            "keyMul": params.key_mul,
+            "ok": ok,
+            "fail": fail.len(),
+            "recovered": recovered,
+            "errors": fail,
+            "keyChainFail": chain_fail,
+            "allOk": fail.is_empty() && ok > 0 && chain_fail.is_empty(),
+        }));
+    }
+    Ok(json!({
+        "path": path.display().to_string(),
+        "rowCount": rows.len(),
+        "marker": marker,
+        "note": "HTML candidate is a test only. Do not assign FETCH_LIVE. Quote mismatches.",
+        "candidates": reports,
     }))
 }
 
@@ -496,6 +783,65 @@ fn verify_oracle_file(path: &PathBuf) -> Result<Value> {
                 }
                 if fj.get("numericKeysInHtml") == Some(&Value::Bool(true)) {
                     errors.push("foFollowUpJson.numericKeysInHtml should be false".into());
+                }
+                if let Some(writes) = fj.get("writes").and_then(|x| x.as_array()) {
+                    if writes.len() != cf::FOLLOWUP_FIELD_WRITE_B.len() {
+                        errors.push("foFollowUpJson.writes length mismatch".into());
+                    }
+                    for (row, got) in cf::FOLLOWUP_FIELD_WRITE_B.iter().zip(writes) {
+                        if got.get("name").and_then(|x| x.as_str()) != Some(row.name)
+                            || got.get("source").and_then(|x| x.as_str()) != Some(row.source)
+                            || got.get("writePath").and_then(|x| x.as_str()) != Some(row.write_path)
+                        {
+                            errors.push(format!("foFollowUpJson.writes.{} mismatch", row.name));
+                        }
+                    }
+                }
+                if let Some(hv) = fj.get("inlinePackedHarvest") {
+                    if hv.get("extraIdentInStub") != Some(&Value::Bool(false)) {
+                        errors.push("inlinePackedHarvest.extraIdentInStub should be false".into());
+                    }
+                    if hv.get("stopped").and_then(|x| x.as_str()) == Some("unparsed_op_177_XU") {
+                        errors.push(
+                            "inlinePackedHarvest.stopped should not be unparsed_op_177_XU (XU immediates are skipped without apply)".into(),
+                        );
+                    }
+                }
+                if fj.get("numericSlotKind").and_then(|x| x.as_str()) == Some("object") {
+                    if fj.get("numericSlotKeyCountMin").and_then(|x| x.as_u64())
+                        != Some(u64::from(cf::solver::fo_followup_json::FOLLOWUP_NUMERIC_SLOT_KEYCOUNT_MIN_B))
+                    {
+                        errors.push("foFollowUpJson.numericSlotKeyCountMin mismatch".into());
+                    }
+                }
+                if let Some(lp) = fj.get("leftoverProbe") {
+                    if lp.get("opcodeRecovered") == Some(&Value::Bool(true)) {
+                        errors.push("leftoverProbe.opcodeRecovered should be false".into());
+                    }
+                    if let Some(names) = lp.get("unseenNames").and_then(|x| x.as_array()) {
+                        let got: Vec<&str> = names.iter().filter_map(|k| k.as_str()).collect();
+                        if got != cf::FOLLOWUP_UNSEEN_EXTRA_IDENT_B {
+                            errors.push("leftoverProbe.unseenNames mismatch".into());
+                        }
+                    }
+                }
+                if let Some(ph) = fj.get("packedHarvest") {
+                    if ph.get("recaptured") != Some(&Value::Bool(true)) {
+                        errors.push("packedHarvest.recaptured should be true".into());
+                    }
+                    if ph.get("fetchLiveUnchanged") != Some(&Value::Bool(true)) {
+                        errors.push("packedHarvest.fetchLiveUnchanged should be true".into());
+                    }
+                    if ph.get("packedPrefix").and_then(|x| x.as_str())
+                        != Some(cf::solver::fo_followup_json::FOLLOWUP_LIVE_PACKED_PREFIX)
+                    {
+                        errors.push("packedHarvest.packedPrefix mismatch".into());
+                    }
+                    if ph.get("unseenIdentHits").and_then(|x| x.as_array()).map(|a| a.len())
+                        != Some(0)
+                    {
+                        errors.push("packedHarvest.unseenIdentHits should be empty".into());
+                    }
                 }
                 if let Some(ident) = fj.get("identKeys").and_then(|x| x.as_array()) {
                     let names: Vec<String> = ident
