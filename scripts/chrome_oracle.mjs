@@ -418,6 +418,7 @@ function extractFetchQuadratic(html) {
   for (const x of [
     html.search(/\d{4,5}\*\(([A-Za-z_$][\w$]*)\*\1\)/),
     html.search(/([A-Za-z_$][\w$]*)\*\1\*\d{4,5}/),
+    html.search(/([A-Za-z_$][\w$]*)\*\1,\d{4,5}/),
     html.search(/([A-Za-z_$][\w$]*),\1\)\*\d{4,5}/),
   ]) {
     if (x >= 0 && (idx < 0 || x < idx)) idx = x;
@@ -477,6 +478,12 @@ function extractFetchQuadratic(html) {
   const mulCommaBmixAmp = window.match(
     /(\d{4,5})\*\((\w+)\*\2\),(\d{4,5})\*\2\)\+(\d{4,5})&255/,
   );
+  const nestSqCommaBmix = window.match(
+    /(\w+)\*\1,(\d{4,5})\),[\s\S]{0,96}?\1\*(\d{4,5})\),(\d{4,5})\)&255/,
+  );
+  const sqBareMulBCommaAdd = window.match(
+    /(\w+)\*\1\*(\d{4,5})\+(\d{4,5})\*\1,(\d{4,5})\)&255/,
+  );
   const mulCommaHelper = window.match(
     /(\d{4,5})\*\((\w+)\*\2\),[\s\S]{0,120}?\(\2,(\d{4,5})\)\),(\d{4,5})\)&255/,
   );
@@ -503,6 +510,8 @@ function extractFetchQuadratic(html) {
     mulSqBmixPlusAdd ||
     mulCommaBmix ||
     mulCommaBmixAmp ||
+    nestSqCommaBmix ||
+    sqBareMulBCommaAdd ||
     helperPairTimesMul ||
     helperPairCommaAdd ||
     mulCommaHelper ||
@@ -574,6 +583,16 @@ function extractFetchQuadratic(html) {
     keyQuadB = Number(mulCommaBmixAmp[3]);
     keyAdd = Number(mulCommaBmixAmp[4]);
     spelling = "mul*(mix*mix),b*mix)+add&255";
+  } else if (nestSqCommaBmix) {
+    keyMul = Number(nestSqCommaBmix[2]);
+    keyQuadB = Number(nestSqCommaBmix[3]);
+    keyAdd = Number(nestSqCommaBmix[4]);
+    spelling = "helper(mix*mix,mul),mix*b),add)&255";
+  } else if (sqBareMulBCommaAdd) {
+    keyMul = Number(sqBareMulBCommaAdd[2]);
+    keyQuadB = Number(sqBareMulBCommaAdd[3]);
+    keyAdd = Number(sqBareMulBCommaAdd[4]);
+    spelling = "mix*mix*mul+b*mix,add)&255";
   } else if (helperPairTimesMul) {
     keyMul = Number(helperPairTimesMul[2]);
     keyQuadB = Number(helperPairTimesMul[3]);
@@ -1918,6 +1937,70 @@ function fetchLoopSwitchLogSites(src, markerIdx) {
   return sites;
 }
 
+function switchSiteAt(src, idx, switchSites) {
+  if (!switchSites || !switchSites.length) return null;
+  let best = switchSites[0];
+  for (const s of switchSites) {
+    if (s.idx <= idx && (!best || s.idx > best.idx)) best = s;
+  }
+  return best;
+}
+
+/** `switch(` before each fetch `){case`. Discriminant may not have run. */
+function fetchLoopSwitchKeywordSites(src, switchSites) {
+  const out = [];
+  for (const site of switchSites || []) {
+    const sw = String(src).lastIndexOf("switch(", site.idx);
+    if (sw < 0 || site.idx - sw > 400) continue;
+    out.push({
+      ...site,
+      idx: sw,
+      why: "switchKw",
+      ...sourceLineCol(src, sw),
+    });
+  }
+  return out;
+}
+
+/**
+ * Unique `case N:name[` **call** (the handler ident, not the `case` keyword).
+ * Still the interpreter frame, so `op`/`mix` locals are in scope.
+ */
+function fetchLoopCaseCallLogSites(src, markerIdx, switchSites) {
+  if (!src || markerIdx == null || markerIdx < 0 || !switchSites?.length) return [];
+  const byName = collectHandlerCaseOps(src, markerIdx);
+  const winStart = Math.max(0, markerIdx - 400);
+  const window = String(src).slice(winStart, markerIdx + 25000);
+  const sites = [];
+  const seenOp = new Set();
+  const re = /case (\d+):(\w+)[\[(]/g;
+  let m;
+  while ((m = re.exec(window))) {
+    const op = Number(m[1]);
+    const name = m[2];
+    const ops = byName.get(name);
+    if (!ops || ops.size !== 1 || [...ops][0] !== op) continue;
+    if (seenOp.has(op)) continue;
+    seenOp.add(op);
+    const nameOff = m[0].indexOf(name);
+    const idx = winStart + m.index + nameOff;
+    const sw = switchSiteAt(src, idx, switchSites);
+    if (!sw) continue;
+    sites.push({
+      idx,
+      why: "caseCallLog",
+      opVar: sw.opVar,
+      mixVar: sw.mixVar,
+      caseOp: op,
+      name,
+      condition: sw.condition,
+      ...sourceLineCol(src, idx),
+    });
+    if (sites.length >= 48) break;
+  }
+  return sites;
+}
+
 /** Opcode is the `case N:` label at or just before idx. */
 function caseOpAt(src, idx) {
   if (!src || idx == null || idx < 0) return null;
@@ -2398,6 +2481,25 @@ function selfTestInject() {
   const live54260AmpF = extractFetchQuadratic(live54260AmpHappy);
   const live54260AmpH = injectOpcodeLog(live54260AmpHappy, { jsOnly: true });
   const live54260AmpC = injectOpcodeLog(live54260AmpCatch, { jsOnly: true });
+  const live54260NestHappy =
+    "if(x=pj[pB],pv[en(IT.pQ)](x,x))return pj[pD];switch(pj[pB]=x+1,x=pj[pQ]^pv[en(IT.N)](pv[en(IT.x)](pg[x],160)+256,255),L=pj[pQ]+x,pj[pQ]=pv[en(IT.pF)](pv[en(IT.pF)](pv[en(IT.pg)](L*L,54260),L*43539),20295)&255.77,x){case 191:s8[en(IT.po)](this);break;} new sz(p)[eP(c0.p)](0,166,[])";
+  const live54260NestCatch =
+    "switch(pj[pB]=pv[en(IT.kY)](pH,1),py=pj[pQ]^255&96+pg[pH],pU=pj[pQ]+py,pj[pQ]=pv[en(IT.pj)](pU*pU*54260+43539*pU,20295)&255,py){case 191:s8[en(IT.kl)](this);break;}";
+  const live54260NestF = extractFetchQuadratic(live54260NestHappy);
+  const live54260NestFc = extractFetchQuadratic(live54260NestCatch);
+  const live54260NestSwitch = fetchLoopSwitchLogSites(
+    live54260NestHappy,
+    live54260NestHappy.indexOf("54260"),
+  );
+  const caseCallLogSrc =
+    "L=st[k]+x,st[k]=255&L*L*54260+L*43539+20295,x){case 220:Jj[Hq](this);break;case 151:JY[Hq](this);break;case 1:Amb[Hq](this);break;} function Jj(a){return a} function JY(a){return a} function Amb(a){return a} function Amb2(a){return a}";
+  const caseCallSw = fetchLoopSwitchLogSites(caseCallLogSrc, caseCallLogSrc.indexOf("54260"));
+  const caseCallLogs = fetchLoopCaseCallLogSites(
+    caseCallLogSrc,
+    caseCallLogSrc.indexOf("54260"),
+    caseCallSw,
+  );
+  const switchKwSites = fetchLoopSwitchKeywordSites(live54260NestHappy, live54260NestSwitch);
   const live54260HelperPair =
     "Kv[iX(Os.g)](W,W)*54260+Kv[iX(Os.KQ)](W,43539),20295)&255,B){case 191:x7[iX(Os.KJ)](this);break;";
   const live54260HelperPairF = extractFetchQuadratic(live54260HelperPair);
@@ -2721,6 +2823,25 @@ function selfTestInject() {
       switchCatch.length === 1 &&
       switchCatch[0].opVar === "KE" &&
       switchCatch[0].mixVar === "Kw" &&
+      live54260NestF &&
+      live54260NestF.keyMul === 54260 &&
+      live54260NestF.keyQuadB === 43539 &&
+      live54260NestF.keyAdd === 20295 &&
+      live54260NestF.byteBias === 160 &&
+      live54260NestF.spelling === "helper(mix*mix,mul),mix*b),add)&255" &&
+      live54260NestFc &&
+      live54260NestFc.keyMul === 54260 &&
+      live54260NestFc.keyQuadB === 43539 &&
+      live54260NestFc.keyAdd === 20295 &&
+      live54260NestSwitch.length === 1 &&
+      live54260NestSwitch[0].opVar === "x" &&
+      live54260NestSwitch[0].mixVar === "L" &&
+      switchKwSites.length === 1 &&
+      live54260NestHappy.slice(switchKwSites[0].idx, switchKwSites[0].idx + 6) === "switch" &&
+      caseCallSw.length === 1 &&
+      caseCallLogs.some((x) => x.why === "caseCallLog" && x.caseOp === 220 && x.name === "Jj") &&
+      caseCallLogs.some((x) => x.why === "caseCallLog" && x.caseOp === 151 && x.name === "JY") &&
+      caseCallLogSrc.slice(caseCallLogs.find((x) => x.name === "Jj").idx, caseCallLogs.find((x) => x.name === "Jj").idx + 2) === "Jj" &&
       injectIframe === false &&
       falseLinFirstF &&
       falseLinFirstF.keyMul === 55067 &&
@@ -3472,7 +3593,18 @@ async function trySetFetchLoopBp(session, s, scriptSource, loc) {
         actIdx != null &&
         braceIdx != null &&
         actIdx > braceIdx + 20;
-      if (snappedPastImm || snappedOutside || snappedBeforeSwitchBrace || snappedIntoCaseBody) {
+      const snappedToHandlerFn =
+        loc.why === "caseCallLog" &&
+        actIdx != null &&
+        loc.idx != null &&
+        Math.abs(actIdx - loc.idx) > 80;
+      if (
+        snappedPastImm ||
+        snappedOutside ||
+        snappedBeforeSwitchBrace ||
+        snappedIntoCaseBody ||
+        snappedToHandlerFn
+      ) {
         await session
           .send("Debugger.removeBreakpoint", { breakpointId: bp.breakpointId })
           .catch(() => {});
@@ -3489,6 +3621,7 @@ async function trySetFetchLoopBp(session, s, scriptSource, loc) {
           outside: !!snappedOutside,
           beforeSwitchBrace: !!snappedBeforeSwitchBrace,
           intoCaseBody: !!snappedIntoCaseBody,
+          toHandlerFn: !!snappedToHandlerFn,
         });
         continue;
       }
@@ -3550,6 +3683,88 @@ async function setFetchLoopBreakpointNear(session, s, scriptSource, idx) {
   recordAmbiguousHandlerNames(scriptSource, idx);
   if (fetchTuples) {
     const switchSites = fetchLoopSwitchLogSites(scriptSource, idx);
+
+    async function possibleInSwitchRange() {
+      const found = [];
+      const seen = new Set();
+      for (const site of switchSites) {
+        const sw = scriptSource.lastIndexOf("switch(", site.idx);
+        if (sw < 0) continue;
+        const start = sourceLineCol(scriptSource, sw);
+        const endCol = site.columnNumber + 48;
+        try {
+          const r = await session.send("Debugger.getPossibleBreakpoints", {
+            start: {
+              scriptId: s.scriptId,
+              lineNumber: start.lineNumber,
+              columnNumber: start.columnNumber,
+            },
+            end: {
+              scriptId: s.scriptId,
+              lineNumber: site.lineNumber,
+              columnNumber: endCol,
+            },
+          });
+          for (const loc of r.locations || []) {
+            const k = `${loc.lineNumber}:${loc.columnNumber}`;
+            if (seen.has(k)) continue;
+            seen.add(k);
+            const at = indexFromLineCol(scriptSource, loc.lineNumber, loc.columnNumber);
+            found.push({
+              ...site,
+              idx: at,
+              why: "switchPossible",
+              lineNumber: loc.lineNumber,
+              columnNumber: loc.columnNumber,
+            });
+          }
+        } catch (e) {
+          note("possibleBpErr", { error: String(e).slice(0, 180) });
+        }
+      }
+      note("fetchLoopSwitchPossible", {
+        n: found.length,
+        cols: found.map((x) => x.columnNumber).slice(0, 16),
+      });
+      return found;
+    }
+
+    async function placeLogSites(sites, via) {
+      let n = 0;
+      const seen = new Set();
+      for (const site of sites || []) {
+        const colKey = `${site.lineNumber}:${site.columnNumber}`;
+        if (seen.has(colKey)) continue;
+        const used = await trySetFetchLoopBp(session, s, scriptSource, {
+          scriptId: s.scriptId,
+          lineNumber: site.lineNumber,
+          columnNumber: site.columnNumber,
+          why: site.why,
+          caseOp: site.caseOp,
+          name: site.name || site.opVar,
+          condition: site.condition,
+          idx: site.idx,
+          switchLog: true,
+        });
+        if (used) {
+          seen.add(used);
+          seen.add(colKey);
+          n++;
+        }
+      }
+      if (n) {
+        note("fetchLoopBpSummary", {
+          placed: fetchLoopBpPlaced,
+          failed: fetchLoopBpFailed,
+          thisScript: n,
+          switchLog: n,
+          via,
+          skippedUniqueBraces: true,
+        });
+      }
+      return n;
+    }
+
     note("fetchLoopSwitchSites", {
       n: switchSites.length,
       sites: switchSites.map((x) => ({
@@ -3561,44 +3776,21 @@ async function setFetchLoopBreakpointNear(session, s, scriptSource, idx) {
         columnNumber: x.columnNumber,
       })),
     });
-    let placedSwitch = 0;
-    const seenSwitch = new Set();
-    for (const site of switchSites) {
-      const colKey = `${site.lineNumber}:${site.columnNumber}`;
-      if (seenSwitch.has(colKey)) continue;
-      const used = await trySetFetchLoopBp(session, s, scriptSource, {
-        scriptId: s.scriptId,
-        lineNumber: site.lineNumber,
-        columnNumber: site.columnNumber,
-        why: site.why,
-        caseOp: site.caseOp,
-        name: site.opVar,
-        condition: site.condition,
-        idx: site.idx,
-        switchLog: true,
-      });
-      if (used) {
-        seenSwitch.add(used);
-        seenSwitch.add(colKey);
-        placedSwitch++;
-      }
-    }
-    if (placedSwitch > 0) {
-      note("fetchLoopBpSummary", {
-        placed: fetchLoopBpPlaced,
-        failed: fetchLoopBpFailed,
-        thisScript: placedSwitch,
-        switchLog: placedSwitch,
-        skippedUniqueBraces: true,
-      });
+    if (await placeLogSites(switchSites, "switchBrace")) return true;
+    if (await placeLogSites(await possibleInSwitchRange(), "switchPossible")) return true;
+    if (await placeLogSites(fetchLoopSwitchKeywordSites(scriptSource, switchSites), "switchKw")) {
       return true;
     }
+    const callLogs = fetchLoopCaseCallLogSites(scriptSource, idx, switchSites);
+    note("fetchLoopCaseCallLogSites", { n: callLogs.length });
+    if (await placeLogSites(callLogs, "caseCallLog")) return true;
     note("fetchLoopSwitchLogMiss", {
       n: switchSites.length,
       error: switchSites.length
-        ? "Could not resolve switchBrace"
+        ? "Could not resolve switchBrace/switchKw/caseCallLog"
         : "no ,op){case N: near fetch marker",
     });
+    return false;
   }
   const sites = fetchLoopBreakpointSites(scriptSource, idx);
   const uniqueCalls = fetchLoopUniqueCallSites(scriptSource, idx);
@@ -3809,7 +4001,14 @@ async function attachSession(session, targetInfo, waitingForDebugger) {
         const fetchHit = hit.some((id) => fetchLoopBreakpoints.has(id));
         const switchLogHit = hit.some((id) => {
           const meta = fetchLoopBpMeta.get(id);
-          return meta && (meta.why === "switchBrace" || meta.switchLog);
+          return (
+            meta &&
+            (meta.switchLog ||
+              meta.why === "switchBrace" ||
+              meta.why === "switchKw" ||
+              meta.why === "switchPossible" ||
+              meta.why === "caseCallLog")
+          );
         });
         if (switchLogHit) {
           note("fetchLoopSwitchLogPause", { n: hit.length });
