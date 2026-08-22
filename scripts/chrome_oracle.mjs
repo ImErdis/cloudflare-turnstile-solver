@@ -442,6 +442,12 @@ function extractFetchQuadratic(html) {
   const helperPairTimesMul = window.match(
     /(\w+),\1\)\*(\d{4,5})\+[\s\S]{0,96}?\(\1,(\d{4,5})\)\+(\d{4,5})&255/,
   );
+  const helperPairCommaAdd = window.match(
+    /(\w+),\1\)\*(\d{4,5})\+[\s\S]{0,96}?\(\1,(\d{4,5})\),(\d{4,5})\)/,
+  );
+  const mulSqBmixPlusAdd = window.match(
+    /(\d{4,5})\*\((\w+)\*\2\)\+(\d{4,5})\*\2\+(\d{4,5}),255/,
+  );
   const mulCommaHelper = window.match(
     /(\d{4,5})\*\((\w+)\*\2\),[\s\S]{0,120}?\(\2,(\d{4,5})\)\),(\d{4,5})\)&255/,
   );
@@ -450,6 +456,7 @@ function extractFetchQuadratic(html) {
   );
   const biasM = window.match(/\]-(\d{2,3}),256\)&255/);
   const biasAdd = window.match(/\[(\w+)\],(\d{2,3})\)\+256/);
+  const biasAddComma = window.match(/\[(\w+)\],(\d{2,3})\),256/);
   const biasPlus = window.match(/\((\d{2,3})\+\w+\[\w+\],255\)/);
   const biasAndAdd = window.match(/255&(\d{2,3})\+\w+\[/);
   const caseM = window.match(/\{case (\d+):/);
@@ -461,7 +468,9 @@ function extractFetchQuadratic(html) {
     starMix ||
     mulTimesSq ||
     mulSqPlusBmix ||
+    mulSqBmixPlusAdd ||
     helperPairTimesMul ||
+    helperPairCommaAdd ||
     mulCommaHelper ||
     sqCommaHelper ||
     alt ||
@@ -506,11 +515,21 @@ function extractFetchQuadratic(html) {
     keyQuadB = Number(mulSqPlusBmix[3]);
     keyAdd = Number(mulSqPlusBmix[4]);
     spelling = "mul*(mix*mix)+b*mix,add";
+  } else if (mulSqBmixPlusAdd) {
+    keyMul = Number(mulSqBmixPlusAdd[1]);
+    keyQuadB = Number(mulSqBmixPlusAdd[3]);
+    keyAdd = Number(mulSqBmixPlusAdd[4]);
+    spelling = "mul*(mix*mix)+b*mix+add,255";
   } else if (helperPairTimesMul) {
     keyMul = Number(helperPairTimesMul[2]);
     keyQuadB = Number(helperPairTimesMul[3]);
     keyAdd = Number(helperPairTimesMul[4]);
     spelling = "helper(mix,mix)*mul+helper(mix,b)+add";
+  } else if (helperPairCommaAdd) {
+    keyMul = Number(helperPairCommaAdd[2]);
+    keyQuadB = Number(helperPairCommaAdd[3]);
+    keyAdd = Number(helperPairCommaAdd[4]);
+    spelling = "helper(mix,mix)*mul+helper(mix,b),add";
   } else if (mulCommaHelper) {
     keyMul = Number(mulCommaHelper[1]);
     keyQuadB = Number(mulCommaHelper[3]);
@@ -541,11 +560,13 @@ function extractFetchQuadratic(html) {
       ? Number(biasM[1])
       : biasAdd
         ? Number(biasAdd[2])
-        : biasPlus
-          ? (256 - Number(biasPlus[1])) & 255
-          : biasAndAdd
-            ? (256 - Number(biasAndAdd[1])) & 255
-            : null,
+        : biasAddComma
+          ? Number(biasAddComma[2])
+          : biasPlus
+            ? (256 - Number(biasPlus[1])) & 255
+            : biasAndAdd
+              ? (256 - Number(biasAndAdd[1])) & 255
+              : null,
     firstSwitchCase: caseM ? Number(caseM[1]) : null,
     spelling,
     note: "HTML formula only; init_key needs opcode tuples. Not FETCH_LIVE.",
@@ -2027,6 +2048,12 @@ function selfTestInject() {
   const live55067HelperPair =
     "tB[tz]=tL[rn(f9.ZM)](tR,tR)*55067+tL[rn(f9.ZT)](tR,8696)+44379&255,tx){case 143:e7";
   const live55067HelperPairF = extractFetchQuadratic(live55067HelperPair);
+  const live55067PairComma =
+    "PW[PE]=Pc[pn(MW.Pv)](Pc[pn(MW.PW)](Pc[pn(MW.Pg)](S,S)*55067+Pc[pn(MW.Pn)](S,8696),44379),255),Q){case 143:q7";
+  const live55067PairCommaF = extractFetchQuadratic(live55067PairComma);
+  const live55067CatchPlus =
+    "Pv=PW[PE]^Pc[pn(MW.Q)](Pc[pn(MW.PL)](PL[Pr],83),256)&255.3,Pn=PW[PE]+Pv,PW[PE]=Pc[pn(MW.jU)](55067*(Pn*Pn)+8696*Pn+44379,255),Pv){case 143:q7";
+  const live55067CatchPlusF = extractFetchQuadratic(live55067CatchPlus);
   const falseLinFirst =
     "x=8696)+44379&255,j){case 143:zz();}" + live55067Bmix;
   const falseLinFirstF = extractFetchQuadratic(falseLinFirst);
@@ -2223,6 +2250,15 @@ function selfTestInject() {
       live55067HelperPairF.keyMul === 55067 &&
       live55067HelperPairF.keyQuadB === 8696 &&
       live55067HelperPairF.keyAdd === 44379 &&
+      live55067PairCommaF &&
+      live55067PairCommaF.keyMul === 55067 &&
+      live55067PairCommaF.keyQuadB === 8696 &&
+      live55067PairCommaF.keyAdd === 44379 &&
+      live55067CatchPlusF &&
+      live55067CatchPlusF.keyMul === 55067 &&
+      live55067CatchPlusF.keyQuadB === 8696 &&
+      live55067CatchPlusF.keyAdd === 44379 &&
+      live55067CatchPlusF.byteBias === 83 &&
       falseLinFirstF &&
       falseLinFirstF.keyMul === 55067 &&
       falseLinFirstS &&
