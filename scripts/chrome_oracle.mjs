@@ -430,11 +430,28 @@ function extractFetchQuadratic(html) {
   const mulTimesSq = window.match(
     /(\d{4,5})\*\((\w+)\*\2\)\+[\s\S]{0,96}?\(\2,(\d{4,5})\)\+(\d{4,5})&255/,
   );
+  const mulCommaHelper = window.match(
+    /(\d{4,5})\*\((\w+)\*\2\),[\s\S]{0,120}?\(\2,(\d{4,5})\)\),(\d{4,5})\)&255/,
+  );
+  const sqCommaHelper = window.match(
+    /(\w+)\*\1\*(\d{4,5}),[\s\S]{0,120}?\(\1,(\d{4,5})\)\)\+(\d{4,5})&255/,
+  );
   const biasM = window.match(/\]-(\d{2,3}),256\)&255/);
   const biasAdd = window.match(/\[(\w+)\],(\d{2,3})\)\+256/);
   const biasPlus = window.match(/\((\d{2,3})\+\w+\[\w+\],255\)/);
+  const biasAndAdd = window.match(/255&(\d{2,3})\+\w+\[/);
   const caseM = window.match(/\{case (\d+):/);
-  const hit = sq || sqPlus || sqAmp || nestMul || starMix || mulTimesSq || alt || mulStar;
+  const hit =
+    sq ||
+    sqPlus ||
+    sqAmp ||
+    nestMul ||
+    starMix ||
+    mulTimesSq ||
+    mulCommaHelper ||
+    sqCommaHelper ||
+    alt ||
+    mulStar;
   if (!hit) return null;
   let keyMul;
   let keyQuadB;
@@ -470,6 +487,16 @@ function extractFetchQuadratic(html) {
     keyQuadB = Number(mulTimesSq[3]);
     keyAdd = Number(mulTimesSq[4]);
     spelling = "mul*(mix*mix)+helper&255";
+  } else if (mulCommaHelper) {
+    keyMul = Number(mulCommaHelper[1]);
+    keyQuadB = Number(mulCommaHelper[3]);
+    keyAdd = Number(mulCommaHelper[4]);
+    spelling = "mul*(mix*mix),helper),add&255";
+  } else if (sqCommaHelper) {
+    keyMul = Number(sqCommaHelper[2]);
+    keyQuadB = Number(sqCommaHelper[3]);
+    keyAdd = Number(sqCommaHelper[4]);
+    spelling = "mix*mix*mul,helper)+add&255";
   } else if (mulStar) {
     keyMul = Number(mulStar[1]);
     keyQuadB = Number(mulStar[4]);
@@ -491,7 +518,9 @@ function extractFetchQuadratic(html) {
         ? Number(biasAdd[2])
         : biasPlus
           ? (256 - Number(biasPlus[1])) & 255
-          : null,
+          : biasAndAdd
+            ? (256 - Number(biasAndAdd[1])) & 255
+            : null,
     firstSwitchCase: caseM ? Number(caseM[1]) : null,
     spelling,
     note: "HTML formula only; init_key needs opcode tuples. Not FETCH_LIVE.",
@@ -580,6 +609,15 @@ function fetchMarkerInSource(src) {
     const marker = String(schedule.keyMul);
     const idx = src.indexOf(marker);
     if (idx >= 0) return { marker, idx, schedule, hasInject: src.includes("__cfOp.push") };
+  }
+  const nested = src.match(/(\d{4,5})\*\([A-Za-z_$][\w$]*\*[A-Za-z_$][\w$]*\)/);
+  const sqMul = src.match(/([A-Za-z_$][\w$]*)\*\1\*(\d{4,5})/);
+  const extra = nested ? nested[1] : sqMul ? sqMul[2] : null;
+  if (extra) {
+    const idx = src.indexOf(extra);
+    if (idx >= 0) {
+      return { marker: extra, idx, schedule, hasInject: src.includes("__cfOp.push") };
+    }
   }
   return null;
 }
@@ -1940,6 +1978,13 @@ function selfTestInject() {
   const packed2Mark = fetchMarkerInSource(packed2Snippet);
   const packed2Sched = extractFetchQuadratic(packed2Snippet);
   const packed2Entry = extractVmEntryKey(packed2Snippet);
+  const live55067Comma =
+    "switch(tB[ta]=j+1,j=255&173+tV[j]^tB[tz],G=tB[tz]+j,tB[tz]=tL[ro(Xa.U)](tL[ro(Xa.j)](55067*(G*G),tL[ro(Xa.tB)](G,8696)),44379)&255.15,j){case 143:e7[ro(Xa.tF)](this);break;} new qz(P)[po(T4.P)](0,144,[])";
+  const live55067Catch =
+    "switch(tB[ta]=tv+1,tx=tB[tz]^tL[ro(Xa.Zb)](tV[tv],83)+256&255.41,tR=tB[tz]+tx,tB[tz]=tL[ro(Xa.Zm)](tR*tR*55067,tL[ro(Xa.G)](tR,8696))+44379&255,tx){case 143:e7[ro(Xa.tv)](this);break;}";
+  const live55067F = extractFetchQuadratic(live55067Comma);
+  const live55067Fc = extractFetchQuadratic(live55067Catch);
+  const live55067Mark = fetchMarkerInSource(live55067Comma);
   const svg8904 = fetchMarkerInSource('width="8904" height="12"');
   const fin = finalizeFetchLoopRows([
     {
@@ -2112,6 +2157,16 @@ function selfTestInject() {
       packed2Sched.byteBias === 217 &&
       packed2Sched.firstSwitchCase === 220 &&
       packed2Entry === 63 &&
+      live55067F &&
+      live55067F.keyMul === 55067 &&
+      live55067F.keyQuadB === 8696 &&
+      live55067F.keyAdd === 44379 &&
+      live55067F.byteBias === 83 &&
+      live55067F.firstSwitchCase === 143 &&
+      live55067Fc &&
+      live55067Fc.keyMul === 55067 &&
+      live55067Mark &&
+      live55067Mark.marker === "55067" &&
       live23196H.html.includes("__cfOp.push") &&
       live23196C.html.includes("__cfOp.push") &&
       live23196F &&
@@ -2969,22 +3024,20 @@ async function attachSession(session, targetInfo, waitingForDebugger) {
             return;
           }
           const locals = {};
-          for (const fr of frames) {
-            for (const sc of fr.scopeChain || []) {
-              if (!sc.object?.objectId) continue;
-              if (sc.type === "global" || sc.type === "with") continue;
-              try {
-                const got = await session.send("Runtime.getProperties", {
-                  objectId: sc.object.objectId,
-                  ownProperties: true,
-                });
-                for (const p of got.result || []) {
-                  if (p.value?.type === "number" && typeof p.value.value === "number") {
-                    locals[p.name] = p.value.value;
-                  }
+          for (const sc of frame.scopeChain || []) {
+            if (!sc.object?.objectId) continue;
+            if (sc.type === "global" || sc.type === "with") continue;
+            try {
+              const got = await session.send("Runtime.getProperties", {
+                objectId: sc.object.objectId,
+                ownProperties: true,
+              });
+              for (const p of got.result || []) {
+                if (p.value?.type === "number" && typeof p.value.value === "number") {
+                  locals[p.name] = p.value.value;
                 }
-              } catch {}
-            }
+              }
+            } catch {}
           }
           row.locals = locals;
           const mixHit = Object.values(locals).find((v) => v >= 256 && v <= 510);
@@ -3007,6 +3060,7 @@ async function attachSession(session, targetInfo, waitingForDebugger) {
             note("fetchLoopTuple", {
               n: liveFetchRaw.length,
               fn: row.fn,
+              vmFrom: row.vmFrom,
               thisType: row.thisType,
               hasG: row.hasG,
               pcSlot: row.pcSlot,
