@@ -35,7 +35,9 @@
  *   ORACLE_SKIP_IFRAME_REWRITE set to 1 to save iframe HTML without Fetch.fulfillRequest
  *                    (packed /fo/ recapture; rewrite can stall a new fetch build)
  *   ORACLE_FETCH_TUPLES set to 1 for a finite fetch-loop Debugger harvest
- *                    ({pc,op,key,byte} then removeBreakpoint). Implies skip iframe rewrite.
+ *                    ({pc,op,key,byte} then removeBreakpoint). Skips unmodified iframe
+ *                    rewrite, but still Fetch.fulfillRequest when injectOpcodeLog matches
+ *                    the live fetch spelling (Chrome 148 removed setScriptSource).
  *                    Always-on fetch-loop BPs stall /fo/ because the HTML stub runs first.
  */
 import fs from "node:fs";
@@ -451,6 +453,10 @@ function extractFetchQuadratic(html) {
   const mulSqBmixPlusAdd = window.match(
     /(\d{4,5})\*\((\w+)\*\2\)\+(\d{4,5})\*\2\+(\d{4,5}),255/,
   );
+  // 54260*(L*L),43539*L),20295),255 — helper comma-add chain.
+  const mulCommaBmix = window.match(
+    /(\d{4,5})\*\((\w+)\*\2\),(\d{4,5})\*\2\),(\d{4,5})\),255/,
+  );
   const mulCommaHelper = window.match(
     /(\d{4,5})\*\((\w+)\*\2\),[\s\S]{0,120}?\(\2,(\d{4,5})\)\),(\d{4,5})\)&255/,
   );
@@ -472,6 +478,7 @@ function extractFetchQuadratic(html) {
     mulTimesSq ||
     mulSqPlusBmix ||
     mulSqBmixPlusAdd ||
+    mulCommaBmix ||
     helperPairTimesMul ||
     helperPairCommaAdd ||
     mulCommaHelper ||
@@ -523,6 +530,11 @@ function extractFetchQuadratic(html) {
     keyQuadB = Number(mulSqBmixPlusAdd[3]);
     keyAdd = Number(mulSqBmixPlusAdd[4]);
     spelling = "mul*(mix*mix)+b*mix+add,255";
+  } else if (mulCommaBmix) {
+    keyMul = Number(mulCommaBmix[1]);
+    keyQuadB = Number(mulCommaBmix[3]);
+    keyAdd = Number(mulCommaBmix[4]);
+    spelling = "mul*(mix*mix),b*mix),add),255";
   } else if (helperPairTimesMul) {
     keyMul = Number(helperPairTimesMul[2]);
     keyQuadB = Number(helperPairTimesMul[3]);
@@ -642,6 +654,9 @@ const FETCH_SOURCE_MARKERS = [
   "31579",
   "59205",
   "55067",
+  "54260",
+  "43539",
+  "20295",
   "I*I*8904",
   "*8904,",
 ];
@@ -965,6 +980,45 @@ function injectOpcodeLog(html, opts = {}) {
     },
   );
 
+  // 54260 happy decode: x=helper(st[key],255&96+arr[x])  (xor as two-arg helper)
+  out = out.replace(
+    /(\w+)=(\w+\[[^\]]{0,80}\])\((\w+)\[(\w+)\],255&(\d{2,3})\+(\w+)\[\1\]\)/g,
+    (_full, op, xorCallee, st, keySlot, add, arr) => {
+      n++;
+      return `${op}=(globalThis.__cfT&&(globalThis.__cfT.key=${st}[${keySlot}]&255,globalThis.__cfT.byte=${arr}[${op}]&255),${xorCallee}(${st}[${keySlot}],255&${add}+${arr}[${op}]))`;
+    },
+  );
+  // 54260 catch decode: pH=st[key]^outer(inner(arr[pc],160)+256,255)
+  out = out.replace(
+    /(\w+)=(\w+)\[(\w+)\]\^(\w+\[[^\]]{0,80}\])\((\w+\[[^\]]{0,80}\])\((\w+)\[(\w+)\],(\d{2,3})\)\+256,255\)/g,
+    (_full, op, st, keySlot, outer, inner, arr, pcVar, bias) => {
+      n++;
+      return `${op}=(globalThis.__cfT&&(globalThis.__cfT.key=${st}[${keySlot}]&255,globalThis.__cfT.byte=${arr}[${pcVar}]&255),${st}[${keySlot}]^${outer}(${inner}(${arr}[${pcVar}],${bias})+256,255))`;
+    },
+  );
+  // 54260 happy key: helper(helper(helper(54260*(L*L),43539*L),20295),255),x)
+  out = out.replace(
+    /(\d{4,5})\*\((\w+)\*\2\),(\d{4,5})\*\2\),(\d{4,5})\),255\),(\w+)\)/g,
+    (_full, mul, mixVar, quadB, add, opVar) => {
+      n++;
+      return logAfterKeyUpdate(
+        `${mul}*(${mixVar}*${mixVar}),${quadB}*${mixVar}),${add}),255`,
+        opVar,
+      );
+    },
+  );
+  // 54260 catch key: 54260*(py*py),helper(py,43539)),20295)&255,pH)
+  out = out.replace(
+    /(\d{4,5})\*\((\w+)\*\2\),([\s\S]{0,96}?\(\2,(\d{4,5})\))\),(\d{4,5})\)&255(?:\.\d+)?,(\w+)\)/g,
+    (_full, mul, mixVar, mid, quadB, add, opVar) => {
+      n++;
+      return logAfterKeyUpdate(
+        `${mul}*(${mixVar}*${mixVar}),${mid}),${add})&255`,
+        opVar,
+      );
+    },
+  );
+
   if (jsOnly) {
     if (n > 0 && !out.includes("__cfOracleHook")) {
       out = `${PREAMBLE};${out}`;
@@ -984,10 +1038,12 @@ function injectOpcodeLog(html, opts = {}) {
 }
 
 function logAfterKeyUpdate(prefix, opVar) {
+  const packed =
+    '(function(){try{var g=this&&this.g;if(!g)return false;if(typeof this.l==="number"&&g[this.l]&&g[this.l].length>10000)return true;for(var i=0;i<Math.min(g.length||0,48);i++){var v=g[i];if(v&&v.length>10000)return true;}return false;}catch(e){return false;}})()';
   return (
     `${prefix},(globalThis.__cfT&&(globalThis.__cfT.op=${opVar}&255),` +
     `globalThis.__cfOp=globalThis.__cfOp||[],` +
-    `globalThis.__cfOp.length<2500&&(globalThis.__cfOp.push({` +
+    `globalThis.__cfOp.length<128&&${packed}&&(globalThis.__cfOp.push({` +
     `pc:globalThis.__cfT&&globalThis.__cfT.pc,op:${opVar}&255,` +
     `key:globalThis.__cfT&&globalThis.__cfT.key,byte:globalThis.__cfT&&globalThis.__cfT.byte}),` +
     `console.debug("__cfOp",globalThis.__cfOp[globalThis.__cfOp.length-1])),${opVar})`
@@ -1077,6 +1133,21 @@ function uniqueOpFromFrameNames(
   return null;
 }
 
+/** Top named frame only. Do not walk into a unique caller/callee. */
+function pausedUniqueHandler(
+  frameNames,
+  nameToOp = handlerNameToOp,
+  ambiguous = ambiguousHandlerNames,
+) {
+  for (const n of frameNames || []) {
+    if (!n || String(n).includes("<computed>")) continue;
+    if (ambiguous.has(n)) return null;
+    if (nameToOp.has(n)) return { name: n, op: nameToOp.get(n) };
+    return null;
+  }
+  return null;
+}
+
 function modalPackedBcLen(rows) {
   const counts = new Map();
   for (const r of rows || []) {
@@ -1112,31 +1183,20 @@ function finalizeFetchLoopRows(rows) {
     }
     const adjust = Number.isFinite(pcSlot) && pcSlot >= 1;
     const pc = Number.isFinite(pcSlot) ? (adjust ? pcSlot - 1 : pcSlot) : r.pc;
-    const stackH = uniqueOpFromFrameNames(r.frameNames);
-    const fromCase = r.opFrom === "caseLabel" || Number.isFinite(r.caseOp) || !!stackH;
-    let op = stackH
-      ? stackH.op
-      : fromCase && Number.isFinite(r.caseOp)
-        ? r.caseOp
+    const stackH = pausedUniqueHandler(r.frameNames);
+    const fromCase = r.opFrom === "caseLabel" || Number.isFinite(r.caseOp);
+    let op = fromCase && Number.isFinite(r.caseOp)
+      ? r.caseOp
+      : stackH
+        ? stackH.op
         : r.op;
-    const fn = stackH ? stackH.name : r.fn;
-    const opFrom = stackH
-      ? stackH.name !== r.fn
+    const fn = r.bpName || r.fn || (stackH && stackH.name);
+    const opFrom = fromCase
+      ? "caseLabel"
+      : stackH
         ? "pausedFn"
-        : r.opFrom === "caseLabel" || Number.isFinite(r.caseOp)
-          ? "caseLabel"
-          : "pausedFn"
-      : r.bpWhy === "pausedFn"
-        ? "pausedFn"
-        : fromCase
-          ? "caseLabel"
-          : r.opFrom;
-    const bpCaseOp =
-      stackH && Number.isFinite(r.caseOp) && (r.caseOp & 255) !== stackH.op
-        ? r.caseOp & 255
-        : Number.isFinite(r.bpCaseOp)
-          ? r.bpCaseOp & 255
-          : undefined;
+        : r.opFrom;
+    const bpCaseOp = Number.isFinite(r.bpCaseOp) ? r.bpCaseOp & 255 : undefined;
     let mix = r.mixLocal != null ? r.mixLocal : r.mix;
     let key = r.key;
     let nextKey = Number.isFinite(r.nextKey)
@@ -1189,8 +1249,10 @@ function finalizeFetchLoopRows(rows) {
       caseOp: Number.isFinite(op) ? op & 255 : Number.isFinite(r.caseOp) ? r.caseOp & 255 : undefined,
       opFrom,
       fn,
-      bpWhy: stackH && stackH.name !== r.fn ? "pausedFn" : r.bpWhy,
+      bpWhy: r.bpWhy,
+      bpName: r.bpName,
       bpCaseOp,
+      frameNames: Array.isArray(r.frameNames) ? r.frameNames.slice(0, 6) : undefined,
       vmFrom: r.vmFrom,
       byteVia: Number.isFinite(byte) ? "vm" : undefined,
     };
@@ -2106,6 +2168,15 @@ function selfTestInject() {
   const live55067CatchPlus =
     "Pv=PW[PE]^Pc[pn(MW.Q)](Pc[pn(MW.PL)](PL[Pr],83),256)&255.3,Pn=PW[PE]+Pv,PW[PE]=Pc[pn(MW.jU)](55067*(Pn*Pn)+8696*Pn+44379,255),Pv){case 143:q7";
   const live55067CatchPlusF = extractFetchQuadratic(live55067CatchPlus);
+  const live54260Happy =
+    "if(x=pv[pq],pa[eU(Iw.pb)](x,x))return pv[pb];switch(pv[pq]=x+1,x=pa[eU(Iw.pD)](pv[pB],255&96+pF[x]),L=pa[eU(Iw.x)](pv[pB],x),pv[pB]=pa[eU(Iw.L)](pa[eU(Iw.pJ)](pa[eU(Iw.x)](54260*(L*L),43539*L),20295),255),x){case 191:s7[eU(Iw.pH)](this);break;} new sz(p)[eP(c0.p)](0,166,[])";
+  const live54260Catch =
+    "if(pD=pv[pq],pD!==pD)return pv[pb];switch(pv[pq]=pa[eU(Iw.pJ)](pD,1),pH=pv[pB]^pa[eU(Iw.ki)](pa[eU(Iw.pv)](pF[pD],160)+256,255),py=pv[pB]+pH,pv[pB]=pa[eU(Iw.kA)](pa[eU(Iw.kR)](54260*(py*py),pa[eU(Iw.pB)](py,43539)),20295)&255,pH){case 191:s7[eU(Iw.kJ)](this);break;}";
+  const live54260F = extractFetchQuadratic(live54260Happy);
+  const live54260Fc = extractFetchQuadratic(live54260Catch);
+  const live54260Mark = fetchMarkerInSource(live54260Happy);
+  const live54260H = injectOpcodeLog(live54260Happy, { jsOnly: true });
+  const live54260C = injectOpcodeLog(live54260Catch, { jsOnly: true });
   const falseLinFirst =
     "x=8696)+44379&255,j){case 143:zz();}" + live55067Bmix;
   const falseLinFirstF = extractFetchQuadratic(falseLinFirst);
@@ -2186,6 +2257,29 @@ function selfTestInject() {
   );
   const stackW = uniqueOpFromFrameNames(["W", "s9"], stackMap, stackAmb);
   const stackJ = uniqueOpFromFrameNames(["J", "sz"], stackMap, stackAmb);
+  const pausedSl = pausedUniqueHandler(
+    ["x.<computed>", "sl", "sz"],
+    stackMap,
+    stackAmb,
+  );
+  const pausedJ = pausedUniqueHandler(["J", "s9"], stackMap, stackAmb);
+  const pausedS4 = pausedUniqueHandler(["s4", "sh"], new Map([["s4", 51], ["sh", 1]]), stackAmb);
+  handlerNameToOp.set("s4", 51);
+  const finBpNotStack = finalizeFetchLoopRows([
+    {
+      via: "fetchLoop",
+      pcSlot: 160976,
+      caseOp: 33,
+      opFrom: "caseLabel",
+      fn: "s0",
+      bpName: "s0",
+      frameNames: ["s4", "sh"],
+      keySlot: 22,
+      byteAtPcMinus1: 53,
+      bcLen: 50000,
+    },
+  ]);
+  handlerNameToOp.delete("s4");
   return {
     ok:
       a.injected &&
@@ -2333,6 +2427,27 @@ function selfTestInject() {
       live55067CatchPlusF.keyQuadB === 8696 &&
       live55067CatchPlusF.keyAdd === 44379 &&
       live55067CatchPlusF.byteBias === 83 &&
+      live54260F &&
+      live54260F.keyMul === 54260 &&
+      live54260F.keyQuadB === 43539 &&
+      live54260F.keyAdd === 20295 &&
+      live54260F.byteBias === 160 &&
+      live54260F.firstSwitchCase === 191 &&
+      live54260Mark &&
+      live54260Mark.schedule &&
+      live54260Mark.schedule.initKeyCandidate === 166 &&
+      live54260Fc &&
+      live54260Fc.keyMul === 54260 &&
+      live54260Fc.keyQuadB === 43539 &&
+      live54260Fc.keyAdd === 20295 &&
+      live54260Mark &&
+      live54260Mark.marker === "54260" &&
+      live54260H.injected &&
+      live54260H.html.includes("__cfOp.push") &&
+      live54260H.html.includes("pc:x") &&
+      live54260C.injected &&
+      live54260C.html.includes("__cfOp.push") &&
+      live54260C.html.includes("pc:pD") &&
       falseLinFirstF &&
       falseLinFirstF.keyMul === 55067 &&
       falseLinFirstS &&
@@ -2383,6 +2498,15 @@ function selfTestInject() {
       stackW &&
       stackW.name === "W" &&
       stackJ == null &&
+      pausedSl &&
+      pausedSl.op === 24 &&
+      pausedSl.name === "sl" &&
+      pausedJ == null &&
+      pausedS4 &&
+      pausedS4.name === "s4" &&
+      finBpNotStack[0] &&
+      finBpNotStack[0].op === 33 &&
+      finBpNotStack[0].fn === "s0" &&
       svg8904 == null &&
       fin[0] &&
       fin[0].pc === 0 &&
@@ -2579,6 +2703,40 @@ async function onFetchPaused(session, evt) {
         text.slice(0, 400000),
       );
       if (skipIframeRewrite) {
+        if (fetchTuples) {
+          const inj = injectOpcodeLog(text);
+          if (inj.injected && inj.html.includes("__cfOp.push")) {
+            const headers = (evt.responseHeaders || []).filter(
+              (h) => !/^(content-encoding|content-length)$/i.test(h.name),
+            );
+            headers.push({
+              name: "Content-Length",
+              value: String(Buffer.byteLength(inj.html)),
+            });
+            await session.send("Fetch.fulfillRequest", {
+              requestId: evt.requestId,
+              responseCode: evt.responseStatusCode || 200,
+              responseHeaders: headers,
+              body: Buffer.from(inj.html).toString("base64"),
+            });
+            try {
+              fs.writeFileSync(
+                path.join(outDir, `iframe-rewritten-${iframeRewrites}.html`),
+                inj.html.slice(0, 400000),
+              );
+            } catch {}
+            note("iframeRewrite", {
+              url: reqUrl,
+              injected: true,
+              replacements: inj.replacements,
+              bytes: inj.html.length,
+              via: "fetchTuplesInject",
+              fetchSchedule: extractFetchSchedule(text),
+              hasRunProgram: text.includes("runProgram"),
+            });
+            return;
+          }
+        }
         note("iframeSavedNoRewrite", {
           url: reqUrl,
           bytes: text.length,
@@ -3316,8 +3474,8 @@ async function attachSession(session, targetInfo, waitingForDebugger) {
           }
           const frames = (evt.callFrames || []).slice(0, 6);
           const frameNames = frames.map((f) => f.functionName || "");
-          const stackH = uniqueOpFromFrameNames(frameNames);
-          if (!callMeta && !stackH) {
+          const pausedH = pausedUniqueHandler(frameNames);
+          if (!callMeta && !pausedH) {
             if (fname && ambiguousHandlerNames.has(fname)) {
               note("fetchLoopSkipAmbiguous", { fn: fname });
               return;
@@ -3357,48 +3515,37 @@ async function attachSession(session, targetInfo, waitingForDebugger) {
               }
             }
           }
-          if (!stackH) {
-            const topNamed = frameNames.find((n) => n && !String(n).includes("<computed>"));
-            if (topNamed && ambiguousHandlerNames.has(topNamed)) {
-              note("fetchLoopSkipAmbiguous", { fn: topNamed, bp: callMeta && callMeta.name });
-              return;
-            }
-          }
           const harvestName =
-            (stackH && stackH.name) || (callMeta && callMeta.name) || fname;
+            (callMeta && callMeta.name) || (pausedH && pausedH.name) || fname;
           const row = { via: "fetchLoop", fn: harvestName };
           row.frameNames = frameNames;
           row.hitBreakpoints = hit;
+          if (callMeta && callMeta.name) row.bpName = callMeta.name;
           if (frame.location) {
             row.lineNumber = frame.location.lineNumber;
             row.columnNumber = frame.location.columnNumber;
             row.scriptId = frame.location.scriptId;
           }
           let caseOp;
-          if (stackH) {
-            caseOp = stackH.op;
-            row.bpWhy =
-              callMeta && callMeta.name === stackH.name
-                ? callMeta.why || "handlerFn"
-                : "pausedFn";
-            if (
-              callMeta &&
-              callMeta.caseOp != null &&
-              callMeta.caseOp !== stackH.op
-            ) {
-              row.bpCaseOp = callMeta.caseOp;
-            }
-            row.opFrom = "pausedFn";
-          } else if (callMeta && callMeta.caseOp != null) {
+          if (callMeta && callMeta.caseOp != null) {
             caseOp = callMeta.caseOp;
             row.bpWhy = callMeta.why;
             row.opFrom = "caseLabel";
+            if (pausedH && pausedH.op !== callMeta.caseOp) {
+              row.stackOp = pausedH.op;
+              row.stackFn = pausedH.name;
+            }
+          } else if (pausedH) {
+            caseOp = pausedH.op;
+            row.bpWhy = "pausedFn";
+            row.opFrom = "pausedFn";
           } else {
             for (const id of hit) {
               const meta = fetchLoopBpMeta.get(id);
               if (meta && meta.caseOp != null) {
                 caseOp = meta.caseOp;
                 row.bpWhy = meta.why;
+                if (meta.name) row.bpName = meta.name;
                 break;
               }
             }

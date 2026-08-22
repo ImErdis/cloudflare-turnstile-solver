@@ -26,7 +26,8 @@ use cf::solver::run_program_ops::{
 };
 use cf::solver::run_program_vm::{
     FETCH_BRANCH_B, FETCH_LIVE, FetchParams, naive_one_byte_fetches, opcode_def_in,
-    params_for_magic, params_from_oracle_fetch, verify_oracle_tuple, verify_oracle_tuple_next_key,
+    next_key, params_for_magic, params_from_oracle_fetch, verify_oracle_tuple,
+    verify_oracle_tuple_next_key,
 };
 use cf::solver::fo_body::{
     CHARSET_BRANCH_B, body_chars_in_charset, charset_is_well_formed, classify_fo_body_len,
@@ -201,12 +202,51 @@ const HTML_CANDIDATE_23196: FetchParams = FetchParams {
     key_quad_b: 32_619,
 };
 
+fn row_has_op_byte(f: &Value) -> bool {
+    let op = f.get("op").or_else(|| f.get("caseOp")).and_then(|x| x.as_u64());
+    let byte = f.get("byte").and_then(|x| x.as_u64());
+    op.is_some() && byte.is_some()
+}
+
+fn row_has_fetch_key(f: &Value) -> bool {
+    f.get("key").and_then(|x| x.as_u64()).is_some()
+}
+
+fn row_has_next_key(f: &Value) -> bool {
+    f.get("nextKey")
+        .or_else(|| f.get("next_key"))
+        .and_then(|x| x.as_u64())
+        .is_some()
+}
+
+/// Prefer inject `{pc,op,key,byte}` over case-label `{pc,op,byte,nextKey}`.
+/// Empty `fetchLoopTuples` must not hide `opcodeFetches`.
 fn harvest_tuple_rows(v: &Value) -> Vec<Value> {
-    v.get("fetchLoopTuples")
-        .or_else(|| v.get("opcodeFetches"))
+    let loop_rows = v
+        .get("fetchLoopTuples")
         .and_then(|x| x.as_array())
         .cloned()
-        .unwrap_or_default()
+        .unwrap_or_default();
+    let op_rows = v
+        .get("opcodeFetches")
+        .and_then(|x| x.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let complete: Vec<Value> = op_rows
+        .iter()
+        .chain(loop_rows.iter())
+        .filter(|f| row_has_op_byte(f) && row_has_fetch_key(f))
+        .cloned()
+        .collect();
+    if !complete.is_empty() {
+        return complete;
+    }
+    loop_rows
+        .iter()
+        .chain(op_rows.iter())
+        .filter(|f| row_has_op_byte(f) && row_has_next_key(f))
+        .cloned()
+        .collect()
 }
 
 fn html_candidate_from_oracle(v: &Value) -> Option<FetchParams> {
@@ -263,16 +303,20 @@ fn verify_case_tuples_file(path: &PathBuf) -> Result<Value> {
                 .or_else(|| f.get("caseOp"))
                 .and_then(|x| x.as_u64())
                 .unwrap_or(0) as u8;
-            let next_key = f
+            let fetch_key = f.get("key").and_then(|x| x.as_u64()).map(|n| n as u8);
+            let next_k = f
                 .get("nextKey")
                 .or_else(|| f.get("next_key"))
                 .and_then(|x| x.as_u64())
                 .map(|n| n as u8);
-            let Some(nk) = next_key else {
-                fail.push(json!({"i": i, "pc": pc, "error": "missing nextKey"}));
-                continue;
+            let result = if let Some(key) = fetch_key {
+                verify_oracle_tuple(params, pc, key, byte, op).map(|()| key)
+            } else if let Some(nk) = next_k {
+                verify_oracle_tuple_next_key(params, pc, op, byte, nk)
+            } else {
+                Err("missing key and nextKey".to_string())
             };
-            match verify_oracle_tuple_next_key(params, pc, op, byte, nk) {
+            match result {
                 Ok(key) => {
                     ok += 1;
                     recovered.push(json!({
@@ -280,7 +324,7 @@ fn verify_case_tuples_file(path: &PathBuf) -> Result<Value> {
                         "pc": pc,
                         "op": op,
                         "byte": byte,
-                        "nextKey": nk,
+                        "nextKey": next_k,
                         "fetchKey": key,
                     }));
                 }
@@ -289,9 +333,32 @@ fn verify_case_tuples_file(path: &PathBuf) -> Result<Value> {
                     "pc": pc,
                     "op": op,
                     "byte": byte,
-                    "nextKey": nk,
+                    "nextKey": next_k,
+                    "key": fetch_key,
                     "error": e,
                 })),
+            }
+        }
+        let mut chain_fail = Vec::new();
+        if rows.iter().all(row_has_fetch_key) && rows.len() >= 2 {
+            for w in rows.windows(2) {
+                let k0 = w[0].get("key").and_then(|x| x.as_u64()).unwrap() as u8;
+                let op0 = w[0]
+                    .get("op")
+                    .or_else(|| w[0].get("caseOp"))
+                    .and_then(|x| x.as_u64())
+                    .unwrap_or(0) as u8;
+                let k1 = w[1].get("key").and_then(|x| x.as_u64()).unwrap() as u8;
+                let got = next_key(params, k0, op0);
+                if got != k1 {
+                    chain_fail.push(json!({
+                        "pc": w[0].get("pc"),
+                        "op": op0,
+                        "key": k0,
+                        "nextRowKey": k1,
+                        "expectedNextKey": got,
+                    }));
+                }
             }
         }
         reports.push(json!({
@@ -301,14 +368,15 @@ fn verify_case_tuples_file(path: &PathBuf) -> Result<Value> {
             "fail": fail.len(),
             "recovered": recovered,
             "errors": fail,
-            "allOk": fail.is_empty() && ok > 0,
+            "keyChainFail": chain_fail,
+            "allOk": fail.is_empty() && ok > 0 && chain_fail.is_empty(),
         }));
     }
     Ok(json!({
         "path": path.display().to_string(),
         "rowCount": rows.len(),
         "marker": marker,
-        "note": "HTML 23196 is a candidate test only. Do not assign FETCH_LIVE. Quote mismatches.",
+        "note": "HTML candidate is a test only. Do not assign FETCH_LIVE. Quote mismatches.",
         "candidates": reports,
     }))
 }
