@@ -1,0 +1,11 @@
+{
+  "name": "cf-chrome-oracle",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "oracle": "node chrome_oracle.mjs"
+  },
+  "dependencies": {
+    "puppeteer-core": "^24.15.0"
+  }
+}

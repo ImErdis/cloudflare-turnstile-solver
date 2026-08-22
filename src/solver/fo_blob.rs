@@ -1,6 +1,8 @@
 use crate::reverse::encryption::decrypt_cloudflare_response;
 use crate::solver::protocol::looks_like_javascript;
-use crate::solver::run_program::{PACKED_RUN_PROGRAM_PREFIX, analyze_packed_run_program};
+use crate::solver::run_program::{
+    PACKED_RUN_PROGRAM_PREFIX, PACKED_RUN_PROGRAM_PREFIX_B, analyze_packed_run_program,
+};
 use anyhow::Context;
 use serde::Serialize;
 
@@ -29,11 +31,11 @@ impl FoBlobAnalysis {
                 self.decrypt_prefix,
                 self.run_program_gap
                     .as_deref()
-                    .unwrap_or("runProgram_opcode_map")
+                    .unwrap_or(crate::solver::run_program_vm::NEXT_GAP)
             )
         } else if self.looks_like_json_error {
             format!(
-                "/fo/ returned JSON error (d_len={:?}); iframe POSTs a compressed init payload with cf-chl, GET without that body 400s",
+                "/fo/ returned JSON error (d_len={:?}); iframe POSTs a compressed init payload (f4) with cf-chl, GET without that body 400s",
                 self.json_error_d_len
             )
         } else if self.decrypt_ok {
@@ -117,7 +119,9 @@ pub fn is_packed_run_program(plain: &str) -> bool {
     if looks_like_javascript(plain) {
         return false;
     }
-    if plain.starts_with(PACKED_RUN_PROGRAM_PREFIX) {
+    if plain.starts_with(PACKED_RUN_PROGRAM_PREFIX)
+        || plain.starts_with(PACKED_RUN_PROGRAM_PREFIX_B)
+    {
         return true;
     }
     // Packed iframe programs are printable ASCII in '+'..='z', no spaces.

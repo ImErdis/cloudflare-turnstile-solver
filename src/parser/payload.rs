@@ -9,6 +9,9 @@ use oxc_ast_visit::{
     Visit,
 };
 
+/// Walks orchestrate-era JS for `setTimeout(fn, 100, …, { literal })`.
+/// Live iframe assigns that literal to a temp and passes the identifier, so this
+/// visitor does not see live init keys — see `solver::fo_init_json`.
 #[derive(Default, Debug)]
 pub struct PayloadKeyExtractor {
     check_for_writing: bool,

@@ -3,18 +3,35 @@ use anyhow::{Context, bail};
 use base64::Engine;
 use serde::Serialize;
 
-/// Base64 prefix of every captured `runProgram(...)` argument (iframe inline and
-/// ray-decrypted `/fo/` bodies). The first 16 characters encode
-/// [`RUN_PROGRAM_MAGIC_BYTES`][0..12]; the 17th–18th characters encode byte 13
-/// (`0x78`) plus the high nibble of byte 14 (captures use `0x9x` → `J`).
+/// Base64 prefix of packed `runProgram(...)` on the captured branch-`g` iframe.
+/// The first 16 characters encode [`RUN_PROGRAM_MAGIC_BYTES`][0..12]; the 17th–18th
+/// encode byte 13 (`0x78`) plus the high nibble of byte 14 (captures use `0x9x` → `J`).
 pub const PACKED_RUN_PROGRAM_PREFIX: &str = "ryrCJzUnLCItNTiVeJ";
 
-/// First 13 decoded bytes shared by those packed programs.
+/// Headed Chrome (2026-08-21, platform branch `b`) packed prefix (first 16
+/// chars = 12 magic bytes). The 17th–18th chars vary with byte 14 (`Y`/`Z`).
+pub const PACKED_RUN_PROGRAM_PREFIX_B: &str = "TX5omy48NT82Lp1u";
+
+/// Later same-day Chrome rotation (`71GxwDchICYfNxikQT…`).
+pub const PACKED_RUN_PROGRAM_PREFIX_B_LATE: &str = "71GxwDchICYfNxik";
+
+/// First 13 decoded bytes of branch-`g` packed programs.
 ///
 /// The iframe copies `atob(packed)` into a byte array (`function C`) and runs a
-/// rolling-XOR interpreter (`runProgram`). This crate only unpacks that framing.
+/// rolling-XOR interpreter (`runProgram`). Unpack lives here; the opcode fetch
+/// / switch table is [`crate::solver::run_program_vm`].
 pub const RUN_PROGRAM_MAGIC_BYTES: [u8; 13] = [
     0xaf, 0x2a, 0xc2, 0x27, 0x35, 0x27, 0x2c, 0x22, 0x2d, 0x35, 0x38, 0x95, 0x78,
+];
+
+/// First 13 decoded bytes of live branch-`b` packed programs (`TX5omy48NT82Lp1ueY`).
+pub const RUN_PROGRAM_MAGIC_BYTES_B: [u8; 13] = [
+    0x4d, 0x7e, 0x68, 0x9b, 0x2e, 0x3c, 0x35, 0x3f, 0x36, 0x2e, 0x9d, 0x6e, 0x79,
+];
+
+/// First 13 decoded bytes of the later same-day `b` rotation (`71GxwDchICYfNxikQT`).
+pub const RUN_PROGRAM_MAGIC_BYTES_B_LATE: [u8; 13] = [
+    0xef, 0x51, 0xb1, 0xc0, 0x37, 0x21, 0x20, 0x26, 0x1f, 0x37, 0x18, 0xa4, 0x41,
 ];
 
 /// Stable header size in decoded bytecode (the magic). Two `/fo/` captures from
@@ -80,7 +97,9 @@ pub fn analyze_packed_run_program(packed: &str) -> RunProgramAnalysis {
     };
     let decode_ok = decoded.is_some();
     let bytecode = decoded.unwrap_or_default();
-    let magic_ok = bytecode.starts_with(&RUN_PROGRAM_MAGIC_BYTES);
+    let magic_ok = bytecode.starts_with(&RUN_PROGRAM_MAGIC_BYTES)
+        || bytecode.starts_with(&RUN_PROGRAM_MAGIC_BYTES_B)
+        || bytecode.starts_with(&RUN_PROGRAM_MAGIC_BYTES_B_LATE);
     let magic_hex = bytecode
         .get(..RUN_PROGRAM_MAGIC_LEN.min(bytecode.len()))
         .unwrap_or(&[])
@@ -110,8 +129,8 @@ pub fn analyze_packed_run_program(packed: &str) -> RunProgramAnalysis {
     } else if !magic_ok {
         "bytecode_magic_mismatch"
     } else {
-        // Honest remaining work: iframe opcode map / rolling key, not another framing layer.
-        "runProgram_opcode_map"
+        // Fetch + operands + f4 wrapper + init-JSON shape are mapped; next is the follow-up /fo/ POST.
+        crate::solver::run_program_vm::NEXT_GAP
     };
 
     RunProgramAnalysis {
@@ -216,6 +235,21 @@ mod tests {
             &PACKED_RUN_PROGRAM_PREFIX[..16],
             twelve.trim_end_matches('=')
         );
+        let twelve_b = base64::prelude::BASE64_STANDARD.encode(&RUN_PROGRAM_MAGIC_BYTES_B[..12]);
+        assert_eq!(PACKED_RUN_PROGRAM_PREFIX_B, twelve_b.trim_end_matches('='));
+        let mut raw_b = RUN_PROGRAM_MAGIC_BYTES_B.to_vec();
+        raw_b.push(0x80);
+        let encoded_b = base64::prelude::BASE64_STANDARD.encode(&raw_b);
+        assert!(
+            encoded_b.starts_with(PACKED_RUN_PROGRAM_PREFIX_B),
+            "encoded {encoded_b} prefix {PACKED_RUN_PROGRAM_PREFIX_B}"
+        );
+        let twelve_late =
+            base64::prelude::BASE64_STANDARD.encode(&RUN_PROGRAM_MAGIC_BYTES_B_LATE[..12]);
+        assert_eq!(
+            PACKED_RUN_PROGRAM_PREFIX_B_LATE,
+            twelve_late.trim_end_matches('=')
+        );
     }
 
     #[test]
@@ -232,7 +266,7 @@ mod tests {
         assert!(report.magic_ok);
         assert!(!report.looks_like_javascript);
         assert!(!report.looks_like_zlib);
-        assert_eq!(report.next_gap, "runProgram_opcode_map");
+        assert_eq!(report.next_gap, crate::solver::run_program_vm::NEXT_GAP);
     }
 
     #[test]
@@ -322,7 +356,7 @@ mod tests {
             assert!(report.magic_ok && report.decode_ok, "{label}: {report:?}");
             assert!(!report.looks_like_javascript, "{label} decoded as JS");
             assert!(!report.looks_like_zlib, "{label} looked like zlib");
-            assert_eq!(report.next_gap, "runProgram_opcode_map");
+            assert_eq!(report.next_gap, crate::solver::run_program_vm::NEXT_GAP);
             assert!(
                 report.body_entropy_bits > 6.5,
                 "{label} body entropy {}",
@@ -331,7 +365,20 @@ mod tests {
             bytecodes.push(unpack_packed_run_program(packed).unwrap());
         }
         for bc in &bytecodes {
-            assert_eq!(&bc[..RUN_PROGRAM_MAGIC_LEN], &RUN_PROGRAM_MAGIC_BYTES);
+            assert!(
+                crate::solver::run_program_vm::params_for_magic(bc).is_some(),
+                "unknown magic {:02x?}",
+                &bc[..RUN_PROGRAM_MAGIC_LEN.min(bc.len())]
+            );
+            let (params, table) = crate::solver::run_program_vm::params_for_magic(bc)
+                .expect("captured bytecode magic");
+            let stream =
+                crate::solver::run_program_vm::naive_one_byte_fetches(bc, params, table, 8);
+            assert!(
+                stream.fetches[0].mapped,
+                "magic + documented init must land on a switch opcode, got {}",
+                stream.fetches[0].opcode
+            );
         }
     }
 }

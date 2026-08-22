@@ -8,12 +8,21 @@ use num::{BigInt, Num};
 use once_cell::sync::Lazy;
 use crate::reverse::lz::lz_compress;
 
+/// Live iframe RSA modulus as big-endian hex (leading `00`; 129 bytes). Same on
+/// branch `g` and live `b` (2026-08-21). Exponent is [`RSA_PUBLIC_EXPONENT`].
+/// Derived RSA blobs are still left-padded to 128 bytes.
+pub const PUBLIC_KEY_HEX: &str = "00e9d3dca1328a49ad3403e4badda37a6a13610b608b5099839e1074e720f5a33b2ebd8c2ffd12c09be0015a4635aa9d2022d8f72f90ed11610c3742b0baef5b7da73d7e79aff6cdbdeab72492ce0a858e4c1f4c27a14ebbb4ce3beacfda982fe74463e76f654aab0c597d5e73686ea149023e8f60ae6365a30055fe2c5eb2ebfb";
+
+pub const RSA_PUBLIC_EXPONENT: u32 = 65537;
+
 pub fn encrypt_payload(input: &str, charset: &str, random_bytes: &mut [u8; 128]) -> String {
     assert!(charset.len() >= 64);
     
     let mut output = Vec::new();
 
-    // Overwrite first rand byte to 0 (probably done because of how derivation works)
+    // Orchestrate-era helper: zero N[0] *before* RSA. Live iframe (2026-08-21)
+    // sets N[0]=2 before RSA, then N[0]=0 after, for XTEA. Do not change this
+    // to emit a live `/fo/` body — see `solver::fo_body`.
     random_bytes[0] = 0;
     
     let mut compressed = lz_compress(input);
@@ -108,14 +117,11 @@ fn u8_to_u32_be(bytes: &[u8; 16]) -> [u32; 4] {
 
 // Asymmetric encryption public key used to derive random bytes
 static PUBLIC_KEY: Lazy<BigInt> = Lazy::new(|| {
-    BigInt::from_str_radix(
-        "00e9d3dca1328a49ad3403e4badda37a6a13610b608b5099839e1074e720f5a33b2ebd8c2ffd12c09be0015a4635aa9d2022d8f72f90ed11610c3742b0baef5b7da73d7e79aff6cdbdeab72492ce0a858e4c1f4c27a14ebbb4ce3beacfda982fe74463e76f654aab0c597d5e73686ea149023e8f60ae6365a30055fe2c5eb2ebfb",
-        16
-    ).unwrap()
+    BigInt::from_str_radix(PUBLIC_KEY_HEX, 16).unwrap()
 });
 
 fn derive_bytes_with_public_key(bytes: &[u8; 128]) -> [u8; 128] {
-    let exp = BigInt::from(65537);
+    let exp = BigInt::from(RSA_PUBLIC_EXPONENT);
     let random_value = BigInt::from_bytes_be(Sign::Plus, bytes);
     let encrypted = random_value.modpow(&exp, &PUBLIC_KEY);
     let (_, mut derived_key) = encrypted.to_bytes_be();
@@ -126,4 +132,27 @@ fn derive_bytes_with_public_key(bytes: &[u8; 128]) -> [u8; 128] {
 
     // The unwrap should never ever fail, theoretically.
     <[u8; 128]>::try_from(left_padded).unwrap()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn encrypt_payload_still_zeros_n0_before_rsa() {
+        let mut n = [7u8; 128];
+        n[0] = 2;
+        let charset = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+$X";
+        let out = encrypt_payload("{}", charset, &mut n);
+        assert_eq!(n[0], 0);
+        assert!(!out.is_empty());
+        assert!(!out.contains('='));
+    }
+
+    #[test]
+    fn public_key_hex_is_129_bytes() {
+        assert_eq!(PUBLIC_KEY_HEX.len(), 258);
+        assert_eq!(RSA_PUBLIC_EXPONENT, 65537);
+        assert!(PUBLIC_KEY_HEX.starts_with("00e9d3dc"));
+    }
 }
