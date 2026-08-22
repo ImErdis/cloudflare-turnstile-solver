@@ -3633,7 +3633,7 @@ async function trySetFetchLoopBp(session, s, scriptSource, loc) {
         loc.why === "switchBrace" &&
         actIdx != null &&
         braceIdx != null &&
-        actIdx > braceIdx + 20;
+        actIdx > braceIdx + 12;
       const snappedToHandlerFn =
         loc.why === "caseCallLog" &&
         actIdx != null &&
@@ -3682,10 +3682,10 @@ async function trySetFetchLoopBp(session, s, scriptSource, loc) {
         switchLog: !!(
           loc.switchLog ||
           loc.why === "switchBrace" ||
-          loc.why === "switchKw" ||
-          loc.why === "switchPossible" ||
-          loc.why === "caseCallLog"
+          loc.why === "switchKw"
         ),
+        opVar: loc.opVar || null,
+        mixVar: loc.mixVar || null,
         lineNumber: actual?.lineNumber ?? attempt.lineNumber,
         columnNumber: actual?.columnNumber ?? attempt.columnNumber,
         scriptId: s.scriptId,
@@ -3730,88 +3730,6 @@ async function setFetchLoopBreakpointNear(session, s, scriptSource, idx) {
   recordAmbiguousHandlerNames(scriptSource, idx);
   if (fetchTuples) {
     const switchSites = fetchLoopSwitchLogSites(scriptSource, idx);
-
-    async function possibleInSwitchRange() {
-      const found = [];
-      const seen = new Set();
-      for (const site of switchSites) {
-        const sw = scriptSource.lastIndexOf("switch(", site.idx);
-        if (sw < 0) continue;
-        const start = sourceLineCol(scriptSource, sw);
-        const endCol = site.columnNumber + 48;
-        try {
-          const r = await session.send("Debugger.getPossibleBreakpoints", {
-            start: {
-              scriptId: s.scriptId,
-              lineNumber: start.lineNumber,
-              columnNumber: start.columnNumber,
-            },
-            end: {
-              scriptId: s.scriptId,
-              lineNumber: site.lineNumber,
-              columnNumber: endCol,
-            },
-          });
-          for (const loc of r.locations || []) {
-            const k = `${loc.lineNumber}:${loc.columnNumber}`;
-            if (seen.has(k)) continue;
-            seen.add(k);
-            const at = indexFromLineCol(scriptSource, loc.lineNumber, loc.columnNumber);
-            found.push({
-              ...site,
-              idx: at,
-              why: "switchPossible",
-              lineNumber: loc.lineNumber,
-              columnNumber: loc.columnNumber,
-            });
-          }
-        } catch (e) {
-          note("possibleBpErr", { error: String(e).slice(0, 180) });
-        }
-      }
-      note("fetchLoopSwitchPossible", {
-        n: found.length,
-        cols: found.map((x) => x.columnNumber).slice(0, 16),
-      });
-      return found;
-    }
-
-    async function placeLogSites(sites, via) {
-      let n = 0;
-      const seen = new Set();
-      for (const site of sites || []) {
-        const colKey = `${site.lineNumber}:${site.columnNumber}`;
-        if (seen.has(colKey)) continue;
-        const used = await trySetFetchLoopBp(session, s, scriptSource, {
-          scriptId: s.scriptId,
-          lineNumber: site.lineNumber,
-          columnNumber: site.columnNumber,
-          why: site.why,
-          caseOp: site.caseOp,
-          name: site.name || site.opVar,
-          condition: site.condition,
-          idx: site.idx,
-          switchLog: true,
-        });
-        if (used) {
-          seen.add(used);
-          seen.add(colKey);
-          n++;
-        }
-      }
-      if (n) {
-        note("fetchLoopBpSummary", {
-          placed: fetchLoopBpPlaced,
-          failed: fetchLoopBpFailed,
-          thisScript: n,
-          switchLog: n,
-          via,
-          skippedUniqueBraces: true,
-        });
-      }
-      return n;
-    }
-
     note("fetchLoopSwitchSites", {
       n: switchSites.length,
       sites: switchSites.map((x) => ({
@@ -3823,33 +3741,40 @@ async function setFetchLoopBreakpointNear(session, s, scriptSource, idx) {
         columnNumber: x.columnNumber,
       })),
     });
-    const placedVia = [];
-    if (await placeLogSites(switchSites, "switchBrace")) placedVia.push("switchBrace");
-    if (await placeLogSites(await possibleInSwitchRange(), "switchPossible")) {
-      placedVia.push("switchPossible");
-    }
-    if (await placeLogSites(fetchLoopSwitchKeywordSites(scriptSource, switchSites), "switchKw")) {
-      placedVia.push("switchKw");
-    }
-    const callLogs = fetchLoopCaseCallLogSites(scriptSource, idx, switchSites);
-    note("fetchLoopCaseCallLogSites", { n: callLogs.length });
-    if (await placeLogSites(callLogs, "caseCallLog")) placedVia.push("caseCallLog");
-    if (placedVia.length) {
-      note("fetchLoopBpSummary", {
-        placed: fetchLoopBpPlaced,
-        failed: fetchLoopBpFailed,
-        via: placedVia.join("+"),
-        skippedUniqueBraces: true,
+    const kwSites = fetchLoopSwitchKeywordSites(scriptSource, switchSites);
+    const tries = [...switchSites, ...kwSites];
+    let n = 0;
+    const seen = new Set();
+    for (const site of tries) {
+      const colKey = `${site.lineNumber}:${site.columnNumber}`;
+      if (seen.has(colKey)) continue;
+      const used = await trySetFetchLoopBp(session, s, scriptSource, {
+        scriptId: s.scriptId,
+        lineNumber: site.lineNumber,
+        columnNumber: site.columnNumber,
+        why: site.why,
+        caseOp: site.caseOp,
+        name: site.opVar,
+        opVar: site.opVar,
+        mixVar: site.mixVar,
+        condition: FETCH_LOOP_BP_CONDITION,
+        idx: site.idx,
+        switchLog: true,
       });
-      return true;
+      if (used) {
+        seen.add(used);
+        seen.add(colKey);
+        n++;
+      }
     }
-    note("fetchLoopSwitchLogMiss", {
-      n: switchSites.length,
-      error: switchSites.length
-        ? "Could not resolve switchBrace/switchKw/caseCallLog"
-        : "no ,op){case N: near fetch marker",
+    note("fetchLoopBpSummary", {
+      placed: fetchLoopBpPlaced,
+      failed: fetchLoopBpFailed,
+      thisScript: n,
+      via: "switchPause",
+      skippedUniqueBraces: true,
     });
-    return false;
+    return n > 0;
   }
   const sites = fetchLoopBreakpointSites(scriptSource, idx);
   const uniqueCalls = fetchLoopUniqueCallSites(scriptSource, idx);
@@ -4060,21 +3985,20 @@ async function attachSession(session, targetInfo, waitingForDebugger) {
           return;
         }
         const fetchHit = hit.some((id) => fetchLoopBreakpoints.has(id));
-        const switchLogHit = hit.some((id) => {
-          const meta = fetchLoopBpMeta.get(id);
-          return (
-            meta &&
-            (meta.switchLog ||
-              meta.why === "switchBrace" ||
-              meta.why === "switchKw" ||
-              meta.why === "switchPossible" ||
-              meta.why === "caseCallLog")
-          );
-        });
-        if (switchLogHit) {
-          note("fetchLoopSwitchLogPause", { n: hit.length });
-          return;
-        }
+        const switchMeta = (() => {
+          for (const id of hit) {
+            const meta = fetchLoopBpMeta.get(id);
+            if (
+              meta &&
+              (meta.switchLog ||
+                meta.why === "switchBrace" ||
+                meta.why === "switchKw")
+            ) {
+              return meta;
+            }
+          }
+          return null;
+        })();
         if (fetchHit && frame && liveFetchRaw.length < fetchTupleCap) {
           let callMeta = null;
           for (const id of hit) {
@@ -4091,7 +4015,7 @@ async function attachSession(session, targetInfo, waitingForDebugger) {
           const frames = (evt.callFrames || []).slice(0, 6);
           const frameNames = frames.map((f) => f.functionName || "");
           const pausedH = pausedUniqueHandler(frameNames);
-          if (!callMeta && !pausedH) {
+          if (!switchMeta && !callMeta && !pausedH) {
             if (fname && ambiguousHandlerNames.has(fname)) {
               note("fetchLoopSkipAmbiguous", { fn: fname });
               return;
@@ -4143,7 +4067,11 @@ async function attachSession(session, targetInfo, waitingForDebugger) {
             row.scriptId = frame.location.scriptId;
           }
           let caseOp;
-          if (callMeta && callMeta.caseOp != null) {
+          if (switchMeta) {
+            row.bpWhy = switchMeta.why;
+            row.opFrom = "switchLocal";
+            row.bpName = switchMeta.opVar || row.bpName;
+          } else if (callMeta && callMeta.caseOp != null) {
             caseOp = callMeta.caseOp;
             row.bpWhy = callMeta.why;
             row.opFrom = "caseLabel";
@@ -4175,7 +4103,7 @@ async function attachSession(session, targetInfo, waitingForDebugger) {
             caseOp = uniqueOp != null ? uniqueOp : caseOp;
             if (caseOp != null) row.opFrom = "caseLabel";
           }
-          if (caseOp != null) {
+          if (caseOp != null && !switchMeta) {
             row.caseOp = caseOp;
             row.op = caseOp & 255;
             row.opFrom = row.opFrom || "caseLabel";
@@ -4216,7 +4144,37 @@ async function attachSession(session, targetInfo, waitingForDebugger) {
               row.evalErr = String(e).slice(0, 120);
             }
           }
-          if (caseOp != null) {
+          if (switchMeta && switchMeta.opVar && /^[A-Za-z_$][\w$]*$/.test(switchMeta.opVar)) {
+            const mixVar =
+              switchMeta.mixVar && /^[A-Za-z_$][\w$]*$/.test(switchMeta.mixVar)
+                ? switchMeta.mixVar
+                : null;
+            try {
+              const got = await session.send("Debugger.evaluateOnCallFrame", {
+                callFrameId: frame.callFrameId,
+                expression:
+                  `({op:typeof ${switchMeta.opVar}==="number"?(${switchMeta.opVar}&255):null` +
+                  (mixVar
+                    ? `,mix:typeof ${mixVar}==="number"?${mixVar}:null,key:typeof ${mixVar}==="number"?((${mixVar}-${switchMeta.opVar})&255):null`
+                    : "") +
+                  `})`,
+                returnByValue: true,
+              });
+              const v = got.result?.value;
+              if (v && typeof v.op === "number") {
+                row.op = v.op & 255;
+                row.opFrom = "switchLocal";
+                caseOp = undefined;
+                if (typeof v.mix === "number") row.mixLocal = v.mix;
+                if (typeof v.key === "number") row.key = v.key & 255;
+              } else if (got.exceptionDetails) {
+                row.switchEvalEx = String(got.exceptionDetails.text || "").slice(0, 120);
+              }
+            } catch (e) {
+              row.switchEvalErr = String(e).slice(0, 120);
+            }
+          }
+          if (caseOp != null && row.opFrom !== "switchLocal") {
             row.caseOp = caseOp;
             row.op = caseOp & 255;
             row.opFrom = "caseLabel";
@@ -4225,6 +4183,7 @@ async function attachSession(session, targetInfo, waitingForDebugger) {
             return;
           }
           if (
+            row.opFrom !== "switchLocal" &&
             row.caseOp != null &&
             liveFetchRaw.some((x) => x.caseOp === row.caseOp && (x.bcLen || 0) > 10000)
           ) {
