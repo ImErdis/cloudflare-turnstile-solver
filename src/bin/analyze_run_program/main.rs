@@ -560,6 +560,9 @@ fn verify_oracle_file(path: &PathBuf) -> Result<Value> {
                     }
                 }
                 if let Some(lp) = fj.get("leftoverProbe") {
+                    if lp.get("opcodeRecovered") == Some(&Value::Bool(true)) {
+                        errors.push("leftoverProbe.opcodeRecovered should be false".into());
+                    }
                     if let Some(names) = lp.get("unseenNames").and_then(|x| x.as_array()) {
                         let got: Vec<&str> = names.iter().filter_map(|k| k.as_str()).collect();
                         if got != cf::FOLLOWUP_UNSEEN_EXTRA_IDENT_B {

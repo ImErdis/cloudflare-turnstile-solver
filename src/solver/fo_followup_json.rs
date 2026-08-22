@@ -79,6 +79,11 @@ pub const FOLLOWUP_UNSEEN_EXTRA_IDENT_B: &[&str] = &[
     "DTBF3", "mQiic7", "gNcr3",
 ];
 
+/// Headed leftover probe (2026-08-22): names still on later `f4`, but the write
+/// opcode was not recovered. OOPIF ignores `Fetch.fulfillRequest` rewrite;
+/// fetch-loop Debugger breakpoints stay off (they stalled `/fo/`).
+pub const FOLLOWUP_LEFTOVER_OPCODE_RECOVERED: bool = false;
+
 /// Map a Chrome leftover assignment opcode to a write_path. `None` / unknown
 /// stays `unseen_in_dumps` (inject miss is not a handler story).
 pub fn write_path_from_chrome_opcode(opcode: Option<u8>) -> &'static str {
@@ -154,31 +159,31 @@ pub const FOLLOWUP_FIELD_WRITE_B: &[FollowUpFieldWrite] = &[
     w("SMrTl9", "chl_opt", "host_copy", None,
         "_cf_chl_opt SMrTl9 is the 16-hex ray; follow-up kind string. Not on the init JSON literal. Assignment onto initObj is not in HTML."),
     w("OQbM0", "absent", "unseen_in_dumps", None,
-        "not in 56907 HTML or the HTML-embedded packed stub; Chrome kind undefined (stringify omits)"),
+        "not in 56907 HTML or the HTML-embedded packed stub; Chrome kind undefined (stringify omits). Leftover headed Chrome 2026-08-22: still on later f4; assignment opcode not recovered (OOPIF ignores Fetch rewrite; fetch-loop BP off)."),
     w("xBCsP4", "chl_opt", "host_copy", None,
         "_cf_chl_opt xBCsP4: []; follow-up kind array. Early f4 is init plus this key (no numeric slots) before the later mutated f4."),
     w("UjLjP6", "absent", "unseen_in_dumps", None,
-        "not in 56907 HTML or the HTML-embedded packed stub; Chrome kind function (stringify omits)"),
+        "not in 56907 HTML or the HTML-embedded packed stub; Chrome kind function (stringify omits). Leftover headed Chrome: still on later f4; opcode not recovered."),
     w("YfDjo7", "absent", "unseen_in_dumps", None,
-        "not in 56907 HTML or the HTML-embedded packed stub; Chrome kind undefined"),
+        "not in 56907 HTML or the HTML-embedded packed stub; Chrome kind undefined. Leftover headed Chrome: still on later f4; opcode not recovered."),
     w("Iqrc9", "absent", "unseen_in_dumps", None,
-        "not in 56907 HTML or the HTML-embedded packed stub; Chrome kind undefined"),
+        "not in 56907 HTML or the HTML-embedded packed stub; Chrome kind undefined. Leftover headed Chrome: still on later f4; opcode not recovered."),
     w("OZgbm6", "absent", "unseen_in_dumps", None,
-        "not in 56907 HTML or the HTML-embedded packed stub; Chrome kind function (stringify omits)"),
+        "not in 56907 HTML or the HTML-embedded packed stub; Chrome kind function (stringify omits). Leftover headed Chrome: still on later f4; opcode not recovered."),
     w("pFyv1", "absent", "unseen_in_dumps", None,
-        "not in 56907 HTML or the HTML-embedded packed stub; Chrome kind number"),
+        "not in 56907 HTML or the HTML-embedded packed stub; Chrome kind number. Leftover headed Chrome: still on later f4; opcode not recovered."),
     w("SfUI1", "absent", "unseen_in_dumps", None,
-        "not in 56907 HTML or the HTML-embedded packed stub; Chrome kind array"),
+        "not in 56907 HTML or the HTML-embedded packed stub; Chrome kind array. Leftover headed Chrome: still on later f4; opcode not recovered."),
     w("sqKXG6", "other_object", "unseen_in_dumps", None,
-        "HTML has Xu={\"sqKXG6\":W?W:undefined,...} on an /eb/ error beacon (stack file string), not the /fo/ init literal. Follow-up kind string. Copy onto initObj not in HTML; stub harvest miss."),
+        "HTML has Xu={\"sqKXG6\":W?W:undefined,...} on an /eb/ error beacon (stack file string), not the /fo/ init literal. Follow-up kind string. Copy onto initObj not in HTML; stub harvest miss. Leftover headed Chrome: still on later f4; opcode not recovered."),
     w("HUDi4", "absent", "unseen_in_dumps", None,
-        "not in 56907 HTML or the HTML-embedded packed stub; Chrome kind string"),
+        "not in 56907 HTML or the HTML-embedded packed stub; Chrome kind string. Leftover headed Chrome: still on later f4; opcode not recovered."),
     w("DTBF3", "absent", "unseen_in_dumps", None,
-        "not in 56907 HTML or the HTML-embedded packed stub; Chrome kind string"),
+        "not in 56907 HTML or the HTML-embedded packed stub; Chrome kind string. Leftover headed Chrome: still on later f4; opcode not recovered."),
     w("mQiic7", "string_table", "unseen_in_dumps", None,
-        "semicolon string-table token only; follow-up kind number. Stub harvest miss."),
+        "semicolon string-table token only; follow-up kind number. Stub harvest miss. Leftover headed Chrome: still on later f4; opcode not recovered."),
     w("gNcr3", "absent", "unseen_in_dumps", None,
-        "not in 56907 HTML or the HTML-embedded packed stub; Chrome kind number"),
+        "not in 56907 HTML or the HTML-embedded packed stub; Chrome kind number. Leftover headed Chrome: still on later f4; opcode not recovered."),
     w("MaOkK2", "init_obj", "glue", None,
         "on the init object literal (\"MaOkK2\": host call). Absent from later f4 identKeys. delete/drop not in HTML."),
     w("1..39", "numeric_family", "vm_entry_index", None,
@@ -343,6 +348,7 @@ mod tests {
         assert_eq!(write_path_from_chrome_opcode(Some(227)), "property_set");
         assert_eq!(write_path_from_chrome_opcode(Some(169)), "property_set");
         assert_eq!(write_path_from_chrome_opcode(None), "unseen_in_dumps");
+        assert!(!FOLLOWUP_LEFTOVER_OPCODE_RECOVERED);
         assert_eq!(NEXT_AFTER_FOLLOWUP_JSON, "handler_semantics");
         let path = std::path::Path::new("artifacts/re-out/chrome-oracle/iframe-1.html");
         if path.is_file() {
@@ -438,6 +444,14 @@ mod tests {
                 row["numericSlotKeyCountMax"].as_u64(),
                 Some(FOLLOWUP_NUMERIC_SLOT_KEYCOUNT_MAX_B as u64)
             );
+        }
+        if let Some(lp) = row.get("leftoverProbe") {
+            assert_eq!(lp["opcodeRecovered"], false);
+            assert_eq!(lp["namesRotated"], false);
+            if let Some(names) = lp["unseenNames"].as_array() {
+                let got: Vec<&str> = names.iter().filter_map(|k| k.as_str()).collect();
+                assert_eq!(got, FOLLOWUP_UNSEEN_EXTRA_IDENT_B);
+            }
         }
         if let Some(ident) = row["identKeys"].as_array() {
             let names: Vec<String> = ident

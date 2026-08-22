@@ -191,11 +191,13 @@ is on the init literal and dropped before the later `f4` (`glue`); numeric
 later `f4` kinds: every numeric slot is an **object** with 9..32 own keys
 (entry analog). The other extra ident names are `unseen_in_dumps` after HTML +
 the HTML-embedded 5k `runProgram` stub skip-harvest (stops at `XU`/177). Chrome
-leftover assignment / `defineProperty` probe (`scripts/chrome_oracle.mjs`)
-logs `{pc, opcode, key, valueKind}` on those names and numeric keys — no value
-dump, no crate POST, no fetch-loop Debugger breakpoints (those stalled `/fo/`).
-Skip-harvest is immediates only (`src/solver/run_program_skip.rs`); do not
-execute handlers. Next gap is `handler_semantics`; do not run handlers as a solver.
+leftover (2026-08-22) still sees those 12 names on the later `f4` (`f4-inferred`;
+names did not rotate). Assignment opcode was **not** recovered: the OOPIF
+ignores `Fetch.fulfillRequest` rewrite (`hasInject: false`) and fetch-loop
+Debugger breakpoints stay off. Live HTML fetch is `mix²*39695+mix*3159+64171`
+(not `FETCH_LIVE`). Skip-harvest is immediates only
+(`src/solver/run_program_skip.rs`); do not execute handlers. Next gap is
+`handler_semantics`; do not run handlers as a solver.
 
 `probe_iframe` / `solve_test` should get iframe HTTP 200 + parsed options, then an honest
 failure: orchestrate is not the VM, live `/fo/` without a valid init body 400s. `/cmg/1` 404s
