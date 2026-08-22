@@ -145,6 +145,17 @@ const PREAMBLE = `(() => {
       const keys = Object.keys(obj);
       for (let i = 0; i < keys.length; i++) baseline[keys[i]] = 1;
     } catch (e) {}
+    const def = Object.defineProperty;
+    try {
+      Object.defineProperty = function (o, p, desc) {
+        try {
+          if (o === obj) {
+            __cfLogWrite(p, desc && ("value" in desc) ? desc.value : undefined, "defineProperty");
+          }
+        } catch (e) {}
+        return def.apply(this, arguments);
+      };
+    } catch (e) {}
     const start = Date.now();
     const poll = setInterval(function () {
       try {
@@ -1093,7 +1104,11 @@ function leftoverProbeSummary(writes, extraIdent) {
     ...new Set(extraWrites.map((w) => w.opcode).filter((o) => o != null)),
   ];
   return {
-    status: leftoverHits.length || extraWrites.length || numericWrites.length ? "ran" : "empty",
+    status: leftoverHits.length || extraWrites.length || numericWrites.length
+      ? "ran"
+      : extraNow.some((n) => LEFTOVER_UNSEEN_NAMES.indexOf(n) >= 0)
+        ? "f4-inferred"
+        : "empty",
     writeCount: (writes || []).length,
     leftoverHits,
     leftoverHitCount: leftoverHits.length,
@@ -1191,6 +1206,12 @@ const FO_SHAPE_EXPR = `(() => {
         if (s) {
           try {
             s.writes = (globalThis.__cfWrites || []).slice(0, 80);
+            if ((s.numericKeyCount || 0) === 0 && typeof globalThis.__cfInstallWatch === "function") {
+              const obj = arguments[i];
+              setTimeout(function () {
+                try { globalThis.__cfInstallWatch(obj); } catch (e3) {}
+              }, 0);
+            }
           } catch (e2) {}
           return s;
         }
@@ -1203,6 +1224,11 @@ const FO_SHAPE_EXPR = `(() => {
       if (s) {
         try {
           s.writes = (globalThis.__cfWrites || []).slice(0, 80);
+          if ((s.numericKeyCount || 0) === 0 && typeof globalThis.__cfInstallWatch === "function") {
+            setTimeout(function () {
+              try { globalThis.__cfInstallWatch(a); } catch (e3) {}
+            }, 0);
+          }
         } catch (e2) {}
         return s;
       }
