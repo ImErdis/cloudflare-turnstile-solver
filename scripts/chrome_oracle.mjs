@@ -2112,6 +2112,12 @@ function selfTestInject() {
   const handlerSrc =
     "switch(Q){case 220:Jj[Hq](this);break;case 151:JY[Hq](this);break;case 1:L[Hq](this);break;case 2:L[Hq](this);break;} function Jj(a){return a} function JY(a){return a} function L(a){return a}";
   const handlerSites = fetchLoopHandlerSites(handlerSrc, handlerSrc.indexOf("switch"));
+  const handlerThisGSrc =
+    "switch(Q){case 220:Jj[Hq](this);break;} function Jj(a){var z=this.g;return z}";
+  const handlerThisGSites = fetchLoopHandlerSites(
+    handlerThisGSrc,
+    handlerThisGSrc.indexOf("switch"),
+  );
   return {
     ok:
       a.injected &&
@@ -2286,6 +2292,12 @@ function selfTestInject() {
       handlerSites.some((x) => x.why === "handlerFn" && x.caseOp === 220 && x.name === "Jj") &&
       handlerSites.some((x) => x.why === "handlerFn" && x.caseOp === 151 && x.name === "JY") &&
       handlerSites.every((x) => x.name !== "L") &&
+      handlerThisGSites.some(
+        (x) =>
+          x.why === "handlerFn" &&
+          x.name === "Jj" &&
+          handlerThisGSrc.slice(x.idx, x.idx + 6) === "this.g",
+      ) &&
       svg8904 == null &&
       fin[0] &&
       fin[0].pc === 0 &&
@@ -2715,6 +2727,26 @@ function recordAmbiguousHandlerNames(src, markerIdx) {
   return byName;
 }
 
+/** Pause at `this.g` (before immediates), not the function `{` after a huge object literal. */
+function uniqueHandlerEntryIdx(src, name) {
+  if (!src || !name) return null;
+  const pat = `function ${name}(`;
+  const first = src.indexOf(pat);
+  if (first < 0) return null;
+  const brace = src.indexOf("{", first);
+  if (brace < 0) return null;
+  const nextFn = src.indexOf("function ", brace + 1);
+  const thisG = src.indexOf("this.g", brace);
+  if (
+    thisG >= 0 &&
+    (nextFn < 0 || thisG < nextFn) &&
+    thisG - brace < 4000
+  ) {
+    return thisG;
+  }
+  return brace;
+}
+
 function fetchLoopHandlerSites(src, markerIdx) {
   if (!src || markerIdx == null || markerIdx < 0) return [];
   const byName = collectHandlerCaseOps(src, markerIdx);
@@ -2734,15 +2766,15 @@ function fetchLoopHandlerSites(src, markerIdx) {
       from = i + pat.length;
     }
     if (count !== 1 || first < 0) continue;
-    const brace = src.indexOf("{", first);
-    if (brace < 0 || seenIdx.has(brace)) continue;
-    seenIdx.add(brace);
+    const idx = uniqueHandlerEntryIdx(src, name);
+    if (idx == null || seenIdx.has(idx)) continue;
+    seenIdx.add(idx);
     sites.push({
-      idx: brace,
+      idx,
       why: "handlerFn",
       caseOp: [...ops][0],
       name,
-      ...sourceLineCol(src, brace),
+      ...sourceLineCol(src, idx),
     });
   }
   return sites;
@@ -2857,13 +2889,13 @@ async function setFetchLoopBreakpointNear(session, s, scriptSource, idx) {
   const caseCalls = sites.filter((x) => x.why === "caseCall");
   const cases = sites.filter((x) => x.why === "case");
   const rest = sites.filter((x) => x.why !== "caseCall" && x.why !== "case");
-  const tries = [
-    ...handlers,
+  const fallback = [
     ...cases.slice(12),
     ...caseCalls.slice(12),
     { scriptId: s.scriptId, lineNumber, columnNumber, why: "marker", caseOp: null },
     ...rest,
-  ].map((site) => ({
+  ];
+  const tries = (handlers.length ? handlers : fallback).map((site) => ({
     scriptId: s.scriptId,
     lineNumber: site.lineNumber,
     columnNumber: site.columnNumber,
@@ -3060,6 +3092,32 @@ async function attachSession(session, targetInfo, waitingForDebugger) {
           if (!fname || !handlerNameToOp.has(fname)) {
             note("fetchLoopSkipNonUniqueFn", { fn: fname || "" });
             return;
+          }
+          if (frame.location) {
+            const srcForFn =
+              scriptSources.get(frame.location.scriptId) ||
+              scriptSources.get(String(frame.location.scriptId));
+            const entry = srcForFn ? uniqueHandlerEntryIdx(srcForFn, fname) : null;
+            const pauseIdx = srcForFn
+              ? indexFromLineCol(
+                  srcForFn,
+                  frame.location.lineNumber,
+                  frame.location.columnNumber,
+                )
+              : null;
+            if (
+              entry != null &&
+              pauseIdx != null &&
+              Math.abs(pauseIdx - entry) > 240
+            ) {
+              note("fetchLoopSkipDeepHandler", {
+                fn: fname,
+                pauseIdx,
+                entry,
+                delta: pauseIdx - entry,
+              });
+              return;
+            }
           }
           const row = { via: "fetchLoop", fn: fname };
           const frames = (evt.callFrames || []).slice(0, 6);
