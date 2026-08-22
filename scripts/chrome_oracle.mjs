@@ -408,9 +408,14 @@ function fetchSnippet(html) {
 function extractFetchQuadratic(html) {
   if (!html) return null;
   // Prefer mix² * mul over later helper constants (8696 is key_quad_b, not key_mul).
-  let idx = html.search(/\d{4,5}\*\(([A-Za-z_$][\w$]*)\*\1\)/);
-  if (idx < 0) idx = html.search(/([A-Za-z_$][\w$]*)\*\1\*\d{4,5}/);
-  if (idx < 0) idx = html.search(/([A-Za-z_$][\w$]*),\1\)\*\d{4,5}/);
+  let idx = -1;
+  for (const x of [
+    html.search(/\d{4,5}\*\(([A-Za-z_$][\w$]*)\*\1\)/),
+    html.search(/([A-Za-z_$][\w$]*)\*\1\*\d{4,5}/),
+    html.search(/([A-Za-z_$][\w$]*),\1\)\*\d{4,5}/),
+  ]) {
+    if (x >= 0 && (idx < 0 || x < idx)) idx = x;
+  }
   if (idx < 0) {
     idx = html.search(
       /(\w+)\*\1\*\d{4,5}|,\d{4,5}\),[\s\S]{0,48}\(\w+,\d{4,5}\)/,
@@ -419,6 +424,12 @@ function extractFetchQuadratic(html) {
   const window = idx >= 0 ? html.slice(Math.max(0, idx - 240), idx + 420) : html;
   const sq = window.match(
     /(\w+)\*\1\*(\d{4,5}),[\s\S]{0,96}?\(\1,(\d{4,5})\)\)\+(\d{4,5}),255/,
+  );
+  const sqBareBmix = window.match(
+    /(\w+)\*\1\*(\d{4,5})\+\1\*(\d{4,5})\+(\d{4,5})/,
+  );
+  const sqBareMulB = window.match(
+    /(\w+)\*\1\*(\d{4,5})\+(\d{4,5})\*\1\+(\d{4,5})/,
   );
   const sqPlus = window.match(
     /(\w+)\*\1\*(\d{4,5})\+[\s\S]{0,96}?\(\1,(\d{4,5})\)\+(\d{4,5}),255/,
@@ -457,6 +468,9 @@ function extractFetchQuadratic(html) {
   const mulCommaBmix = window.match(
     /(\d{4,5})\*\((\w+)\*\2\),(\d{4,5})\*\2\),(\d{4,5})\),255/,
   );
+  const mulCommaBmixAmp = window.match(
+    /(\d{4,5})\*\((\w+)\*\2\),(\d{4,5})\*\2\)\+(\d{4,5})&255/,
+  );
   const mulCommaHelper = window.match(
     /(\d{4,5})\*\((\w+)\*\2\),[\s\S]{0,120}?\(\2,(\d{4,5})\)\),(\d{4,5})\)&255/,
   );
@@ -468,9 +482,12 @@ function extractFetchQuadratic(html) {
   const biasAddComma = window.match(/\[(\w+)\],(\d{2,3})\),256/);
   const biasPlus = window.match(/\((\d{2,3})\+\w+\[\w+\],255\)/);
   const biasAndAdd = window.match(/255&(\d{2,3})\+\w+\[/);
+  const biasPlusAmp = window.match(/(\d{2,3})\+\w+\[[^\]]{0,24}\]&255/);
   const caseM = window.match(/\{case (\d+):/);
   const hit =
     sq ||
+    sqBareBmix ||
+    sqBareMulB ||
     sqPlus ||
     sqAmp ||
     nestMul ||
@@ -479,6 +496,7 @@ function extractFetchQuadratic(html) {
     mulSqPlusBmix ||
     mulSqBmixPlusAdd ||
     mulCommaBmix ||
+    mulCommaBmixAmp ||
     helperPairTimesMul ||
     helperPairCommaAdd ||
     mulCommaHelper ||
@@ -495,6 +513,16 @@ function extractFetchQuadratic(html) {
     keyQuadB = Number(sq[3]);
     keyAdd = Number(sq[4]);
     spelling = "mix*mix*mul";
+  } else if (sqBareBmix) {
+    keyMul = Number(sqBareBmix[2]);
+    keyQuadB = Number(sqBareBmix[3]);
+    keyAdd = Number(sqBareBmix[4]);
+    spelling = "mix*mix*mul+mix*b+add";
+  } else if (sqBareMulB) {
+    keyMul = Number(sqBareMulB[2]);
+    keyQuadB = Number(sqBareMulB[3]);
+    keyAdd = Number(sqBareMulB[4]);
+    spelling = "mix*mix*mul+b*mix+add";
   } else if (sqPlus) {
     keyMul = Number(sqPlus[2]);
     keyQuadB = Number(sqPlus[3]);
@@ -535,6 +563,11 @@ function extractFetchQuadratic(html) {
     keyQuadB = Number(mulCommaBmix[3]);
     keyAdd = Number(mulCommaBmix[4]);
     spelling = "mul*(mix*mix),b*mix),add),255";
+  } else if (mulCommaBmixAmp) {
+    keyMul = Number(mulCommaBmixAmp[1]);
+    keyQuadB = Number(mulCommaBmixAmp[3]);
+    keyAdd = Number(mulCommaBmixAmp[4]);
+    spelling = "mul*(mix*mix),b*mix)+add&255";
   } else if (helperPairTimesMul) {
     keyMul = Number(helperPairTimesMul[2]);
     keyQuadB = Number(helperPairTimesMul[3]);
@@ -581,7 +614,9 @@ function extractFetchQuadratic(html) {
             ? (256 - Number(biasPlus[1])) & 255
             : biasAndAdd
               ? (256 - Number(biasAndAdd[1])) & 255
-              : null,
+              : biasPlusAmp
+                ? (256 - Number(biasPlusAmp[1])) & 255
+                : null,
     firstSwitchCase: caseM ? Number(caseM[1]) : null,
     spelling,
     note: "HTML formula only; init_key needs opcode tuples. Not FETCH_LIVE.",
@@ -1046,6 +1081,56 @@ function injectOpcodeLog(html, opts = {}) {
     (_full, op, xorCallee, st, keySlot, addCallee, arr, pcVar, bias) => {
       n++;
       return `${op}=(globalThis.__cfT&&(globalThis.__cfT.key=${st}[${keySlot}]&255,globalThis.__cfT.byte=${arr}[${pcVar}]&255),${xorCallee}(${st}[${keySlot}],${addCallee}(${arr}[${pcVar}],${bias})+256&255))`;
+    },
+  );
+  // 54260: 255&mix*mix*mul+mix*b+add,op
+  out = out.replace(
+    /255&(\w+)\*\1\*(\d{4,5})\+\1\*(\d{4,5})\+(\d{4,5}),(\w+)\)/g,
+    (_full, mixVar, mul, quadB, add, opVar) => {
+      n++;
+      return logAfterKeyUpdate(
+        `255&${mixVar}*${mixVar}*${mul}+${mixVar}*${quadB}+${add}`,
+        opVar,
+      );
+    },
+  );
+  // 54260: helper(mix*mix*mul+b*mix+add,255),op
+  out = out.replace(
+    /(\w+)\*\1\*(\d{4,5})\+(\d{4,5})\*\1\+(\d{4,5}),255\),(\w+)\)/g,
+    (_full, mixVar, mul, quadB, add, opVar) => {
+      n++;
+      return logAfterKeyUpdate(
+        `${mixVar}*${mixVar}*${mul}+${quadB}*${mixVar}+${add},255`,
+        opVar,
+      );
+    },
+  );
+  // 54260: mul*(mix*mix),b*mix)+add&255,op
+  out = out.replace(
+    /(\d{4,5})\*\((\w+)\*\2\),(\d{4,5})\*\2\)\+(\d{4,5})&255(?:\.\d+)?,(\w+)\)/g,
+    (_full, mul, mixVar, quadB, add, opVar) => {
+      n++;
+      return logAfterKeyUpdate(
+        `${mul}*(${mixVar}*${mixVar}),${quadB}*${mixVar})+${add}&255`,
+        opVar,
+      );
+    },
+  );
+  // 54260: helper(st[key],96+arr[op]&255)
+  out = out.replace(
+    /(\w+)=(\w+\[[^\]]{0,80}\])\((\w+)\[(\w+)\],(\d{2,3})\+(\w+)\[\1\]&255/g,
+    (_full, op, xorCallee, st, keySlot, add, arr) => {
+      n++;
+      return `${op}=(globalThis.__cfT&&(globalThis.__cfT.key=${st}[${keySlot}]&255,globalThis.__cfT.byte=${arr}[${op}]&255),${xorCallee}(${st}[${keySlot}],${add}+${arr}[${op}]&255))`;
+    },
+  );
+
+  // 54260 catch decode: xor(st[key], outer(mid(inner(arr[pc],160),256),255))
+  out = out.replace(
+    /(\w+)=(\w+)\[(\w+)\]\^(\w+\[[^\]]{0,80}\])\((\w+\[[^\]]{0,80}\])\((\w+\[[^\]]{0,80}\])\((\w+)\[(\w+)\],(\d{2,3})\),256\),255\)/g,
+    (_full, op, st, keySlot, outer, mid, inner, arr, pcVar, bias) => {
+      n++;
+      return `${op}=(globalThis.__cfT&&(globalThis.__cfT.key=${st}[${keySlot}]&255,globalThis.__cfT.byte=${arr}[${pcVar}]&255),${st}[${keySlot}]^${outer}(${mid}(${inner}(${arr}[${pcVar}],${bias}),256),255))`;
     },
   );
 
@@ -2214,6 +2299,13 @@ function selfTestInject() {
   const live54260PlusF = extractFetchQuadratic(live54260PlusHappy);
   const live54260PlusH = injectOpcodeLog(live54260PlusHappy, { jsOnly: true });
   const live54260PlusC = injectOpcodeLog(live54260PlusCatch, { jsOnly: true });
+  const live54260AmpHappy =
+    "if(B=KI[KQ],B!==B)return KI[Kd];switch(KI[KQ]=KA[iX(fU.KJ)](B,1),B=KA[iX(fU.Kp)](KI[KJ],96+KS[B]&255.77),W=KA[iX(fU.KJ)](KI[KJ],B),KI[KJ]=255&W*W*54260+W*43539+20295,B){case 191:x8[iX(fU.KS)](this);break;} new sz(p)[eP(c0.p)](0,166,[])";
+  const live54260AmpCatch =
+    "if(KE=KI[KQ],KA[iX(fU.g)](KE,KE))return KI[Kd];switch(KI[KQ]=KE+1,Kw=KI[KJ]^KA[iX(fU.Ug)](KA[iX(fU.UB)](KA[iX(fU.UW)](KS[KE],160),256),255),KP=KA[iX(fU.Uk)](KI[KJ],Kw),KI[KJ]=KA[iX(fU.KA)](54260*(KP*KP),43539*KP)+20295&255,Kw){case 191:x8[iX(fU.UT)](this);break;}";
+  const live54260AmpF = extractFetchQuadratic(live54260AmpHappy);
+  const live54260AmpH = injectOpcodeLog(live54260AmpHappy, { jsOnly: true });
+  const live54260AmpC = injectOpcodeLog(live54260AmpCatch, { jsOnly: true });
   const falseLinFirst =
     "x=8696)+44379&255,j){case 143:zz();}" + live55067Bmix;
   const falseLinFirstF = extractFetchQuadratic(falseLinFirst);
@@ -2496,6 +2588,16 @@ function selfTestInject() {
       live54260PlusC.injected &&
       live54260PlusC.html.includes("__cfOp.push") &&
       live54260PlusC.html.includes("pc:pD") &&
+      live54260AmpF &&
+      live54260AmpF.keyMul === 54260 &&
+      live54260AmpF.keyQuadB === 43539 &&
+      live54260AmpF.keyAdd === 20295 &&
+      live54260AmpF.byteBias === 160 &&
+      live54260AmpH.injected &&
+      live54260AmpH.html.includes("__cfOp.push") &&
+      live54260AmpH.html.includes("pc:B") &&
+      live54260AmpC.injected &&
+      live54260AmpC.html.includes("__cfOp.push") &&
       falseLinFirstF &&
       falseLinFirstF.keyMul === 55067 &&
       falseLinFirstS &&
@@ -2751,7 +2853,7 @@ async function onFetchPaused(session, evt) {
         text.slice(0, 400000),
       );
       if (skipIframeRewrite) {
-        if (fetchTuples) {
+        if (fetchTuples && iframeRewrites === 1) {
           const inj = injectOpcodeLog(text);
           if (inj.injected && inj.html.includes("__cfOp.push")) {
             const headers = (evt.responseHeaders || []).filter(
