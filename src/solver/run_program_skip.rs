@@ -1306,4 +1306,93 @@ mod tests {
         );
         assert_eq!(crate::solver::run_program_ops::NEXT_GAP, "handler_semantics");
     }
+
+    #[test]
+    fn leftover4_extra_ident_now_skip_harvest_if_dump_present() {
+        let oracle_path =
+            std::path::Path::new("artifacts/re-out/chrome-oracle-leftover4/oracle.json");
+        let resp_path =
+            std::path::Path::new("artifacts/re-out/chrome-oracle-leftover4/fo-init-response.txt");
+        let ray_path =
+            std::path::Path::new("artifacts/re-out/chrome-oracle-leftover4/fo-init-ray.txt");
+        if !oracle_path.is_file() || !resp_path.is_file() || !ray_path.is_file() {
+            return;
+        }
+        let oracle: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(oracle_path).unwrap()).unwrap();
+        let extra: Vec<String> = oracle
+            .pointer("/leftoverProbe/extraIdentNow")
+            .and_then(|x| x.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert!(
+            extra.iter().any(|n| n == "AmbKQ5"),
+            "leftover4 extraIdentNow {extra:?}"
+        );
+        assert!(
+            extra.iter().any(|n| n == "xBCsP4"),
+            "leftover4 extraIdentNow {extra:?}"
+        );
+        let mul = oracle
+            .pointer("/fetchSchedule/keyMul")
+            .and_then(|x| x.as_u64())
+            .unwrap_or(0);
+        assert_eq!(mul, 40_954);
+        assert_ne!(mul, FETCH_LIVE.key_mul as u64);
+        let html_fetch = FetchParams {
+            label: "html-candidate-40954-unverified",
+            init_pc: 0,
+            init_key: 62,
+            byte_bias: 1,
+            key_mul: 40_954,
+            key_add: 30_072,
+            key_quad_b: 0,
+        };
+        let ray = std::fs::read_to_string(ray_path).unwrap();
+        let ray = ray.trim();
+        let body = std::fs::read_to_string(resp_path).unwrap();
+        let compact: String = body.chars().filter(|c| !c.is_whitespace()).collect();
+        let padded = match compact.len() % 4 {
+            2 => format!("{compact}=="),
+            3 => format!("{compact}="),
+            _ => compact,
+        };
+        let packed = crate::reverse::encryption::decrypt_cloudflare_response(ray, &padded).unwrap();
+        let bc = unpack_packed_run_program(&packed).unwrap();
+        let h = skip_harvest_strings(&bc, html_fetch);
+        let leftover_hits: Vec<&str> = extra
+            .iter()
+            .map(String::as_str)
+            .filter(|n| h.contains_ident(n))
+            .collect();
+        let packed_hits: Vec<&str> = extra
+            .iter()
+            .map(String::as_str)
+            .filter(|n| packed.contains(*n))
+            .collect();
+        eprintln!(
+            "leftover4 40954 skip-harvest stopped={} last_pc={} last_op={:?} instr={} extra={extra:?} leftover_hits={leftover_hits:?} packed_hits={packed_hits:?} bc_len={}",
+            h.stopped,
+            h.last_pc,
+            h.last_opcode,
+            h.instructions,
+            bc.len()
+        );
+        assert!(
+            leftover_hits.is_empty(),
+            "early extraIdentNow in 40954 skip-harvest {leftover_hits:?} stopped={}",
+            h.stopped
+        );
+        assert!(
+            packed_hits.is_empty(),
+            "early extraIdentNow in leftover4 packed plaintext {packed_hits:?}"
+        );
+        assert_eq!(h.stopped, "unparsed_variable");
+        assert_eq!(h.last_opcode, Some(181));
+        assert_eq!(crate::solver::run_program_ops::NEXT_GAP, "handler_semantics");
+    }
 }
