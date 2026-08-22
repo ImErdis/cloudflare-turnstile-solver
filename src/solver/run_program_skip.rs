@@ -1229,4 +1229,81 @@ mod tests {
             "leftover names in tuples27 packed plaintext {packed_leftover:?}"
         );
     }
+
+    #[test]
+    fn leftover1_40954_html_fetch_skip_harvest_if_dump_present() {
+        let resp_path =
+            std::path::Path::new("artifacts/re-out/chrome-oracle-leftover1/fo-init-response.txt");
+        let ray_path =
+            std::path::Path::new("artifacts/re-out/chrome-oracle-leftover1/fo-init-ray.txt");
+        let js_path =
+            std::path::Path::new("artifacts/re-out/chrome-oracle-leftover1/executed-fetch-15.js");
+        if !resp_path.is_file() || !ray_path.is_file() || !js_path.is_file() {
+            return;
+        }
+        let js = std::fs::read_to_string(js_path).unwrap();
+        assert!(js.contains("*40954,30072)&255"), "leftover1 HTML fetch");
+        assert!(js.contains("255+MW[F],255"), "leftover1 (255+byte)&255 bias 1");
+        assert!(!js.contains("function f4("), "compressor is not f4 on leftover1");
+        assert!(js.contains("Mt=function("), "body encoder Mt");
+        assert_eq!(FETCH_LIVE.key_mul, 56_907);
+        let html_fetch = FetchParams {
+            label: "html-candidate-40954-unverified",
+            init_pc: 0,
+            init_key: 62,
+            byte_bias: 1,
+            key_mul: 40_954,
+            key_add: 30_072,
+            key_quad_b: 0,
+        };
+        assert_ne!(html_fetch.key_mul, FETCH_LIVE.key_mul);
+        assert_ne!(html_fetch.key_mul, FETCH_CHROME_2026_08_22_B_5886.key_mul);
+        let ray = std::fs::read_to_string(ray_path).unwrap();
+        let ray = ray.trim();
+        let body = std::fs::read_to_string(resp_path).unwrap();
+        let compact: String = body.chars().filter(|c| !c.is_whitespace()).collect();
+        let padded = match compact.len() % 4 {
+            2 => format!("{compact}=="),
+            3 => format!("{compact}="),
+            _ => compact,
+        };
+        let packed = crate::reverse::encryption::decrypt_cloudflare_response(ray, &padded).unwrap();
+        let bc = unpack_packed_run_program(&packed).unwrap();
+        assert!(
+            bc.len() > 10_000,
+            "unpacked leftover1 bytecode too small {}",
+            bc.len()
+        );
+        let packed_leftover: Vec<&str> = FOLLOWUP_UNSEEN_EXTRA_IDENT_B
+            .iter()
+            .copied()
+            .filter(|n| packed.contains(n))
+            .collect();
+        let h = skip_harvest_strings(&bc, html_fetch);
+        let texts: Vec<&str> = h.strings.iter().map(|s| s.text.as_str()).collect();
+        let leftover_hits: Vec<&str> = FOLLOWUP_UNSEEN_EXTRA_IDENT_B
+            .iter()
+            .copied()
+            .filter(|n| h.contains_ident(n))
+            .collect();
+        eprintln!(
+            "leftover1 40954 skip-harvest stopped={} last_pc={} last_op={:?} instr={} strings={} leftover={leftover_hits:?} packed_leftover={packed_leftover:?} texts={texts:?} bc_len={}",
+            h.stopped,
+            h.last_pc,
+            h.last_opcode,
+            h.instructions,
+            h.strings.len(),
+            bc.len()
+        );
+        assert_eq!(h.params_label, html_fetch.label);
+        assert!(
+            leftover_hits.is_empty(),
+            "56907 leftover names on 40954 skip-harvest {leftover_hits:?}"
+        );
+        assert!(
+            packed_leftover.is_empty(),
+            "56907 leftover names in leftover1 packed plaintext {packed_leftover:?}"
+        );
+        assert_eq!(crate::solver::run_program_ops::NEXT_GAP, "handler_semantics");
+    }
 }

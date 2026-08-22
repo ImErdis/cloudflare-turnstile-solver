@@ -9,7 +9,12 @@
  * widths are PC deltas — not a 1-byte walk. Debugger on `f4` / `wZ` records the
  * plaintext object's **key names and value kinds** (string lengths, not contents).
  * Leftover extra-ident writes are logged as `{pc, opcode, key, valueKind}` via a
- * Proxy / `defineProperty` wrap on the `fn(initObj, fj)` argument — not values.
+ * read-only poll on the `fn(initObj, sendHelper)` argument — not values, and
+ * not by planting stale doorbell names. The later-`f4` ident list rotates; the
+ * live extra set is `leftoverProbe.extraIdentNow`. The body encoder (`Mt=function`
+ * on the 40954 iframe, historical `f4`/`f3`) is the leftover shape hook: send
+ * helper `c` runs `runProgram` then `Mt(X)`. Do not breakpoint the `wZ`
+ * performance logger.
  * Fetch-loop Debugger breakpoints stay off unless `ORACLE_FETCH_TUPLES=1`
  * (finite harvest + large-bytecode condition) or `ORACLE_FETCH_LOOP_BP=1`.
  * Always-on pauses stalled `/fo/` because the HTML stub hits the same loop
@@ -101,7 +106,6 @@ const PREAMBLE = `(() => {
   globalThis.__cfRP = globalThis.__cfRP || [];
   globalThis.__cfFo = globalThis.__cfFo || [];
   globalThis.__cfWrites = globalThis.__cfWrites || [];
-  const __cfDefProp = Object.defineProperty;
   const __cfWatched = typeof WeakSet === "function" ? new WeakSet() : { add: function () {}, has: function () { return false; } };
   const __cfLeftover = {
     OQbM0:1, UjLjP6:1, YfDjo7:1, Iqrc9:1, OZgbm6:1, pFyv1:1, SfUI1:1,
@@ -151,46 +155,10 @@ const PREAMBLE = `(() => {
       if (__cfWatched.has(obj)) return;
       __cfWatched.add(obj);
     } catch (e) { return; }
-    for (const name in __cfLeftover) {
-      if (Object.prototype.hasOwnProperty.call(obj, name)) continue;
-      (function (n) {
-        let cur;
-        try {
-          __cfDefProp(obj, n, {
-            configurable: true,
-            enumerable: false,
-            get: function () { return cur; },
-            set: function (v) {
-              __cfLogWrite(n, v, "set");
-              cur = v;
-              try {
-                __cfDefProp(obj, n, {
-                  configurable: true,
-                  enumerable: true,
-                  writable: true,
-                  value: v
-                });
-              } catch (e2) {}
-            }
-          });
-        } catch (e) {}
-      })(name);
-    }
     const baseline = Object.create(null);
     try {
       const keys = Object.keys(obj);
       for (let i = 0; i < keys.length; i++) baseline[keys[i]] = 1;
-    } catch (e) {}
-    const def = Object.defineProperty;
-    try {
-      Object.defineProperty = function (o, p, desc) {
-        try {
-          if (o === obj) {
-            __cfLogWrite(p, desc && ("value" in desc) ? desc.value : undefined, "defineProperty");
-          }
-        } catch (e) {}
-        return def.apply(this, arguments);
-      };
     } catch (e) {}
     const start = Date.now();
     const poll = setInterval(function () {
@@ -198,7 +166,6 @@ const PREAMBLE = `(() => {
         const keys = Object.keys(obj);
         for (let i = 0; i < keys.length; i++) {
           const k = keys[i];
-          if (__cfLeftover[k]) continue;
           if (/^\\d+$/.test(k) || !baseline[k]) {
             __cfLogWrite(k, obj[k], "poll");
             baseline[k] = 1;
@@ -211,6 +178,7 @@ const PREAMBLE = `(() => {
       } catch (e) { clearInterval(poll); }
     }, 5);
   }
+  globalThis.__cfInstallWatch = __cfInstallWatch;
   function __cfShape(obj, via) {
     if (!obj || typeof obj !== "object" || Array.isArray(obj)) return null;
     const keys = Object.keys(obj);
@@ -402,6 +370,7 @@ function fetchSnippet(html) {
     "*28814",
     "36163",
     "19663",
+    "40954",
   ]) {
     const idx = html.indexOf(marker);
     if (idx >= 0) {
@@ -732,6 +701,7 @@ function extractFetchLinear(html) {
   );
   const biasAdd = window.match(/\[(\w+)\],(\d{2,3})\)\+256/);
   const biasSub = window.match(/\[(\w+)\]-(\d{2,3}),256/);
+  const biasPlus = window.match(/(\d{2,3})\+\w+\[\w+\],255/);
   if (!mulAdd && !plus && !addMix) return null;
   const keyMul = mulAdd ? Number(mulAdd[1]) : plus ? Number(plus[1]) : Number(addMix[1]);
   const keyAdd = mulAdd ? Number(mulAdd[2]) : plus ? Number(plus[2]) : Number(addMix[2]);
@@ -740,11 +710,18 @@ function extractFetchLinear(html) {
     : plus
       ? Number(plus[4])
       : Number(addMix[4]);
+  const byteBias = biasAdd
+    ? Number(biasAdd[2])
+    : biasSub
+      ? Number(biasSub[2])
+      : biasPlus
+        ? (256 - Number(biasPlus[1])) & 255
+        : null;
   return {
     kind: "linear",
     keyMul,
     keyAdd,
-    byteBias: biasAdd ? Number(biasAdd[2]) : biasSub ? Number(biasSub[2]) : null,
+    byteBias,
     firstSwitchCase,
     spelling: mulAdd ? "*mul,add)&255" : plus ? "mul)+add&255" : "(mix,mul),add)&255",
     note: "HTML formula only; init_key needs opcode tuples. Not FETCH_LIVE.",
@@ -799,6 +776,7 @@ const FETCH_SOURCE_MARKERS = [
   "50261",
   "I*I*8904",
   "*8904,",
+  "40954",
 ];
 
 function fetchMarkerInSource(src) {
@@ -1941,27 +1919,33 @@ const LEFTOVER_UNSEEN_NAMES = [
   "HUDi4", "DTBF3", "mQiic7", "gNcr3",
 ];
 
+function leftoverHitRow(name, row) {
+  return {
+    name,
+    ...classifyLeftoverOpcode(row.opcode),
+    opcode: row.opcode == null ? null : row.opcode,
+    via: row.via || null,
+    valueKind: row.valueKind || null,
+    pc: row.pc == null ? null : row.pc,
+  };
+}
+
 function leftoverProbeSummary(writes, extraIdent) {
   const byKey = {};
   for (const w of writes || []) {
     if (w && w.key != null && !byKey[w.key]) byKey[w.key] = w;
   }
+  const extraNow = extraIdent || [];
   const leftoverHits = [];
-  for (const n of LEFTOVER_UNSEEN_NAMES) {
+  const seen = new Set();
+  for (const n of [...LEFTOVER_UNSEEN_NAMES, ...extraNow]) {
+    if (seen.has(n)) continue;
+    seen.add(n);
     const row = byKey[n];
     if (!row) continue;
-    leftoverHits.push({
-      name: n,
-      ...classifyLeftoverOpcode(row.opcode),
-      opcode: row.opcode == null ? null : row.opcode,
-      via: row.via || null,
-      valueKind: row.valueKind || null,
-      pc: row.pc == null ? null : row.pc,
-    });
+    leftoverHits.push(leftoverHitRow(n, row));
   }
-  const extraNow = extraIdent || [];
   const namesRotated =
-    leftoverHits.length === 0 &&
     extraNow.length > 0 &&
     LEFTOVER_UNSEEN_NAMES.every((n) => extraNow.indexOf(n) < 0);
   const numericWrites = (writes || []).filter((w) => w && w.numeric);
@@ -1977,7 +1961,7 @@ function leftoverProbeSummary(writes, extraIdent) {
   return {
     status: leftoverHits.length || extraWrites.length || numericWrites.length
       ? "ran"
-      : extraNow.some((n) => LEFTOVER_UNSEEN_NAMES.indexOf(n) >= 0)
+      : extraNow.length
         ? "f4-inferred"
         : "empty",
     writeCount: (writes || []).length,
@@ -2179,18 +2163,29 @@ function caseOpAt(src, idx) {
   return Number(all[all.length - 1][1]);
 }
 
+function isPerfLogger(scriptSource, brace) {
+  const head = String(scriptSource).slice(brace, brace + 360);
+  return /performance\[/.test(head);
+}
+
+function functionBraceAt(scriptSource, pat) {
+  const idx = scriptSource.indexOf(pat);
+  if (idx < 0) return null;
+  const brace = scriptSource.indexOf("{", idx);
+  if (brace < 0) return null;
+  if (isPerfLogger(scriptSource, brace)) return null;
+  return { ...sourceLineCol(scriptSource, brace), pat, idx };
+}
+
 function compressorBreakpointAt(scriptSource) {
   for (const pat of [
     "function f4(",
-    "function wZ(",
     "f4=function(",
+    "function wZ(",
     "wZ=function(",
   ]) {
-    const idx = scriptSource.indexOf(pat);
-    if (idx < 0) continue;
-    const brace = scriptSource.indexOf("{", idx);
-    if (brace < 0) continue;
-    return { ...sourceLineCol(scriptSource, brace), pat, idx };
+    const hit = functionBraceAt(scriptSource, pat);
+    if (hit) return hit;
   }
   return null;
 }
@@ -2207,6 +2202,41 @@ function sendHelperBreakpointAt(scriptSource) {
   const brace = scriptSource.indexOf("{", idx);
   if (brace < 0) return null;
   return { ...sourceLineCol(scriptSource, brace), pat, idx, name };
+}
+
+/** Body encoder after `runProgram` (`Mt(X)` on the 40954 iframe). Not the `wZ` perf logger. */
+function encoderBreakpointAt(scriptSource) {
+  const send = sendHelperBreakpointAt(scriptSource);
+  if (!send) return null;
+  const bodyStart = scriptSource.indexOf("{", send.idx);
+  const end = braceEnd(scriptSource, bodyStart);
+  if (end < 0) return null;
+  const body = scriptSource.slice(bodyStart, end);
+  const matches = [...body.matchAll(/(\w+)\(([A-Za-z_$][\w$]*)\)/g)];
+  const skip = new Set([
+    "typeof",
+    "return",
+    "if",
+    "for",
+    "while",
+    "switch",
+    "function",
+    send.name,
+  ]);
+  let encoderName = null;
+  for (let i = matches.length - 1; i >= 0; i--) {
+    const name = matches[i][1];
+    if (!skip.has(name)) {
+      encoderName = name;
+      break;
+    }
+  }
+  if (!encoderName) return null;
+  const hit =
+    functionBraceAt(scriptSource, `${encoderName}=function(`) ||
+    functionBraceAt(scriptSource, `function ${encoderName}(`);
+  if (!hit) return null;
+  return { ...hit, name: encoderName, role: "encoder" };
 }
 
 const TUPLE_HARVEST_EXPR = `(function(args) {
@@ -2583,6 +2613,17 @@ function selfTestInject() {
     [{ key: "zzNew1", opcode: 177, via: "set", valueKind: "number", numeric: false }],
     ["zzNew1"],
   );
+  const leftoverInferred = leftoverProbeSummary([], ["zzNew1"]);
+  const wzPerf = compressorBreakpointAt(
+    "void 0;function wZ(wq,lo){if(lo=lS,Mq[x])return;Mq[y]++,Mq[z]=performance[k](),wf()}",
+  );
+  const encSrc =
+    "MO(setTimeout,c,100,k,MS);function c(M,X){typeof Mq===k&&Mq(X,c);return Mt(X)}Mt=function(X){return X}";
+  const encBp = encoderBreakpointAt(encSrc);
+  const lin40954Src =
+    "F=MS[Mg]^MO[Yd(Zr.MW)](255+MW[F],255),MS[Mg]=MO[Yd(Zr.Mp)](MO[Yd(Zr.Mq)](MO[Yd(Zr.V)](MS[Mg]+F,40954),30072),255),F){case 247:bW[Yd(Zr.MT)](this);break;}*40954,30072)&255,MQ){case 247:x();new M9(M)[YG(ZJ.M)](0,62,[])";
+  const lin40954F = extractFetchLinear(lin40954Src);
+  const lin40954Sched = extractFetchSchedule(lin40954Src);
   const live23196Happy =
     "if(K=zV[zh],K!==K)return zV[zM];switch(zV[zh]=zF[Ef(pe.K)](K,1),K=zV[zs]^zF[Ef(pe.zA)](39+zD[K],255),Q=zV[zs]+K,zV[zs]=zF[Ef(pe.zW)](zF[Ef(pe.zR)](zF[Ef(pe.zx)](zF[Ef(pe.zV)](Q,Q),23196),zF[Ef(pe.zI)](Q,32619))+19372,255),K){case 220:Po(this);break;}";
   const live23196Catch =
@@ -2966,11 +3007,28 @@ function selfTestInject() {
       PREAMBLE.includes("setTimeout") &&
       PREAMBLE.includes("__cfWrites") &&
       PREAMBLE.includes("__cfInstallWatch") &&
+      PREAMBLE.includes("globalThis.__cfInstallWatch") &&
       leftoverHit.leftoverHitCount === 1 &&
       leftoverHit.leftoverHits[0].writePath === "property_set" &&
       leftoverHit.leftoverHits[0].opcode === 227 &&
       leftoverRotated.namesRotated === true &&
       leftoverRotated.extraOpcodes[0] === 177 &&
+      leftoverRotated.leftoverHits[0] &&
+      leftoverRotated.leftoverHits[0].name === "zzNew1" &&
+      leftoverInferred.status === "f4-inferred" &&
+      leftoverInferred.extraIdentNow[0] === "zzNew1" &&
+      wzPerf == null &&
+      encBp &&
+      encBp.role === "encoder" &&
+      encBp.name === "Mt" &&
+      encBp.pat === "Mt=function(" &&
+      lin40954F &&
+      lin40954F.keyMul === 40954 &&
+      lin40954F.keyAdd === 30072 &&
+      lin40954F.byteBias === 1 &&
+      lin40954F.firstSwitchCase === 247 &&
+      lin40954Sched &&
+      lin40954Sched.initKeyCandidate === 62 &&
       classifyLeftoverOpcode(226).writePath === "bytecode_string" &&
       classifyLeftoverOpcode(177).writePath === "host_xi" &&
       skipIframeRewrite === false &&
@@ -4272,8 +4330,9 @@ async function attachSession(session, targetInfo, waitingForDebugger) {
             });
             const hit = fetchMarkerInSource(scriptSource);
             const compressor = compressorBreakpointAt(scriptSource);
+            const encoder = encoderBreakpointAt(scriptSource);
             const sendHelper = sendHelperBreakpointAt(scriptSource);
-            if (!hit && !compressor && !sendHelper) return;
+            if (!hit && !compressor && !encoder && !sendHelper) return;
             const hasInject =
               !!(hit && hit.hasInject) || scriptSource.includes("__cfOp.push");
             if (hit) {
@@ -4306,7 +4365,7 @@ async function attachSession(session, targetInfo, waitingForDebugger) {
                 }
               }
             }
-            for (const bpInfo of [compressor, sendHelper]) {
+            for (const bpInfo of [compressor, encoder, sendHelper]) {
               if (!bpInfo) continue;
               const tag = `${s.scriptId}:${bpInfo.pat}`;
               if (compressorScripts.has(tag)) continue;
@@ -4319,7 +4378,13 @@ async function attachSession(session, targetInfo, waitingForDebugger) {
                 },
               });
               if (bp?.breakpointId) compressorBreakpoints.add(bp.breakpointId);
-              note(bpInfo.name ? "sendHelperBp" : "compressorBp", {
+              const kind =
+                bpInfo.role === "encoder"
+                  ? "encoderBp"
+                  : bpInfo.name
+                    ? "sendHelperBp"
+                    : "compressorBp";
+              note(kind, {
                 url: (s.url || "").slice(0, 140),
                 pat: bpInfo.pat,
                 name: bpInfo.name || null,
@@ -4341,8 +4406,7 @@ async function attachSession(session, targetInfo, waitingForDebugger) {
         const hit = evt.hitBreakpoints || [];
         const compressorHit =
           hit.some((id) => compressorBreakpoints.has(id)) ||
-          fname === "f4" ||
-          fname === "wZ";
+          fname === "f4";
         if (compressorHit && frame && liveFo.length < 12) {
           try {
             const got = await session.send("Debugger.evaluateOnCallFrame", {

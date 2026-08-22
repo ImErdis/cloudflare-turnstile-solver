@@ -73,15 +73,15 @@ pub const FOLLOWUP_NUMERIC_SLOT_KEYCOUNT_MIN_B: u32 = 9;
 pub const FOLLOWUP_NUMERIC_SLOT_KEYCOUNT_MAX_B: u32 = 32;
 
 /// Extra ident still `unseen_in_dumps` after HTML + stub skip-harvest + live packed recapture.
-/// Chrome leftover assignment probe watches these names (plus numeric keys).
+/// Names rotate per iframe; the headed probe's live set is `extraIdentNow`, not this list.
 pub const FOLLOWUP_UNSEEN_EXTRA_IDENT_B: &[&str] = &[
     "OQbM0", "UjLjP6", "YfDjo7", "Iqrc9", "OZgbm6", "pFyv1", "SfUI1", "sqKXG6", "HUDi4",
     "DTBF3", "mQiic7", "gNcr3",
 ];
 
-/// Headed leftover probe (2026-08-22): names still on later `f4`, but the write
-/// opcode was not recovered. OOPIF ignores `Fetch.fulfillRequest` rewrite;
-/// fetch-loop Debugger breakpoints stay off (they stalled `/fo/`).
+/// Headed leftover probe (2026-08-22): later-`f4` extras exist on packed2, but the
+/// write opcode was not recovered. Do not hunt this list on a later fetch rotation
+/// (40954 linear / 5886 quadratic). Fetch-loop Debugger breakpoints stay off.
 pub const FOLLOWUP_LEFTOVER_OPCODE_RECOVERED: bool = false;
 
 /// Live `/fo/` packed body recaptured 2026-08-22 (`artifacts/.../chrome-oracle-packed2`,
