@@ -501,7 +501,15 @@ function extractFetchQuadratic(html) {
   const sqCommaHelper = window.match(
     /(\w+)\*\1\*(\d{4,5}),[\s\S]{0,120}?\(\1,(\d{4,5})\)\)\+(\d{4,5})&255/,
   );
+  // helper(mix*mix,mul)+mix*quad,add),255  (tuples25 happy)
+  const nestSqStarBmixCommaAdd = window.match(
+    /(\w+)\*\1,(\d{4,5})\)\+\1\*(\d{4,5}),(\d{4,5})\),255/,
+  );
+  const nestSqStarBmixCommaAddAmp = window.match(
+    /(\w+)\*\1,(\d{4,5})\)\+\1\*(\d{4,5}),(\d{4,5})\)&255/,
+  );
   const biasM = window.match(/\]-(\d{2,3}),256\)&255/);
+  const biasSub = window.match(/\]-(\d{2,3}),256/);
   const biasAdd = window.match(/\[(\w+)\],(\d{2,3})\)\+256/);
   const biasAddComma = window.match(/\[(\w+)\],(\d{2,3})\),256/);
   const biasPlus = window.match(/\((\d{2,3})\+\w+\[\w+\],255\)/);
@@ -528,6 +536,8 @@ function extractFetchQuadratic(html) {
     helperPairCommaBmix ||
     helperPairTimesMul ||
     helperPairCommaAdd ||
+    nestSqStarBmixCommaAdd ||
+    nestSqStarBmixCommaAddAmp ||
     mulCommaHelper ||
     sqCommaHelper ||
     alt ||
@@ -632,6 +642,16 @@ function extractFetchQuadratic(html) {
     keyQuadB = Number(helperPairCommaAdd[3]);
     keyAdd = Number(helperPairCommaAdd[4]);
     spelling = "helper(mix,mix)*mul+helper(mix,b),add";
+  } else if (nestSqStarBmixCommaAdd) {
+    keyMul = Number(nestSqStarBmixCommaAdd[2]);
+    keyQuadB = Number(nestSqStarBmixCommaAdd[3]);
+    keyAdd = Number(nestSqStarBmixCommaAdd[4]);
+    spelling = "helper(mix*mix,mul)+mix*b,add),255";
+  } else if (nestSqStarBmixCommaAddAmp) {
+    keyMul = Number(nestSqStarBmixCommaAddAmp[2]);
+    keyQuadB = Number(nestSqStarBmixCommaAddAmp[3]);
+    keyAdd = Number(nestSqStarBmixCommaAddAmp[4]);
+    spelling = "helper(mix*mix,mul)+mix*b,add)&255";
   } else if (mulCommaHelper) {
     keyMul = Number(mulCommaHelper[1]);
     keyQuadB = Number(mulCommaHelper[3]);
@@ -660,17 +680,19 @@ function extractFetchQuadratic(html) {
     keyAdd,
     byteBias: biasM
       ? Number(biasM[1])
-      : biasAdd
-        ? Number(biasAdd[2])
-        : biasAddComma
-          ? Number(biasAddComma[2])
-          : biasPlus
-            ? (256 - Number(biasPlus[1])) & 255
-            : biasAndAdd
-              ? (256 - Number(biasAndAdd[1])) & 255
-              : biasPlusAmp
-                ? (256 - Number(biasPlusAmp[1])) & 255
-                : null,
+      : biasSub
+        ? Number(biasSub[1])
+        : biasAdd
+          ? Number(biasAdd[2])
+          : biasAddComma
+            ? Number(biasAddComma[2])
+            : biasPlus
+              ? (256 - Number(biasPlus[1])) & 255
+              : biasAndAdd
+                ? (256 - Number(biasAndAdd[1])) & 255
+                : biasPlusAmp
+                  ? (256 - Number(biasPlusAmp[1])) & 255
+                  : null,
     firstSwitchCase: caseM ? Number(caseM[1]) : null,
     spelling,
     note: "HTML formula only; init_key needs opcode tuples. Not FETCH_LIVE.",
@@ -728,6 +750,14 @@ function extractFetchSchedule(html) {
   const initKeyCandidate = extractVmEntryKey(html);
   if (initKeyCandidate != null) s.initKeyCandidate = initKeyCandidate;
   return s;
+}
+
+function byteBiasFromSource(src) {
+  if (!src) return null;
+  const s = extractFetchSchedule(src);
+  if (s && typeof s.byteBias === "number") return s.byteBias;
+  const m = String(src).match(/\]-(\d{2,3}),256/);
+  return m ? Number(m[1]) : null;
 }
 
 /** Markers observed in headed iframe HTML (not FETCH_LIVE). 8904 alone matches SVG. */
@@ -2593,9 +2623,13 @@ function selfTestInject() {
     "if(s=YU[YW],YD[yB(zj.Yw)](s,s))return YU[Yw];switch(YU[YW]=s+1,s=YU[YZ]^YD[yB(zj.s)](YH[s]-187,256)&255,N=YU[YZ]+s,YU[YZ]=YD[yB(zj.Yv)](YD[yB(zj.N)](YD[yB(zj.YG)](YD[yB(zj.YD)](N,N),5886)+YD[yB(zj.YU)](N,50261),1243),255),s){case 135:YY[yB(zj.Yg)](this);break;} new qz(P)[po(T4.P)](0,176,[])";
   const live5886Catch =
     "switch(YU[YW]=Yv+1,YG=YD[yB(zj.Y)](YU[YZ],YD[yB(zj.s)](YH[Yv]-187,256)&255.28),Yg=YD[yB(zj.uN)](YU[YZ],YG),YU[YZ]=YD[yB(zj.YW)](YD[yB(zj.uS)](Yg*Yg,5886)+YD[yB(zj.Yq)](Yg,50261),1243)&255.25,YG){case 135:YY[yB(zj.uQ)](this);break;}";
+  const live5886NestSqStar =
+    "s=YU[YZ]^YD[ym(Do.l)](YD[ym(Do.s)](YH[s]-187,256),255),N=YU[YZ]+s,YU[YZ]=YD[ym(Do.Yw)](YD[ym(Do.N)](YD[ym(Do.Yv)](N*N,5886)+N*50261,1243),255),s){case 135:YY[ym(Do.YG)](this);break;} new qz(P)[po(T4.P)](0,176,[])";
   const live5886F = extractFetchQuadratic(live5886Happy);
   const live5886Fc = extractFetchQuadratic(live5886Catch);
+  const live5886NestF = extractFetchQuadratic(live5886NestSqStar);
   const live5886Mark = fetchMarkerInSource(live5886Happy);
+  const live5886NestMark = fetchMarkerInSource(live5886NestSqStar);
   const live54260NestHappy =
     "if(x=pj[pB],pv[en(IT.pQ)](x,x))return pj[pD];switch(pj[pB]=x+1,x=pj[pQ]^pv[en(IT.N)](pv[en(IT.x)](pg[x],160)+256,255),L=pj[pQ]+x,pj[pQ]=pv[en(IT.pF)](pv[en(IT.pF)](pv[en(IT.pg)](L*L,54260),L*43539),20295)&255.77,x){case 191:s8[en(IT.po)](this);break;} new sz(p)[eP(c0.p)](0,166,[])";
   const live54260NestCatch =
@@ -2994,6 +3028,14 @@ function selfTestInject() {
       live5886Mark.marker === "5886" &&
       live5886Mark.schedule &&
       live5886Mark.schedule.initKeyCandidate === 176 &&
+      live5886NestF &&
+      live5886NestF.keyMul === 5886 &&
+      live5886NestF.keyQuadB === 50261 &&
+      live5886NestF.keyAdd === 1243 &&
+      live5886NestF.byteBias === 187 &&
+      live5886NestMark &&
+      live5886NestMark.schedule &&
+      live5886NestMark.schedule.initKeyCandidate === 176 &&
       extractFetchQuadratic(
         "HJ[Hj]=HT[Xp(Nf.Hu)](HT[Xp(Nf.HP)](HT[Xp(Nf.HS)](HS,HS)*5886,50261*HS)+1243,255),X){case 135:",
       )?.keyMul === 5886 &&
@@ -3920,23 +3962,52 @@ async function dumpPackedBytecode(session, callFrameId, bcLen) {
           return bc;
         }
         var bc=pick(this);
-        if(!bc)return null;
-        var n=bc.length,s="",i=0;
-        while(i<n){
-          var e=Math.min(n,i+8192),ch="";
-          for(var j=i;j<e;j++)ch+=String.fromCharCode(bc[j]&255);
-          s+=ch;i=e;
-        }
-        return {len:n,b64:btoa(s)};
+        if(!bc)return {err:"no-bc"};
+        return {len:bc.length};
       })()`,
       returnByValue: true,
     });
-    const v = got.result?.value;
-    if (!v || !v.b64 || !(v.len > 10000)) return false;
-    const buf = Buffer.from(v.b64, "base64");
-    if (buf.length !== v.len) {
-      note("packedDumpLenMismatch", { jsonLen: v.len, bufLen: buf.length });
+    if (got.exceptionDetails) {
+      note("packedDumpErr", {
+        error: String(got.exceptionDetails.text || "").slice(0, 180),
+      });
+      return false;
     }
+    const meta = got.result?.value;
+    if (!meta || !(meta.len > 10000)) {
+      note("packedDumpSkip", { meta: meta || null });
+      return false;
+    }
+    const chunks = [];
+    const step = 8192;
+    for (let off = 0; off < meta.len; off += step) {
+      const end = Math.min(meta.len, off + step);
+      const part = await session.send("Debugger.evaluateOnCallFrame", {
+        callFrameId,
+        expression: `(function(){
+          function pick(obj){
+            if(!obj||!obj.g)return null;
+            var g=obj.g,bc;
+            if(typeof obj.l==="number"&&g[obj.l]&&g[obj.l].length>10000)bc=g[obj.l];
+            if(!bc){for(var i=0;i<Math.min(g.length||0,64);i++){var v=g[i];if(v&&v.length>10000&&typeof v[0]==="number"){bc=v;break;}}}
+            return bc;
+          }
+          var bc=pick(this);
+          if(!bc)return null;
+          var a=[];
+          for(var i=${off};i<${end};i++)a.push(bc[i]&255);
+          return a;
+        })()`,
+        returnByValue: true,
+      });
+      const arr = part.result?.value;
+      if (!Array.isArray(arr) || !arr.length) {
+        note("packedDumpChunkSkip", { off, end });
+        return false;
+      }
+      chunks.push(Buffer.from(arr));
+    }
+    const buf = Buffer.concat(chunks);
     fs.writeFileSync(path.join(outDir, "packed-bytecode.bin"), buf);
     packedBytecodeDump = true;
     note("packedDump", { len: buf.length, path: "packed-bytecode.bin" });
@@ -4443,8 +4514,13 @@ async function attachSession(session, targetInfo, waitingForDebugger) {
             const sched =
               scriptFetchSchedule.get(row.scriptId) ||
               scriptFetchSchedule.get(String(row.scriptId));
+            const srcForBias =
+              scriptSources.get(row.scriptId) ||
+              scriptSources.get(String(row.scriptId));
             const bias =
-              sched && typeof sched.byteBias === "number" ? sched.byteBias : null;
+              sched && typeof sched.byteBias === "number"
+                ? sched.byteBias
+                : byteBiasFromSource(srcForBias);
             const byte = Number.isFinite(row.byteAtPcMinus1)
               ? row.byteAtPcMinus1
               : row.byteAtPc;
@@ -4467,6 +4543,25 @@ async function attachSession(session, targetInfo, waitingForDebugger) {
               }
               row.switchFn = disc.fn;
               row.switchOpVar = disc.opVar;
+              if (
+                bias != null &&
+                Number.isFinite(row.key) &&
+                Number.isFinite(byte) &&
+                decodeFetchOp(row.key, byte, bias) !== (disc.op & 255)
+              ) {
+                note("fetchLoopSkipDecode", {
+                  fn: fname,
+                  byte,
+                  bias,
+                  key: row.key,
+                  op: disc.op,
+                  dec: decodeFetchOp(row.key, byte, bias),
+                });
+                if (callMeta && callMeta.caseOp != null) {
+                  await removeFetchLoopBreakpointsForCaseOp(callMeta.caseOp);
+                }
+                return;
+              }
             } else if (bias != null && Number.isFinite(byte)) {
               note("fetchLoopSkipDecode", {
                 fn: fname,
