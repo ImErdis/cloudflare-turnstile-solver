@@ -1,15 +1,17 @@
 //! Second `/fo/` POST **envelope** after `runProgram` (headed Chrome oracle).
 //!
-//! Same compressor as the init POST (`f4`, historical `wZ`). `N` is once per
-//! iframe, so the pair shares the encoded RSA prefix (observed: identical 24
-//! chars). XHR helper `fz` does `send(f4(plaintext))` for **both** POSTs.
+//! Same compressor wrapper as the init POST (`f4`, historical `wZ`). `N` is
+//! once per iframe, so the pair shares the encoded RSA prefix (observed:
+//! identical 24 chars). On the 56907 iframe the XHR helper is **`fj`**
+//! (`setTimeout(fj, 100, url, obj)`). **`fz` is a debug logger**, not send.
+//! After onload setup, the visible custom-b64 body encoder is **`f3`**.
 //!
 //! Sequence on the 56907 / branch-`b` iframe:
 //!
-//! 1. Object literal → `setTimeout(fz, 100, url, obj)` → init POST ~3.7–4.2k.
+//! 1. Object literal → `setTimeout(fj, 100, url, obj)` → init POST ~3.7–4.2k.
 //! 2. Init **response** ~822–846k standard base64 → packed `runProgram`.
-//! 3. `runProgram(packed, helper)` return value, if a function, is invoked as
-//!    `fn(initObj, fz)`.
+//! 3. `runProgram(packed, E)` return value, if a function, is invoked as
+//!    `fn(initObj, fj)`. JS responses use `new Function(f5(decoded))(initObj, fj)`.
 //! 4. That path POSTs again to the **same** URL: follow-up ~86–88k custom-b64,
 //!    `cf-chl-ra: 0`, same prefix.
 //! 5. Follow-up **response** ~2.4k — not another packed program.
@@ -19,8 +21,8 @@
 //! header), consistent with a JSON fingerprint object. It is **not** a second
 //! packed `runProgram` string (those are standard base64 on the *response*).
 //!
-//! This module does **not** fill fields, reconstruct `f4`/`wZ` as a live POST,
-//! or execute handlers as a solver.
+//! This module does **not** fill fields, reconstruct `f4`/`wZ`/`f3` as a live
+//! POST, or execute handlers as a solver.
 
 use crate::solver::fo_body::{
     COMPRESSOR_HISTORICAL_NAME, COMPRESSOR_LIVE_NAME, RSA_BLOB_LEN,
@@ -31,8 +33,16 @@ use serde::Serialize;
 /// (follow-up JSON names are snapshotted). See [`crate::solver::fo_followup_json`].
 pub const NEXT_AFTER_FOLLOWUP_SHAPE: &str = crate::solver::fo_followup_json::NEXT_AFTER_FOLLOWUP_JSON;
 
-/// XHR send helper on the 56907 iframe (`case 8: send(f4(n))`).
-pub const SEND_HELPER_LIVE_NAME: &str = "fz";
+/// XHR send + response handler on the 56907 iframe (`setTimeout(fj, 100, …)`).
+/// Minified name rotates (`fj` / historical `fz`).
+pub const SEND_HELPER_LIVE_NAME: &str = "fj";
+
+/// Tiny debug logger on the 56907 iframe. Not the send helper.
+pub const DEBUG_LOGGER_LIVE_NAME: &str = "fz";
+
+/// Visible custom-b64 body encoder called after the timing overwrite (`f3(obj)`).
+/// Optional host wrap remains [`COMPRESSOR_LIVE_NAME`] (`f4`).
+pub const BODY_ENCODER_LIVE_NAME: &str = "f3";
 
 /// First 24 chars of paired POSTs are the RSA blob (same `N`).
 pub const SHARED_PREFIX_CHARS: usize = 24;
@@ -92,6 +102,33 @@ pub const LIVE_FO_FOLLOWUP: FoFollowUpShape = FoFollowUpShape {
     note: "same f4/N wrapper as init (shared 24-char prefix); plaintext is a large compressed blob after runProgram, not a packed program. Do not reconstruct or POST.",
 };
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct RunProgramReturnBridge {
+    pub send_helper: &'static str,
+    pub debug_logger: &'static str,
+    pub body_encoder: &'static str,
+    pub compressor_wrap: &'static str,
+    pub init_schedule: &'static str,
+    pub packed_call: &'static str,
+    pub invoke_if_fn: &'static str,
+    pub js_alt: &'static str,
+    pub note: &'static str,
+}
+
+/// How the 56907 iframe turns a packed init **response** into the follow-up POST.
+/// Glue only — do not execute `runProgram` or POST.
+pub const LIVE_RUN_PROGRAM_RETURN: RunProgramReturnBridge = RunProgramReturnBridge {
+    send_helper: SEND_HELPER_LIVE_NAME,
+    debug_logger: DEBUG_LOGGER_LIVE_NAME,
+    body_encoder: BODY_ENCODER_LIVE_NAME,
+    compressor_wrap: COMPRESSOR_LIVE_NAME,
+    init_schedule: "setTimeout(fj, 100, url, obj)",
+    packed_call: "runProgram(packed, E)",
+    invoke_if_fn: "fn(initObj, fj)",
+    js_alt: "new Function(f5(decoded))(initObj, fj)",
+    note: "typeof-function gate then the same fj helper; JS eval is an alt response shape, not a second protocol. Do not execute or POST.",
+};
+
 /// Custom-b64 (6 bits/char) length → decoded byte count.
 pub fn custom_b64_decoded_len(chars: usize) -> usize {
     chars.saturating_mul(6) / 8
@@ -122,7 +159,15 @@ mod tests {
     #[test]
     fn followup_shape_is_same_wrapper_not_a_packed_program() {
         assert_eq!(LIVE_FO_FOLLOWUP.compressor_live_name, "f4");
-        assert_eq!(LIVE_FO_FOLLOWUP.send_helper, "fz");
+        assert_eq!(LIVE_FO_FOLLOWUP.send_helper, "fj");
+        assert_eq!(LIVE_RUN_PROGRAM_RETURN.send_helper, "fj");
+        assert_eq!(LIVE_RUN_PROGRAM_RETURN.debug_logger, "fz");
+        assert_eq!(LIVE_RUN_PROGRAM_RETURN.body_encoder, "f3");
+        assert_eq!(LIVE_RUN_PROGRAM_RETURN.compressor_wrap, "f4");
+        assert_ne!(
+            LIVE_RUN_PROGRAM_RETURN.send_helper,
+            LIVE_RUN_PROGRAM_RETURN.debug_logger
+        );
         assert_eq!(LIVE_FO_FOLLOWUP.same_n_wrapper, LIVE_FO_FOLLOWUP.same_url);
         assert_eq!(
             LIVE_FO_FOLLOWUP.not_packed_program,
@@ -242,6 +287,20 @@ mod tests {
             );
             assert!(html.contains("runProgram("), "{candidate} missing runProgram");
             assert!(html.contains("f4("), "{candidate} missing f4(");
+            if candidate.ends_with("chrome-oracle/iframe-1.html") {
+                for snip in [
+                    "setTimeout(fj,100,h,Xm)",
+                    "XK=A[rH(JY.aj)](runProgram,XS,E)",
+                    "A[rH(JY.aH)](XK,n,fj)",
+                    "new E[rH(JY.aI)](f5(XS))(n,fj)",
+                    "f3=function",
+                    "function fz(",
+                    "function fj(",
+                ] {
+                    assert!(html.contains(snip), "{candidate} missing {snip}");
+                }
+                assert!(!html.contains("setTimeout(fz,100"));
+            }
             return;
         }
     }

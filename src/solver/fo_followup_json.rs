@@ -1,8 +1,9 @@
 //! Second `/fo/` POST **plaintext field set** (the JSON `f4` compresses).
 //!
-//! Live iframe: `runProgram(packed, helper)` return, if a function, is invoked
-//! as `fn(initObj, sendHelper)`. That path mutates the init object in place,
-//! then the send helper does `send(f4(obj))` again (same `N` / URL / `cf-chl-ra: 0`).
+//! Live iframe: `runProgram(packed, E)` return, if a function, is invoked
+//! as `fn(initObj, fj)` on the 56907 HTML (`fz` is a debug logger). That path
+//! mutates the init object in place, then `fj` POSTs again (same `N` / URL /
+//! `cf-chl-ra: 0`). The visible custom-b64 encoder on that path is `f3`.
 //!
 //! Key **names** (not values) come from headed Chrome Debugger on `f4`/`wZ` or
 //! the `setTimeout(send, 100, url, obj)` helper (`scripts/chrome_oracle.mjs`).
@@ -58,6 +59,37 @@ pub const FOLLOWUP_EXTRA_IDENT_OMITTED_BY_JSON_B: &[&str] =
 /// Last numeric `f4` snapshot (`"1"`..`"39"`). An earlier `f4` stopped at 38.
 pub const FOLLOWUP_NUMERIC_KEY_MIN_B: u32 = 1;
 pub const FOLLOWUP_NUMERIC_KEY_MAX_B: u32 = 39;
+
+/// Quoted `"1":` / `'1':` style keys are **not** in the 56907 iframe HTML.
+/// Numeric follow-up slots come from runtime writes, not an object literal.
+pub const FOLLOWUP_NUMERIC_KEYS_IN_HTML: bool = false;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct ExtraIdentHtmlSource {
+    pub name: &'static str,
+    /// `chl_opt` / `other_object` / `string_table` / `absent`.
+    pub html: &'static str,
+    pub note: &'static str,
+}
+
+/// Where each extra ident string appears in the 56907 iframe HTML (not values).
+/// `_cf_chl_opt` keys are not the init JSON literal. Absent names are runtime.
+pub const FOLLOWUP_EXTRA_IDENT_HTML_B: &[ExtraIdentHtmlSource] = &[
+    ExtraIdentHtmlSource { name: "SMrTl9", html: "chl_opt", note: "_cf_chl_opt ray (16-hex); also string table" },
+    ExtraIdentHtmlSource { name: "OQbM0", html: "absent", note: "not in 56907 iframe HTML" },
+    ExtraIdentHtmlSource { name: "xBCsP4", html: "chl_opt", note: "_cf_chl_opt: []; also string table" },
+    ExtraIdentHtmlSource { name: "UjLjP6", html: "absent", note: "not in 56907 iframe HTML" },
+    ExtraIdentHtmlSource { name: "YfDjo7", html: "absent", note: "not in 56907 iframe HTML" },
+    ExtraIdentHtmlSource { name: "Iqrc9", html: "absent", note: "not in 56907 iframe HTML" },
+    ExtraIdentHtmlSource { name: "OZgbm6", html: "absent", note: "not in 56907 iframe HTML" },
+    ExtraIdentHtmlSource { name: "pFyv1", html: "absent", note: "not in 56907 iframe HTML" },
+    ExtraIdentHtmlSource { name: "SfUI1", html: "absent", note: "not in 56907 iframe HTML" },
+    ExtraIdentHtmlSource { name: "sqKXG6", html: "other_object", note: "worker-like object literal, not init JSON" },
+    ExtraIdentHtmlSource { name: "HUDi4", html: "absent", note: "not in 56907 iframe HTML" },
+    ExtraIdentHtmlSource { name: "DTBF3", html: "absent", note: "not in 56907 iframe HTML" },
+    ExtraIdentHtmlSource { name: "mQiic7", html: "string_table", note: "string-table token only" },
+    ExtraIdentHtmlSource { name: "gNcr3", html: "absent", note: "not in 56907 iframe HTML" },
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -184,6 +216,31 @@ mod tests {
         assert_eq!(omitted.len(), FOLLOWUP_EXTRA_IDENT_OMITTED_BY_JSON_B.len());
         assert_eq!(FOLLOWUP_NUMERIC_KEY_MIN_B, 1);
         assert_eq!(FOLLOWUP_NUMERIC_KEY_MAX_B, 39);
+        assert_eq!(FOLLOWUP_EXTRA_IDENT_HTML_B.len(), FOLLOWUP_EXTRA_IDENT_B.len());
+        for (src, name) in FOLLOWUP_EXTRA_IDENT_HTML_B.iter().zip(FOLLOWUP_EXTRA_IDENT_B) {
+            assert_eq!(src.name, *name);
+        }
+        let path = std::path::Path::new("artifacts/re-out/chrome-oracle/iframe-1.html");
+        if path.is_file() {
+            let html = std::fs::read_to_string(path).unwrap();
+            assert!(html.contains("SMrTl9: '"));
+            assert!(html.contains("xBCsP4: []"));
+            assert!(html.contains("\"sqKXG6\":"));
+            assert!(html.contains(";mQiic7;"));
+            for src in FOLLOWUP_EXTRA_IDENT_HTML_B {
+                if src.html == "absent" {
+                    assert!(
+                        !html.contains(src.name),
+                        "extra ident {} should be absent from HTML",
+                        src.name
+                    );
+                } else {
+                    assert!(html.contains(src.name), "extra ident {} missing from HTML", src.name);
+                }
+            }
+            assert!(!html.contains("\"1\":"));
+            assert!(!html.contains("'1':"));
+        }
     }
 
     #[test]

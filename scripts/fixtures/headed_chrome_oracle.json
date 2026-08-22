@@ -309,7 +309,14 @@
     },
     "foFollowUp": {
       "compressorLiveName": "f4",
-      "sendHelper": "fz",
+      "sendHelper": "fj",
+      "debugLogger": "fz",
+      "bodyEncoder": "f3",
+      "compressorWrap": "f4",
+      "initSchedule": "setTimeout(fj, 100, url, obj)",
+      "packedCall": "runProgram(packed, E)",
+      "invokeIfFn": "fn(initObj, fj)",
+      "jsAlt": "new Function(f5(decoded))(initObj, fj)",
       "sameNWrapper": true,
       "sameUrlAndPrefix": true,
       "plaintextKind": "compressed_blob_after_runProgram",
@@ -319,7 +326,7 @@
       "chromeLens": [86882, 86636, 88108],
       "chromeRespLens": [2400],
       "initRespLens": [822840, 822956, 845928, 846392],
-      "note": "Second POST uses the same f4/N wrapper (shared 24-char RSA prefix). Plaintext is a large compressed blob after runProgram returns a function invoked as fn(initObj, send). Response is ~2.4k, not another packed program. Do not reconstruct or POST."
+      "note": "Second POST uses the same f4/N wrapper (shared 24-char RSA prefix). 56907 send helper is fj (fz is a debug logger). Packed return is invoked as fn(initObj, fj); JS alt uses f5. Visible custom-b64 encoder is f3. Do not reconstruct or POST."
     },
     "foFollowUpJson": {
       "copiedFromInit": true,
@@ -353,6 +360,23 @@
         "gNcr3": "number"
       },
       "jsonOmittedExtraIdent": ["OQbM0", "UjLjP6", "YfDjo7", "Iqrc9", "OZgbm6"],
+      "numericKeysInHtml": false,
+      "extraIdentHtml": [
+        { "name": "SMrTl9", "html": "chl_opt" },
+        { "name": "OQbM0", "html": "absent" },
+        { "name": "xBCsP4", "html": "chl_opt" },
+        { "name": "UjLjP6", "html": "absent" },
+        { "name": "YfDjo7", "html": "absent" },
+        { "name": "Iqrc9", "html": "absent" },
+        { "name": "OZgbm6", "html": "absent" },
+        { "name": "pFyv1", "html": "absent" },
+        { "name": "SfUI1", "html": "absent" },
+        { "name": "sqKXG6", "html": "other_object" },
+        { "name": "HUDi4", "html": "absent" },
+        { "name": "DTBF3", "html": "absent" },
+        { "name": "mQiic7", "html": "string_table" },
+        { "name": "gNcr3", "html": "absent" }
+      ],
       "identKeys": [
         "ThPv3", "SMrTl9", "zlGF5", "OpPY6", "IlxW5", "XxyI8", "HmVl5", "Hvdx8", "SpRN6", "xOSD5",
         "Eugge3", "sYTa8", "uHTPv5", "ANNwt4", "XNzg0", "DmMyh8", "UqfC6", "SsIhw3", "UvCHC0", "QNwGo0",

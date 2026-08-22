@@ -29,7 +29,8 @@ use cf::solver::fo_body::{
     CHARSET_BRANCH_B, body_chars_in_charset, charset_is_well_formed, classify_fo_body_len,
 };
 use cf::solver::fo_followup::{
-    LIVE_FO_FOLLOWUP, classify_fo_response_len, FoResponseLenBand,
+    BODY_ENCODER_LIVE_NAME, DEBUG_LOGGER_LIVE_NAME, LIVE_FO_FOLLOWUP, LIVE_RUN_PROGRAM_RETURN,
+    SEND_HELPER_LIVE_NAME, classify_fo_response_len, FoResponseLenBand,
 };
 use cf::solver::fo_init_json::{
     INIT_JSON_KEY_COUNT, INIT_JSON_KEYS_B, LIVE_FO_INIT_JSON, keys_match_snapshot,
@@ -410,6 +411,23 @@ fn verify_oracle_file(path: &PathBuf) -> Result<Value> {
                 if fu.get("sameNWrapper") != Some(&Value::Bool(true)) {
                     errors.push("foFollowUp.sameNWrapper should be true".into());
                 }
+                if fu.get("sendHelper").and_then(|x| x.as_str()) != Some(SEND_HELPER_LIVE_NAME) {
+                    errors.push("foFollowUp.sendHelper should be fj".into());
+                }
+                if fu.get("debugLogger").and_then(|x| x.as_str()) != Some(DEBUG_LOGGER_LIVE_NAME) {
+                    errors.push("foFollowUp.debugLogger should be fz".into());
+                }
+                if fu.get("bodyEncoder").and_then(|x| x.as_str()) != Some(BODY_ENCODER_LIVE_NAME) {
+                    errors.push("foFollowUp.bodyEncoder should be f3".into());
+                }
+                if fu.get("invokeIfFn").and_then(|x| x.as_str())
+                    != Some(LIVE_RUN_PROGRAM_RETURN.invoke_if_fn)
+                {
+                    errors.push("foFollowUp.invokeIfFn mismatch".into());
+                }
+                if LIVE_FO_FOLLOWUP.send_helper != SEND_HELPER_LIVE_NAME {
+                    errors.push("LIVE_FO_FOLLOWUP.send_helper should match SEND_HELPER_LIVE_NAME".into());
+                }
                 if let Some(lens) = fu.get("chromeLens").and_then(|x| x.as_array()) {
                     for (i, n) in lens.iter().enumerate() {
                         let len = n.as_u64().unwrap_or(0) as usize;
@@ -459,6 +477,25 @@ fn verify_oracle_file(path: &PathBuf) -> Result<Value> {
                             cf::FOLLOWUP_DROPPED_INIT_B
                         ));
                     }
+                }
+                if let Some(srcs) = fj.get("extraIdentHtml").and_then(|x| x.as_array()) {
+                    if srcs.len() != cf::solver::fo_followup_json::FOLLOWUP_EXTRA_IDENT_HTML_B.len()
+                    {
+                        errors.push("foFollowUpJson.extraIdentHtml length mismatch".into());
+                    }
+                    for (src, row) in cf::solver::fo_followup_json::FOLLOWUP_EXTRA_IDENT_HTML_B
+                        .iter()
+                        .zip(srcs)
+                    {
+                        if row.get("name").and_then(|x| x.as_str()) != Some(src.name)
+                            || row.get("html").and_then(|x| x.as_str()) != Some(src.html)
+                        {
+                            errors.push(format!("foFollowUpJson.extraIdentHtml.{} mismatch", src.name));
+                        }
+                    }
+                }
+                if fj.get("numericKeysInHtml") == Some(&Value::Bool(true)) {
+                    errors.push("foFollowUpJson.numericKeysInHtml should be false".into());
                 }
                 if let Some(ident) = fj.get("identKeys").and_then(|x| x.as_array()) {
                     let names: Vec<String> = ident

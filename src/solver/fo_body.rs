@@ -21,9 +21,11 @@
 //! captures spelled `wZ`). Charset **order** rotates; the **set** is stable:
 //! `A–Za–z0–9` plus `+$ -` (65 unique chars). No `/` or `=`.
 //!
-//! XHR (`fz` on that build) does `open("POST", url)`, sets `cf-chl` / `cf-chl-ra`,
-//! `send(f4(plaintext))`. First-POST plaintext is a JSON object with **randomized
-//! keys** (same style as `_cf_chl_opt`).
+//! XHR (`fj` on the 56907 build; historical comments said `fz`, which is a
+//! debug logger on that HTML) does `open("POST", url)`, sets `cf-chl` /
+//! `cf-chl-ra`. After timing overwrite the visible encoder is `f3(obj)`.
+//! First-POST plaintext is a JSON object with **randomized keys** (same style
+//! as `_cf_chl_opt`).
 //!
 //! This module does **not** build that JSON, encrypt it, or POST it. The crate's
 //! orchestrate-era `Compressor` / `encrypt_payload` still zeros `N[0]` *before*

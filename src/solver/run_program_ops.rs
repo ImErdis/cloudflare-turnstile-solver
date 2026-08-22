@@ -1370,6 +1370,9 @@ mod tests {
         );
         assert_eq!(late["foFollowUp"]["notPackedProgram"], true);
         assert_eq!(late["foFollowUp"]["sameNWrapper"], true);
+        assert_eq!(late["foFollowUp"]["sendHelper"].as_str(), Some("fj"));
+        assert_eq!(late["foFollowUp"]["debugLogger"].as_str(), Some("fz"));
+        assert_eq!(late["foFollowUp"]["bodyEncoder"].as_str(), Some("f3"));
         let tags = late["xfTagCases"]["cases"].as_array().expect("xfTagCases.cases");
         assert_eq!(tags.len(), XF_TAG_CASES.len());
         for (i, c) in XF_TAG_CASES.iter().enumerate() {
