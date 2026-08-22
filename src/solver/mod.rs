@@ -16,6 +16,7 @@ mod performance;
 pub mod protocol;
 pub mod run_program;
 pub mod run_program_ops;
+pub mod run_program_profile;
 pub mod run_program_skip;
 pub mod run_program_vm;
 pub mod task;
