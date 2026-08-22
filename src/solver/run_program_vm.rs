@@ -459,6 +459,55 @@ pub fn verify_oracle_tuple(
     Ok(())
 }
 
+/// Case-label harvest records post-fetch `next_key`, not the fetch key.
+/// Brute `fetch_key` in `0..=255`. One hit is the fetch key; zero or many is not a snapshot.
+pub fn recover_fetch_key(
+    params: FetchParams,
+    opcode: u8,
+    byte: u8,
+    observed_next_key: u8,
+) -> Result<u8, String> {
+    let mut hits = Vec::new();
+    for k in 0u8..=255 {
+        if decode_opcode(params, k, byte) == opcode
+            && next_key(params, k, opcode) == observed_next_key
+        {
+            hits.push(k);
+        }
+    }
+    match hits.as_slice() {
+        [k] => Ok(*k),
+        [] => Err(format!(
+            "no fetch_key for {} op={opcode} byte=0x{byte:02x} next_key={observed_next_key}",
+            params.label
+        )),
+        more => Err(format!(
+            "ambiguous {} fetch_keys for {} op={opcode} byte=0x{byte:02x} next_key={observed_next_key}: {more:?}",
+            more.len(),
+            params.label
+        )),
+    }
+}
+
+pub fn verify_oracle_tuple_next_key(
+    params: FetchParams,
+    pc: u32,
+    opcode: u8,
+    byte: u8,
+    observed_next_key: u8,
+) -> Result<u8, String> {
+    let key = recover_fetch_key(params, opcode, byte, observed_next_key)?;
+    verify_oracle_tuple(params, pc, key, byte, opcode)?;
+    let got_next = next_key(params, key, opcode);
+    if got_next != observed_next_key {
+        return Err(format!(
+            "pc {pc}: next_key({} key={key} op={opcode}) = {got_next}, harvest {observed_next_key}",
+            params.label
+        ));
+    }
+    Ok(key)
+}
+
 /// 1-byte walk. Diverges at the first mapped handler that consumes immediates.
 pub fn naive_one_byte_fetches(
     bytecode: &[u8],
@@ -681,6 +730,16 @@ mod tests {
         assert!(verify_oracle_tuple(FETCH_BRANCH_G, 0, 100, 0xaf, 21).is_ok());
         assert!(verify_oracle_tuple(FETCH_BRANCH_B_LATE, 0, 44, 0xef, 222).is_ok());
         assert!(verify_oracle_tuple(FETCH_BRANCH_B_LATE, 0, 44, 0xef, 8).is_err());
+        let nk = next_key(FETCH_BRANCH_B_LATE, 44, 222);
+        assert_eq!(
+            recover_fetch_key(FETCH_BRANCH_B_LATE, 222, 0xef, nk).unwrap(),
+            44
+        );
+        assert!(recover_fetch_key(FETCH_BRANCH_B_LATE, 8, 0xef, nk).is_err());
+        assert_eq!(
+            verify_oracle_tuple_next_key(FETCH_BRANCH_B_LATE, 0, 222, 0xef, nk).unwrap(),
+            44
+        );
     }
 
     #[test]

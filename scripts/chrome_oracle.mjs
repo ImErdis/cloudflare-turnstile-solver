@@ -13,7 +13,10 @@
  * Fetch-loop Debugger breakpoints stay off unless `ORACLE_FETCH_TUPLES=1`
  * (finite harvest + large-bytecode condition) or `ORACLE_FETCH_LOOP_BP=1`.
  * Always-on pauses stalled `/fo/` because the HTML stub hits the same loop
- * before init POST. The iframe calls a **local** `runProgram`, so wrapping
+ * before init POST. Case-label pauses are **after** the key update: harvest
+ * `{pc, op: caseN, nextKey: keySlot, byte}` — do not treat `keySlot` as the
+ * fetch key, and do not take mix from Window/global (`outerWidth` is not mix).
+ * The iframe calls a **local** `runProgram`, so wrapping
  * `globalThis.runProgram` does not see the packed argument (`packedMeta` stays
  * null). Capture the init `/fo/` **response** instead (`Fetch.getResponseBody`
  * then `continueRequest` — do not rewrite `/fo/`). Does **not** reconstruct a
@@ -52,7 +55,8 @@ const headed = process.env.ORACLE_HEADLESS !== "1";
 const isolateIframes = process.env.ORACLE_SITE_ISOLATION === "1";
 const skipIframeRewrite =
   process.env.ORACLE_SKIP_IFRAME_REWRITE === "1" || fetchTuples;
-const fetchTupleCap = Number(process.env.ORACLE_FETCH_TUPLE_CAP || 24);
+/** Unique packed `case N` hits, then remove those BPs. Default 16. */
+const fetchTupleCap = Number(process.env.ORACLE_FETCH_TUPLE_CAP || 16);
 /** Skip the HTML-embedded stub (~7k packed). Live `/fo/` packed is ~600k+. */
 const FETCH_LOOP_BP_CONDITION =
   '(function(){try{if(globalThis.__cfPackedMeta&&globalThis.__cfPackedMeta.packedLen>10000)return true;var g=this&&this.g;if(!g)return false;if(typeof this.l==="number"&&g[this.l]&&g[this.l].length>10000)return true;for(var i=0;i<Math.min(g.length||0,48);i++){var v=g[i];if(v&&v.length>10000)return true;}return false;}catch(e){return false;}})()';
@@ -929,6 +933,17 @@ function isCompleteTuple(r) {
   );
 }
 
+/** Case-label harvest: fetch key is next_key, recovered later. */
+function isHarvestTuple(r) {
+  return (
+    r &&
+    Number.isFinite(Number(r.pc)) &&
+    Number.isFinite(Number(r.op)) &&
+    Number.isFinite(Number(r.byte)) &&
+    (Number.isFinite(Number(r.key)) || Number.isFinite(Number(r.nextKey)))
+  );
+}
+
 function inferLocalOpMix(rows) {
   const names = new Set();
   for (const r of rows) {
@@ -966,49 +981,76 @@ function inferPcSlotFromGNums(rows) {
 function finalizeFetchLoopRows(rows) {
   const fl = (rows || []).filter((r) => r && r.via === "fetchLoop");
   if (!fl.length) return [];
-  const large = fl.filter((r) => (r.bcLen || 0) > 10000);
-  const use = large.length ? large : fl;
+  const use = fl.filter((r) => (r.bcLen || 0) > 10000);
   const { opKey, mixKey } = inferLocalOpMix(use);
   const pcFromG = inferPcSlotFromGNums(use);
-  return use.map((r) => {
+  const out = [];
+  const seenPc = new Set();
+  for (const r of use) {
     let pcSlot = r.pcSlot;
     if (!Number.isFinite(pcSlot) && pcFromG != null && r.gNums && Number.isFinite(r.gNums[pcFromG])) {
       pcSlot = r.gNums[pcFromG];
     }
     const adjust = Number.isFinite(pcSlot) && pcSlot >= 1;
     const pc = Number.isFinite(pcSlot) ? (adjust ? pcSlot - 1 : pcSlot) : r.pc;
-    let op = r.op;
-    let mix = r.mix;
+    const fromCase = r.opFrom === "caseLabel" || Number.isFinite(r.caseOp);
+    let op = fromCase && Number.isFinite(r.caseOp) ? r.caseOp : r.op;
+    let mix = r.mixLocal != null ? r.mixLocal : r.mix;
     let key = r.key;
-    if (op == null && opKey && r.locals && typeof r.locals[opKey] === "number") {
-      op = r.locals[opKey] & 255;
-    }
-    if (mix == null && mixKey && r.locals && typeof r.locals[mixKey] === "number") {
-      mix = r.locals[mixKey];
-    }
-    if (key == null && Number.isFinite(r.keySlot)) key = r.keySlot & 255;
-    if (op == null && Number.isFinite(mix) && Number.isFinite(key)) {
-      op = (mix - key) & 255;
-    }
-    if (key == null && Number.isFinite(mix) && Number.isFinite(op)) {
-      key = (mix - op) & 255;
+    let nextKey = Number.isFinite(r.nextKey)
+      ? r.nextKey & 255
+      : fromCase && Number.isFinite(r.keySlot)
+        ? r.keySlot & 255
+        : undefined;
+    if (!fromCase) {
+      if (op == null && opKey && r.locals && typeof r.locals[opKey] === "number") {
+        op = r.locals[opKey] & 255;
+      }
+      if (mix == null && mixKey && r.locals && typeof r.locals[mixKey] === "number") {
+        mix = r.locals[mixKey];
+      }
+      if (key == null && Number.isFinite(r.keySlot)) key = r.keySlot & 255;
+      if (op == null && Number.isFinite(mix) && Number.isFinite(key)) {
+        op = (mix - key) & 255;
+      }
+      if (key == null && Number.isFinite(mix) && Number.isFinite(op)) {
+        key = (mix - op) & 255;
+      }
+    } else if (
+      key == null &&
+      Number.isFinite(mix) &&
+      mix >= 256 &&
+      mix <= 510 &&
+      Number.isFinite(op)
+    ) {
+      const maybe = (mix - op) & 255;
+      if (!Number.isFinite(nextKey) || maybe !== nextKey) {
+        key = maybe;
+      }
     }
     let byte = r.byte;
     if (byte == null) {
       byte = adjust ? r.byteAtPcMinus1 : r.byteAtPc;
     }
-    return {
+    if (Number.isFinite(pc) && seenPc.has(pc)) continue;
+    if (Number.isFinite(pc)) seenPc.add(pc);
+    const row = {
       via: "fetchLoop",
       pc,
       op: Number.isFinite(op) ? op & 255 : undefined,
       key: Number.isFinite(key) ? key & 255 : undefined,
       byte: Number.isFinite(byte) ? byte & 255 : undefined,
-      mix: Number.isFinite(mix) ? mix : undefined,
+      nextKey: Number.isFinite(nextKey) ? nextKey : undefined,
+      mix: Number.isFinite(mix) && mix >= 256 && mix <= 510 ? mix : undefined,
       bcLen: r.bcLen,
       pcSlot,
+      caseOp: Number.isFinite(r.caseOp) ? r.caseOp & 255 : undefined,
+      opFrom: fromCase ? "caseLabel" : r.opFrom,
       byteVia: Number.isFinite(byte) ? "vm" : undefined,
     };
-  });
+    out.push(row);
+  }
+  return out;
 }
 
 function fillBytesFromPacked(rows, packedStr) {
@@ -1078,7 +1120,10 @@ function normalizeBreakpointOps(rows) {
         key: Number.isFinite(r.key) ? r.key & 255 : undefined,
         byte: Number.isFinite(r.byte) ? r.byte & 255 : undefined,
       };
-      if (Number.isFinite(r.mix)) row.mix = r.mix;
+      if (Number.isFinite(r.nextKey)) row.nextKey = r.nextKey & 255;
+      if (Number.isFinite(r.caseOp)) row.caseOp = r.caseOp & 255;
+      if (r.opFrom) row.opFrom = r.opFrom;
+      if (Number.isFinite(r.mix) && r.mix >= 256 && r.mix <= 510) row.mix = r.mix;
       if (r.byteVia) row.byteVia = r.byteVia;
       if (r.bcLen) row.bcLen = r.bcLen;
       return row;
@@ -1442,6 +1487,31 @@ function sourceLineCol(scriptSource, idx) {
   const nl = pre.lastIndexOf("\n");
   const columnNumber = nl < 0 ? pre.length : pre.length - nl - 1;
   return { lineNumber, columnNumber };
+}
+
+function indexFromLineCol(src, lineNumber, columnNumber) {
+  if (!src || lineNumber == null || columnNumber == null) return null;
+  if (lineNumber === 0) return columnNumber;
+  let idx = 0;
+  let line = 0;
+  while (line < lineNumber && idx < src.length) {
+    const nl = src.indexOf("\n", idx);
+    if (nl < 0) return src.length;
+    idx = nl + 1;
+    line++;
+  }
+  return idx + columnNumber;
+}
+
+/** Opcode is the `case N:` label at or just before idx. */
+function caseOpAt(src, idx) {
+  if (!src || idx == null || idx < 0) return null;
+  const fwd = String(src).slice(idx, idx + 20).match(/^case (\d+):/);
+  if (fwd) return Number(fwd[1]);
+  const pre = String(src).slice(Math.max(0, idx - 96), idx + 1);
+  const all = [...pre.matchAll(/case (\d+):/g)];
+  if (!all.length) return null;
+  return Number(all[all.length - 1][1]);
 }
 
 function compressorBreakpointAt(scriptSource) {
@@ -1867,6 +1937,40 @@ function selfTestInject() {
     Buffer.from([9, 8, 7]).toString("base64"),
   );
   const droppedShell = normalizeBreakpointOps([{ via: "breakpoint" }]);
+  const finCase = finalizeFetchLoopRows([
+    {
+      via: "fetchLoop",
+      pcSlot: 462740,
+      caseOp: 26,
+      opFrom: "caseLabel",
+      keySlot: 185,
+      byteAtPcMinus1: 62,
+      bcLen: 463076,
+    },
+  ]);
+  const stubDropped = finalizeFetchLoopRows([
+    {
+      via: "fetchLoop",
+      pcSlot: 1195,
+      caseOp: 127,
+      opFrom: "caseLabel",
+      keySlot: 155,
+      byteAtPcMinus1: 172,
+      bcLen: 5206,
+    },
+  ]);
+  const outerWidthIgnored = finalizeFetchLoopRows([
+    {
+      via: "fetchLoop",
+      pcSlot: 10,
+      caseOp: 35,
+      opFrom: "caseLabel",
+      keySlot: 9,
+      mix: 1922,
+      byteAtPcMinus1: 1,
+      bcLen: 50000,
+    },
+  ]);
   return {
     ok:
       a.injected &&
@@ -2002,12 +2106,24 @@ function selfTestInject() {
       live23196MulSqI.html.includes("__cfOp.push") &&
       live23196Sites.some((x) => x.why === "case") &&
       live23196Sites.some((x) => x.why === "switch") &&
+      live23196Sites.some((x) => x.why === "caseCall" && x.caseOp === 220) &&
+      live23196Sites.some((x) => x.why === "case" && x.caseOp === 220) &&
       svg8904 == null &&
       fin[0] &&
       fin[0].pc === 0 &&
       fin[0].op === 220 &&
       fin[0].key === 63 &&
       fin[0].byte === 77 &&
+      finCase[0] &&
+      finCase[0].pc === 462739 &&
+      finCase[0].op === 26 &&
+      finCase[0].nextKey === 185 &&
+      finCase[0].key == null &&
+      finCase[0].byte === 62 &&
+      stubDropped.length === 0 &&
+      outerWidthIgnored[0] &&
+      outerWidthIgnored[0].op === 35 &&
+      outerWidthIgnored[0].mix == null &&
       filled[0] &&
       filled[0].byte === 9 &&
       filled[0].byteVia === "packed" &&
@@ -2092,18 +2208,38 @@ const compressorBreakpoints = new Set();
 const compressorScripts = new Set();
 const fetchLoopBreakpoints = new Set();
 const fetchLoopBpRows = [];
+const fetchLoopBpMeta = new Map();
+const scriptSources = new Map();
 const scriptNotes = [];
 let iframeRewrites = 0;
 let foInitResponse = null;
 let fetchLoopCleared = false;
 
+async function removeFetchLoopBreakpoint(session, breakpointId) {
+  await session
+    .send("Debugger.removeBreakpoint", { breakpointId })
+    .catch(() => {});
+  fetchLoopBreakpoints.delete(breakpointId);
+  fetchLoopBpMeta.delete(breakpointId);
+}
+
+async function removeFetchLoopBreakpointsForCaseOp(caseOp) {
+  if (caseOp == null) return;
+  const ids = [];
+  for (const [id, meta] of fetchLoopBpMeta) {
+    if (meta && meta.caseOp === caseOp) ids.push(id);
+  }
+  for (const id of ids) {
+    const row = fetchLoopBpRows.find((r) => r.breakpointId === id);
+    if (row) await removeFetchLoopBreakpoint(row.session, id);
+  }
+}
+
 async function clearFetchLoopBreakpoints() {
   if (fetchLoopCleared) return;
   fetchLoopCleared = true;
   for (const row of fetchLoopBpRows) {
-    await row.session
-      .send("Debugger.removeBreakpoint", { breakpointId: row.breakpointId })
-      .catch(() => {});
+    await removeFetchLoopBreakpoint(row.session, row.breakpointId);
   }
   fetchLoopBreakpoints.clear();
   note("fetchLoopBpCleared", { cap: fetchTupleCap, harvested: liveFetchRaw.length });
@@ -2333,51 +2469,105 @@ function fetchLoopBreakpointSites(src, markerIdx) {
   if (!src || markerIdx == null || markerIdx < 0) return [];
   const sites = [];
   const seen = new Set();
-  const add = (idx, why) => {
+  const add = (idx, why, caseOp) => {
     if (idx == null || idx < 0 || seen.has(idx)) return;
     seen.add(idx);
-    sites.push({ idx, why, ...sourceLineCol(src, idx) });
+    const op = caseOp != null ? caseOp : caseOpAt(src, idx);
+    sites.push({ idx, why, caseOp: op, ...sourceLineCol(src, idx) });
   };
   const window = src.slice(Math.max(0, markerIdx - 400), markerIdx + 25000);
   const winStart = Math.max(0, markerIdx - 400);
-  const sw = window.lastIndexOf("switch(", markerIdx - winStart);
-  if (sw >= 0) add(winStart + sw, "switch");
-  const iff = window.lastIndexOf("if(", markerIdx - winStart);
-  if (iff >= 0) add(winStart + iff, "if");
   let from = 0;
   let n = 0;
   while (n < 80) {
     const i = window.indexOf("case ", from);
     if (i < 0) break;
-    if (/^case \d+:/.test(window.slice(i, i + 12))) {
-      add(winStart + i, "case");
+    const slice = window.slice(i, i + 12);
+    const m = slice.match(/^case (\d+):/);
+    if (m) {
+      const abs = winStart + i;
+      const op = Number(m[1]);
+      const colon = window.indexOf(":", i);
+      let callIdx = abs;
+      if (colon >= 0) {
+        let j = colon + 1;
+        while (j < window.length && window[j] === " ") j++;
+        callIdx = winStart + j;
+      }
+      add(callIdx, "caseCall", op);
+      add(abs, "case", op);
       n++;
     }
     from = i + 5;
   }
+  const sw = window.lastIndexOf("switch(", markerIdx - winStart);
+  if (sw >= 0) add(winStart + sw, "switch");
+  const iff = window.lastIndexOf("if(", markerIdx - winStart);
+  if (iff >= 0) add(winStart + iff, "if");
   return sites;
 }
 
+async function resolveBreakpointLocation(session, loc) {
+  try {
+    const r = await session.send("Debugger.getPossibleBreakpoints", {
+      start: {
+        scriptId: loc.scriptId,
+        lineNumber: loc.lineNumber,
+        columnNumber: Math.max(0, loc.columnNumber),
+      },
+      end: {
+        scriptId: loc.scriptId,
+        lineNumber: loc.lineNumber,
+        columnNumber: loc.columnNumber + 64,
+      },
+    });
+    const hit = (r.locations || []).find((l) => l && typeof l.columnNumber === "number");
+    if (hit) {
+      return {
+        scriptId: hit.scriptId || loc.scriptId,
+        lineNumber: hit.lineNumber,
+        columnNumber: hit.columnNumber,
+        why: loc.why,
+        caseOp: loc.caseOp,
+        resolvedFrom: "possible",
+      };
+    }
+  } catch {}
+  return loc;
+}
+
 async function setFetchLoopBreakpointNear(session, s, scriptSource, idx) {
+  scriptSources.set(s.scriptId, scriptSource);
   const sites = fetchLoopBreakpointSites(scriptSource, idx);
   const { lineNumber, columnNumber } = sourceLineCol(scriptSource, idx);
+  const caseCalls = sites.filter((x) => x.why === "caseCall");
+  const cases = sites.filter((x) => x.why === "case");
+  const rest = sites.filter((x) => x.why !== "caseCall" && x.why !== "case");
   const tries = [
-    ...sites.map((site) => ({
-      scriptId: s.scriptId,
-      lineNumber: site.lineNumber,
-      columnNumber: site.columnNumber,
-      why: site.why,
-    })),
-    { scriptId: s.scriptId, lineNumber, columnNumber, why: "marker" },
-  ];
+    ...caseCalls,
+    ...cases,
+    { scriptId: s.scriptId, lineNumber, columnNumber, why: "marker", caseOp: null },
+    ...rest,
+  ].map((site) => ({
+    scriptId: s.scriptId,
+    lineNumber: site.lineNumber,
+    columnNumber: site.columnNumber,
+    why: site.why,
+    caseOp: site.caseOp,
+  }));
   note("fetchLoopSites", {
     n: sites.length,
     whys: sites.map((x) => x.why).slice(0, 8),
     firstCaseCol: sites.find((x) => x.why === "case")?.columnNumber ?? null,
+    firstCaseOp: sites.find((x) => x.why === "case")?.caseOp ?? null,
   });
   let placed = 0;
-  for (const loc of tries) {
-    if (placed >= 32) break;
+  const seenCol = new Set();
+  for (const raw of tries) {
+    if (placed >= 48) break;
+    const loc = await resolveBreakpointLocation(session, raw);
+    const colKey = `${loc.lineNumber}:${loc.columnNumber}`;
+    if (seenCol.has(colKey)) continue;
     try {
       const bp = await session.send("Debugger.setBreakpoint", {
         location: {
@@ -2388,21 +2578,37 @@ async function setFetchLoopBreakpointNear(session, s, scriptSource, idx) {
         condition: FETCH_LOOP_BP_CONDITION,
       });
       if (bp?.breakpointId) {
+        seenCol.add(colKey);
         fetchLoopBreakpoints.add(bp.breakpointId);
         fetchLoopBpRows.push({ session, breakpointId: bp.breakpointId });
+        const resolvedOp =
+          caseOpAt(
+            scriptSource,
+            indexFromLineCol(scriptSource, loc.lineNumber, loc.columnNumber),
+          ) ?? loc.caseOp;
+        fetchLoopBpMeta.set(bp.breakpointId, {
+          caseOp: resolvedOp,
+          why: loc.why,
+          lineNumber: loc.lineNumber,
+          columnNumber: loc.columnNumber,
+          scriptId: s.scriptId,
+        });
         placed++;
         note("fetchLoopBp", {
           url: (s.url || "").slice(0, 140),
           why: loc.why,
+          caseOp: fetchLoopBpMeta.get(bp.breakpointId)?.caseOp ?? null,
           lineNumber: loc.lineNumber,
           columnNumber: loc.columnNumber,
           breakpointId: bp.breakpointId,
+          resolvedFrom: loc.resolvedFrom || "exact",
         });
       }
     } catch (e) {
       note("bpErr", {
         error: String(e).slice(0, 180),
         why: loc.why,
+        caseOp: loc.caseOp ?? null,
         lineNumber: loc.lineNumber,
         columnNumber: loc.columnNumber,
       });
@@ -2467,6 +2673,13 @@ async function attachSession(session, targetInfo, waitingForDebugger) {
             const hasInject =
               !!(hit && hit.hasInject) || scriptSource.includes("__cfOp.push");
             if (hit) {
+              scriptSources.set(s.scriptId, scriptSource);
+              try {
+                fs.writeFileSync(
+                  path.join(outDir, `executed-fetch-${s.scriptId}.js`),
+                  scriptSource.slice(0, 500000),
+                );
+              } catch {}
               note("scriptFetchConst", {
                 url: (s.url || "").slice(0, 140),
                 len: scriptSource.length,
@@ -2556,6 +2769,39 @@ async function attachSession(session, targetInfo, waitingForDebugger) {
           const row = { via: "fetchLoop", fn: fname };
           const frames = (evt.callFrames || []).slice(0, 6);
           row.frameNames = frames.map((f) => f.functionName || "");
+          row.hitBreakpoints = hit;
+          if (frame.location) {
+            row.lineNumber = frame.location.lineNumber;
+            row.columnNumber = frame.location.columnNumber;
+            row.scriptId = frame.location.scriptId;
+          }
+          let caseOp;
+          for (const id of hit) {
+            const meta = fetchLoopBpMeta.get(id);
+            if (meta && meta.caseOp != null) {
+              caseOp = meta.caseOp;
+              row.bpWhy = meta.why;
+              break;
+            }
+          }
+          if (caseOp == null && frame.location) {
+            const src =
+              scriptSources.get(frame.location.scriptId) ||
+              (frame.location.scriptId && scriptSources.get(String(frame.location.scriptId)));
+            if (src) {
+              const srcIdx = indexFromLineCol(
+                src,
+                frame.location.lineNumber,
+                frame.location.columnNumber,
+              );
+              caseOp = caseOpAt(src, srcIdx);
+            }
+          }
+          if (caseOp != null) {
+            row.caseOp = caseOp;
+            row.op = caseOp & 255;
+            row.opFrom = "caseLabel";
+          }
           for (const fr of frames) {
             try {
               const got = await session.send("Debugger.evaluateOnCallFrame", {
@@ -2580,10 +2826,26 @@ async function attachSession(session, targetInfo, waitingForDebugger) {
               row.evalErr = String(e).slice(0, 120);
             }
           }
+          if (caseOp != null) {
+            row.caseOp = caseOp;
+            row.op = caseOp & 255;
+            row.opFrom = "caseLabel";
+          }
+          if ((row.bcLen || 0) <= 10000) {
+            return;
+          }
+          if (
+            row.caseOp != null &&
+            liveFetchRaw.some((x) => x.caseOp === row.caseOp && (x.bcLen || 0) > 10000)
+          ) {
+            await removeFetchLoopBreakpointsForCaseOp(row.caseOp);
+            return;
+          }
           const locals = {};
           for (const fr of frames) {
             for (const sc of fr.scopeChain || []) {
               if (!sc.object?.objectId) continue;
+              if (sc.type === "global" || sc.type === "with") continue;
               try {
                 const got = await session.send("Runtime.getProperties", {
                   objectId: sc.object.objectId,
@@ -2598,34 +2860,36 @@ async function attachSession(session, targetInfo, waitingForDebugger) {
             }
           }
           row.locals = locals;
-          const mixHit = Object.values(locals).find((v) => v > 255 && v < 4096);
-          const opCands = Object.values(locals).filter(
-            (v) => v >= 0 && v <= 255 && v !== row.keySlot,
-          );
-          if (typeof mixHit === "number") row.mix = mixHit;
-          if (opCands.length === 1) row.op = opCands[0] & 255;
-          if (typeof row.A === "number") row.op = row.A & 255;
-          if (typeof row.D === "number") row.mix = row.D;
-          if (row.op == null && typeof row.mix === "number" && Number.isFinite(row.keySlot)) {
-            row.op = (row.mix - row.keySlot) & 255;
+          const mixHit = Object.values(locals).find((v) => v >= 256 && v <= 510);
+          if (typeof mixHit === "number") {
+            row.mixLocal = mixHit;
+            if (
+              row.caseOp != null &&
+              Number.isFinite(row.keySlot) &&
+              ((mixHit - row.caseOp) & 255) !== (row.keySlot & 255)
+            ) {
+              row.key = (mixHit - row.caseOp) & 255;
+            }
           }
-          if (row.key == null && typeof row.mix === "number" && Number.isFinite(row.op)) {
-            row.key = (row.mix - row.op) & 255;
-          }
-          if (row.key == null && Number.isFinite(row.keySlot)) row.key = row.keySlot;
+          if (Number.isFinite(row.keySlot)) row.nextKey = row.keySlot & 255;
           liveFetchRaw.push(row);
-          if (liveFetchRaw.length === 1 || liveFetchRaw.length === fetchTupleCap) {
+          if (row.caseOp != null) {
+            await removeFetchLoopBreakpointsForCaseOp(row.caseOp);
+          }
+          if (liveFetchRaw.length === 1 || liveFetchRaw.length >= fetchTupleCap) {
             note("fetchLoopTuple", {
               n: liveFetchRaw.length,
               fn: row.fn,
               thisType: row.thisType,
               hasG: row.hasG,
               pcSlot: row.pcSlot,
-              op: row.op,
+              caseOp: row.caseOp,
+              opFrom: row.opFrom,
+              nextKey: row.nextKey,
               key: row.key,
               bcLen: row.bcLen,
               byteAtPcMinus1: row.byteAtPcMinus1,
-              localCount: Object.keys(row.locals || locals || {}).length,
+              localCount: Object.keys(row.locals || {}).length,
             });
           }
           if (liveFetchRaw.length >= fetchTupleCap) {
@@ -2891,11 +3155,12 @@ try {
     JSON.stringify({ raw: liveFetchRaw, final: fetchLoopFinal }, null, 2),
   );
 } catch {}
+const harvestTuples = fetchLoopFinal.filter(isHarvestTuple);
 const completeTuples = fetchLoopFinal.filter(isCompleteTuple);
 const foNet = network.filter((n) => /\/fo\//.test(n.url || ""));
 const firstFo = foNet[0] || null;
 const ops = normalizeBreakpointOps([
-  ...completeTuples,
+  ...harvestTuples,
   ...frameDumps.flatMap((f) => f.ops || []),
   ...liveOps,
 ]);
@@ -3004,8 +3269,9 @@ const summary = {
   fetchTuples,
   fetchTupleCap,
   fetchLoopRawCount: liveFetchRaw.length,
+  harvestTupleCount: harvestTuples.length,
   completeTupleCount: completeTuples.length,
-  fetchLoopTuples: completeTuples.slice(0, 128),
+  fetchLoopTuples: harvestTuples.slice(0, 128),
   foPlaintextShapes: foShapes.map((s) => ({
     via: s.via,
     keyCount: s.keyCount,
@@ -3065,8 +3331,10 @@ console.log(
       iframeRewrites,
       foCount: foNet.length,
       opcodeCount: ops.length,
+      harvestTupleCount: harvestTuples.length,
       completeTupleCount: completeTuples.length,
       fetchLoopRawCount: liveFetchRaw.length,
+      firstHarvestTuple: harvestTuples[0] || null,
       firstCompleteTuple: completeTuples[0] || null,
       readCount: reads.length,
       firstOpcode: ops[0] || null,

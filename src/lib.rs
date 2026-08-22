@@ -41,5 +41,6 @@ pub use solver::run_program_ops::{
 };
 pub use solver::run_program_vm::{
     FETCH_LIVE, INIT_KEY, INIT_PC, OPCODE_TABLE, decode_opcode, naive_one_byte_fetches, next_key,
-    opcode_def, opcode_def_in, params_for_magic, verify_oracle_tuple,
+    opcode_def, opcode_def_in, params_for_magic, recover_fetch_key, verify_oracle_tuple,
+    verify_oracle_tuple_next_key,
 };

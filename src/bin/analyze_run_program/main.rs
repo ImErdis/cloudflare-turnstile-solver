@@ -10,6 +10,7 @@
 //! cargo run --locked --bin analyze_run_program -- --decode 16 packed.txt
 //! cargo run --locked --bin analyze_run_program -- --skip-harvest packed.txt
 //! cargo run --locked --bin analyze_run_program -- --oracle scripts/fixtures/headed_chrome_oracle.json
+//! cargo run --locked --bin analyze_run_program -- --verify-case-tuples artifacts/re-out/chrome-oracle-tuples6/oracle.json
 //! ```
 
 use anyhow::{Context, Result, bail};
@@ -24,8 +25,8 @@ use cf::solver::run_program_ops::{
     first_dn_tag_b, first_xf_tag_late, operand_from_byte,
 };
 use cf::solver::run_program_vm::{
-    FETCH_BRANCH_B, FETCH_LIVE, naive_one_byte_fetches, opcode_def_in, params_for_magic,
-    params_from_oracle_fetch, verify_oracle_tuple,
+    FETCH_BRANCH_B, FETCH_LIVE, FetchParams, naive_one_byte_fetches, opcode_def_in,
+    params_for_magic, params_from_oracle_fetch, verify_oracle_tuple, verify_oracle_tuple_next_key,
 };
 use cf::solver::fo_body::{
     CHARSET_BRANCH_B, body_chars_in_charset, charset_is_well_formed, classify_fo_body_len,
@@ -63,6 +64,7 @@ fn run() -> Result<Value> {
     let mut ray = None;
     let mut decode_n: usize = 0;
     let mut oracle: Option<PathBuf> = None;
+    let mut case_tuples: Option<PathBuf> = None;
     let mut skip_harvest = false;
     let mut files = Vec::<PathBuf>::new();
     let mut args = env::args().skip(1);
@@ -76,6 +78,10 @@ fn run() -> Result<Value> {
             oracle = Some(PathBuf::from(
                 args.next().context("--oracle needs a json path")?,
             ));
+        } else if arg == "--verify-case-tuples" {
+            case_tuples = Some(PathBuf::from(
+                args.next().context("--verify-case-tuples needs an oracle.json path")?,
+            ));
         } else if arg == "--skip-harvest" {
             skip_harvest = true;
         } else if arg.starts_with('-') {
@@ -88,9 +94,12 @@ fn run() -> Result<Value> {
     if let Some(path) = oracle {
         return verify_oracle_file(&path);
     }
+    if let Some(path) = case_tuples {
+        return verify_case_tuples_file(&path);
+    }
 
         if files.is_empty() {
-        bail!("usage: analyze_run_program [--ray <c_ray>] [--decode N] [--skip-harvest] [--oracle json] <file>...");
+        bail!("usage: analyze_run_program [--ray <c_ray>] [--decode N] [--skip-harvest] [--oracle json] [--verify-case-tuples oracle.json] <file>...");
     }
 
     let mut reports = Vec::new();
@@ -177,6 +186,105 @@ fn run() -> Result<Value> {
         "ok": true,
         "header_compare": compare_chrome_and_crate_fo_post(),
         "reports": reports,
+    }))
+}
+
+/// HTML spelling seen on the 2026-08-22 SolveGate iframe (`23196*(mix*mix)+mix*32619+19372`).
+/// Candidate only — not `FETCH_LIVE`. Used to test case-label harvest rows.
+const HTML_CANDIDATE_23196: FetchParams = FetchParams {
+    label: "html-candidate-23196",
+    init_pc: 0,
+    init_key: 63,
+    byte_bias: 217,
+    key_mul: 23_196,
+    key_add: 19_372,
+    key_quad_b: 32_619,
+};
+
+fn harvest_tuple_rows(v: &Value) -> Vec<Value> {
+    v.get("fetchLoopTuples")
+        .or_else(|| v.get("opcodeFetches"))
+        .and_then(|x| x.as_array())
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn verify_case_tuples_file(path: &PathBuf) -> Result<Value> {
+    let raw = fs::read_to_string(path).with_context(|| path.display().to_string())?;
+    let v: Value = serde_json::from_str(&raw)?;
+    let rows = harvest_tuple_rows(&v);
+    let marker = v
+        .get("events")
+        .and_then(|e| e.as_array())
+        .into_iter()
+        .flatten()
+        .find(|e| e.get("kind").and_then(|k| k.as_str()) == Some("scriptFetchConst"))
+        .and_then(|e| e.get("marker").and_then(|m| m.as_str()))
+        .unwrap_or("");
+    let mut candidates = vec![FETCH_LIVE];
+    if marker == "23196" {
+        candidates.push(HTML_CANDIDATE_23196);
+    }
+    let mut reports = Vec::new();
+    for params in candidates {
+        let mut ok = 0u32;
+        let mut fail = Vec::new();
+        let mut recovered = Vec::new();
+        for (i, f) in rows.iter().enumerate() {
+            let pc = f.get("pc").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
+            let byte = f.get("byte").and_then(|x| x.as_u64()).unwrap_or(0) as u8;
+            let op = f
+                .get("op")
+                .or_else(|| f.get("caseOp"))
+                .and_then(|x| x.as_u64())
+                .unwrap_or(0) as u8;
+            let next_key = f
+                .get("nextKey")
+                .or_else(|| f.get("next_key"))
+                .and_then(|x| x.as_u64())
+                .map(|n| n as u8);
+            let Some(nk) = next_key else {
+                fail.push(json!({"i": i, "pc": pc, "error": "missing nextKey"}));
+                continue;
+            };
+            match verify_oracle_tuple_next_key(params, pc, op, byte, nk) {
+                Ok(key) => {
+                    ok += 1;
+                    recovered.push(json!({
+                        "i": i,
+                        "pc": pc,
+                        "op": op,
+                        "byte": byte,
+                        "nextKey": nk,
+                        "fetchKey": key,
+                    }));
+                }
+                Err(e) => fail.push(json!({
+                    "i": i,
+                    "pc": pc,
+                    "op": op,
+                    "byte": byte,
+                    "nextKey": nk,
+                    "error": e,
+                })),
+            }
+        }
+        reports.push(json!({
+            "label": params.label,
+            "keyMul": params.key_mul,
+            "ok": ok,
+            "fail": fail.len(),
+            "recovered": recovered,
+            "errors": fail,
+            "allOk": fail.is_empty() && ok > 0,
+        }));
+    }
+    Ok(json!({
+        "path": path.display().to_string(),
+        "rowCount": rows.len(),
+        "marker": marker,
+        "note": "HTML 23196 is a candidate test only. Do not assign FETCH_LIVE. Quote mismatches.",
+        "candidates": reports,
     }))
 }
 
