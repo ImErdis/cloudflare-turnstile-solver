@@ -122,7 +122,7 @@ const PREAMBLE = `(() => {
         try {
           __cfDefProp(obj, n, {
             configurable: true,
-            enumerable: true,
+            enumerable: false,
             get: function () { return cur; },
             set: function (v) {
               __cfLogWrite(n, v, "set");
@@ -151,7 +151,8 @@ const PREAMBLE = `(() => {
         const keys = Object.keys(obj);
         for (let i = 0; i < keys.length; i++) {
           const k = keys[i];
-          if (__cfLeftover[k] || /^\\d+$/.test(k) || !baseline[k]) {
+          if (__cfLeftover[k]) continue;
+          if (/^\\d+$/.test(k) || !baseline[k]) {
             __cfLogWrite(k, obj[k], "poll");
             baseline[k] = 1;
           }
