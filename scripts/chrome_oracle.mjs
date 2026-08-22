@@ -398,7 +398,9 @@ function fetchSnippet(html) {
 /** HTML fetch schedule. `init_key` is not here — that needs opcode tuples. */
 function extractFetchQuadratic(html) {
   if (!html) return null;
-  const idx = html.search(/(\w+)\*\1\*\d{4,5}|\d{4,5}\*\((\w+)\*\2\)/);
+  const idx = html.search(
+    /(\w+)\*\1\*\d{4,5}|\d{4,5}\*\((\w+)\*\2\)|,\d{4,5}\),[\s\S]{0,48}\(\w+,\d{4,5}\)/,
+  );
   const window = idx >= 0 ? html.slice(Math.max(0, idx - 240), idx + 420) : html;
   const sq = window.match(
     /(\w+)\*\1\*(\d{4,5}),[\s\S]{0,96}?\(\1,(\d{4,5})\)\)\+(\d{4,5}),255/,
@@ -415,10 +417,17 @@ function extractFetchQuadratic(html) {
   const sqAmp = window.match(
     /(\w+)\*\1\*(\d{4,5})\+[\s\S]{0,96}?\(\1,(\d{4,5})\)\+(\d{4,5})&255/,
   );
+  const nestMul = window.match(
+    /\((\w+),\1\),(\d{4,5})\),[\s\S]{0,96}?\(\1,(\d{4,5})\)\)\+(\d{4,5}),255/,
+  );
+  const starMix = window.match(
+    /\((\w+),\1\)\*(\d{4,5})\+\1\*(\d{4,5})\+(\d{4,5}),255/,
+  );
   const biasM = window.match(/\]-(\d{2,3}),256\)&255/);
   const biasAdd = window.match(/\[(\w+)\],(\d{2,3})\)\+256/);
+  const biasPlus = window.match(/\((\d{2,3})\+\w+\[\w+\],255\)/);
   const caseM = window.match(/\{case (\d+):/);
-  const hit = sq || sqPlus || sqAmp || alt || mulStar;
+  const hit = sq || sqPlus || sqAmp || nestMul || starMix || alt || mulStar;
   if (!hit) return null;
   let keyMul;
   let keyQuadB;
@@ -439,6 +448,16 @@ function extractFetchQuadratic(html) {
     keyQuadB = Number(sqAmp[3]);
     keyAdd = Number(sqAmp[4]);
     spelling = "mix*mix*mul+helper&255";
+  } else if (nestMul) {
+    keyMul = Number(nestMul[2]);
+    keyQuadB = Number(nestMul[3]);
+    keyAdd = Number(nestMul[4]);
+    spelling = "helper(mix,mix),mul";
+  } else if (starMix) {
+    keyMul = Number(starMix[2]);
+    keyQuadB = Number(starMix[3]);
+    keyAdd = Number(starMix[4]);
+    spelling = "(mix,mix)*mul+mix*b";
   } else if (mulStar) {
     keyMul = Number(mulStar[1]);
     keyQuadB = Number(mulStar[4]);
@@ -454,7 +473,13 @@ function extractFetchQuadratic(html) {
     keyMul,
     keyQuadB,
     keyAdd,
-    byteBias: biasM ? Number(biasM[1]) : biasAdd ? Number(biasAdd[2]) : null,
+    byteBias: biasM
+      ? Number(biasM[1])
+      : biasAdd
+        ? Number(biasAdd[2])
+        : biasPlus
+          ? (256 - Number(biasPlus[1])) & 255
+          : null,
     firstSwitchCase: caseM ? Number(caseM[1]) : null,
     spelling,
     note: "HTML formula only; init_key needs opcode tuples. Not FETCH_LIVE.",
@@ -496,8 +521,14 @@ function extractFetchLinear(html) {
 
 function extractVmEntryKey(html) {
   if (!html) return null;
-  const m = String(html).match(/new \w+\(\w+\)\(0,(\d{1,3}),\[\]\)/);
-  return m ? Number(m[1]) : null;
+  const ctor = String(html).match(/new \w+\(\w+\)\(0,(\d{1,3}),\[\]\)/);
+  if (ctor) return Number(ctor[1]);
+  const method = String(html).match(
+    /new \w+\(\w+\)\[\w+\([^)]{0,40}\)\]\(0,(\d{1,3}),\[\]\)/,
+  );
+  if (method) return Number(method[1]);
+  const bare = String(html).match(/\(0,(\d{1,3}),\[\]\)/);
+  return bare ? Number(bare[1]) : null;
 }
 
 function extractFetchSchedule(html) {
@@ -550,10 +581,11 @@ function fetchMarkerInSource(src) {
  *   key = (mix*mix*8904 + 14792*mix + 11229)&255  (evening b; byte-232)
  * PC is snapshotted from `if(pc=state[slot],pc!==pc)return ...;switch(`.
  */
-function injectOpcodeLog(html) {
+function injectOpcodeLog(html, opts = {}) {
   if (!html) {
     return { html, injected: false, replacements: 0, snippet: null };
   }
+  const jsOnly = !!opts.jsOnly;
   const snippet = fetchSnippet(html);
   let n = 0;
   let out = html;
@@ -786,6 +818,48 @@ function injectOpcodeLog(html) {
       );
     },
   );
+
+  out = out.replace(
+    /(\w+)=(\w+)\[(\w+)\]\^((?:\w+\[[^\]]{0,80}\])\((\d{2,3})\+(\w+)\[\1\],255\))/g,
+    (_full, op, st, keySlot, rest, _add, arr) => {
+      n++;
+      return `${op}=(globalThis.__cfT&&(globalThis.__cfT.key=${st}[${keySlot}]&255,globalThis.__cfT.byte=${arr}[${op}]&255),${st}[${keySlot}])^${rest}`;
+    },
+  );
+  out = out.replace(
+    /(\w+)=(\w+)\[(\w+)\]\^([\s\S]{0,96}?\((\w+)\[(\w+)\]-(\d{2,3}),256\)&255)/g,
+    (_full, op, st, keySlot, rest, arr, pcVar) => {
+      n++;
+      return `${op}=(globalThis.__cfT&&(globalThis.__cfT.key=${st}[${keySlot}]&255,globalThis.__cfT.byte=${arr}[${pcVar}]&255),${st}[${keySlot}])^${rest}`;
+    },
+  );
+  out = out.replace(
+    /\((\w+),\1\),(\d{4,5})\),([\s\S]{0,96}?)\(\1,(\d{4,5})\)\)\+(\d{4,5}),255\),(\w+)\)/g,
+    (_full, mixVar, mul, mid, quadB, add, opVar) => {
+      n++;
+      return logAfterKeyUpdate(
+        `(${mixVar},${mixVar}),${mul}),${mid}(${mixVar},${quadB}))+${add},255`,
+        opVar,
+      );
+    },
+  );
+  out = out.replace(
+    /\((\w+),\1\)\*(\d{4,5})\+\1\*(\d{4,5})\+(\d{4,5}),255\),(\w+)\)/g,
+    (_full, mixVar, mul, quadB, add, opVar) => {
+      n++;
+      return logAfterKeyUpdate(
+        `(${mixVar},${mixVar})*${mul}+${mixVar}*${quadB}+${add},255`,
+        opVar,
+      );
+    },
+  );
+
+  if (jsOnly) {
+    if (n > 0 && !out.includes("__cfOracleHook")) {
+      out = `${PREAMBLE};${out}`;
+    }
+    return { html: out, injected: n > 0, replacements: n, snippet };
+  }
 
   const nonceScript = /<script([^>]*nonce="[^"]+"[^>]*)>/i;
   if (nonceScript.test(out)) {
@@ -1733,6 +1807,15 @@ function selfTestInject() {
     [{ key: "zzNew1", opcode: 177, via: "set", valueKind: "number", numeric: false }],
     ["zzNew1"],
   );
+  const live23196Happy =
+    "if(K=zV[zh],K!==K)return zV[zM];switch(zV[zh]=zF[Ef(pe.K)](K,1),K=zV[zs]^zF[Ef(pe.zA)](39+zD[K],255),Q=zV[zs]+K,zV[zs]=zF[Ef(pe.zW)](zF[Ef(pe.zR)](zF[Ef(pe.zx)](zF[Ef(pe.zV)](Q,Q),23196),zF[Ef(pe.zI)](Q,32619))+19372,255),K){case 220:Po(this);break;}";
+  const live23196Catch =
+    "if(zA=zV[zh],zF[Ef(pe.zs)](zA,zA))return zV[zM];switch(zV[zh]=zF[Ef(pe.vb)](zA,1),zW=zV[zs]^zF[Ef(pe.zZ)](zD[zA]-217,256)&255.61,zR=zV[zs]+zW,zV[zs]=zF[Ef(pe.zA)](zF[Ef(pe.zD)](zR,zR)*23196+zR*32619+19372,255),zW){case 220:Po(this);break;}";
+  const live23196H = injectOpcodeLog(live23196Happy, { jsOnly: true });
+  const live23196C = injectOpcodeLog(live23196Catch, { jsOnly: true });
+  const live23196F = extractFetchQuadratic(live23196Happy);
+  const live23196Fc = extractFetchQuadratic(live23196Catch);
+  const live23196Entry = extractVmEntryKey("new PD(Y)[EP(pC.Y)](0,63,[])");
   const packed2Snippet =
     "new HC(H)(0,63,[]);if(Q=zD[K],Q!==Q)return zD[R];switch(zD[K]=Q+1,Q=zD[k]^xx(zD[Q],217)+256&255,M=zD[k]+Q,zD[k]=M*M*23196+yy(M,32619)+19372&255,Q){case 220:fn(this);break;}";
   const packed2Mark = fetchMarkerInSource(packed2Snippet);
@@ -1873,6 +1956,16 @@ function selfTestInject() {
       packed2Sched.byteBias === 217 &&
       packed2Sched.firstSwitchCase === 220 &&
       packed2Entry === 63 &&
+      live23196H.html.includes("__cfOp.push") &&
+      live23196C.html.includes("__cfOp.push") &&
+      live23196F &&
+      live23196F.keyMul === 23196 &&
+      live23196F.keyQuadB === 32619 &&
+      live23196F.keyAdd === 19372 &&
+      live23196F.byteBias === 217 &&
+      live23196Fc &&
+      live23196Fc.keyMul === 23196 &&
+      live23196Entry === 63 &&
       svg8904 == null &&
       fin[0] &&
       fin[0].pc === 0 &&
@@ -2171,6 +2264,111 @@ function wireNetwork(session, label) {
   });
 }
 
+async function patchExecutedFetchScript(session, s, scriptSource) {
+  const inj = injectOpcodeLog(scriptSource, { jsOnly: true });
+  if (!inj.injected) {
+    note("scriptPatchSkip", {
+      replacements: inj.replacements,
+      url: (s.url || "").slice(0, 80),
+    });
+    return false;
+  }
+  try {
+    const result = await session.send("Debugger.setScriptSource", {
+      scriptId: s.scriptId,
+      scriptSource: inj.html,
+      allowTopFrameEditing: true,
+    });
+    const status = result?.status || "unknown";
+    note("scriptPatched", {
+      url: (s.url || "").slice(0, 140),
+      replacements: inj.replacements,
+      status,
+      hasPush: inj.html.includes("__cfOp.push"),
+    });
+    return status === "Ok" || status === "Compiled" || status === "ok";
+  } catch (e) {
+    note("scriptPatchErr", { error: String(e).slice(0, 220) });
+    return false;
+  }
+}
+
+async function setFetchLoopBreakpointNear(session, s, scriptSource, idx) {
+  const { lineNumber, columnNumber } = sourceLineCol(scriptSource, idx);
+  let locations = [];
+  try {
+    const got = await session.send("Debugger.getPossibleBreakpoints", {
+      start: {
+        scriptId: s.scriptId,
+        lineNumber,
+        columnNumber: Math.max(0, columnNumber - 60),
+      },
+      end: {
+        scriptId: s.scriptId,
+        lineNumber,
+        columnNumber: columnNumber + 120,
+      },
+    });
+    locations = got.locations || [];
+    note("possibleBp", { n: locations.length, lineNumber, columnNumber });
+  } catch (e) {
+    note("possibleBpErr", { error: String(e).slice(0, 160) });
+  }
+  const tries = locations.length
+    ? locations.slice(0, 8).map((loc) => ({
+        scriptId: loc.scriptId || s.scriptId,
+        lineNumber: loc.lineNumber,
+        columnNumber: loc.columnNumber,
+      }))
+    : [{ scriptId: s.scriptId, lineNumber, columnNumber }];
+  for (const loc of tries) {
+    try {
+      const bp = await session.send("Debugger.setBreakpoint", {
+        location: loc,
+        condition: FETCH_LOOP_BP_CONDITION,
+      });
+      if (bp?.breakpointId) {
+        fetchLoopBreakpoints.add(bp.breakpointId);
+        fetchLoopBpRows.push({ session, breakpointId: bp.breakpointId });
+        note("fetchLoopBp", {
+          url: (s.url || "").slice(0, 140),
+          lineNumber: loc.lineNumber,
+          columnNumber: loc.columnNumber,
+          breakpointId: bp.breakpointId,
+        });
+        return true;
+      }
+    } catch (e) {
+      note("bpErr", {
+        error: String(e).slice(0, 180),
+        lineNumber: loc.lineNumber,
+        columnNumber: loc.columnNumber,
+      });
+    }
+  }
+  try {
+    const bp = await session.send("Debugger.setBreakpointByUrl", {
+      lineNumber,
+      columnNumber,
+      urlRegex: "challenges\\.cloudflare\\.com",
+      condition: FETCH_LOOP_BP_CONDITION,
+    });
+    if (bp?.breakpointId) {
+      fetchLoopBreakpoints.add(bp.breakpointId);
+      fetchLoopBpRows.push({ session, breakpointId: bp.breakpointId });
+      note("fetchLoopBpUrl", {
+        breakpointId: bp.breakpointId,
+        lineNumber,
+        columnNumber,
+      });
+      return true;
+    }
+  } catch (e) {
+    note("bpUrlErr", { error: String(e).slice(0, 180) });
+  }
+  return false;
+}
+
 async function attachSession(session, targetInfo, waitingForDebugger) {
   const label = `${targetInfo?.type || "?"}:${(targetInfo?.url || "").slice(0, 80)}`;
   cdpSessions.push({ session, label, type: targetInfo?.type || "?" });
@@ -2202,79 +2400,73 @@ async function attachSession(session, targetInfo, waitingForDebugger) {
       const rec = evt.args?.[1]?.value;
       if (first === "__cfOp" && rec && liveOps.length < 400) liveOps.push(rec);
     });
-    session.on("Debugger.scriptParsed", async (s) => {
-      try {
-        if (scriptNotes.length < 24) {
-          scriptNotes.push({
-            phase: "parsed",
-            url: (s.url || "").slice(0, 140),
-            endLine: s.endLine,
-            endColumn: s.endColumn,
-          });
-        }
-        const huge = (s.endColumn || 0) > 8000 || (s.endLine || 0) > 30;
-        if (!huge && !(s.url || "").includes("challenges.cloudflare.com")) return;
-        const { scriptSource } = await session.send("Debugger.getScriptSource", {
-          scriptId: s.scriptId,
-        });
-        const hit = fetchMarkerInSource(scriptSource);
-        const compressor = compressorBreakpointAt(scriptSource);
-        const sendHelper = sendHelperBreakpointAt(scriptSource);
-        if (!hit && !compressor && !sendHelper) return;
-        const hasInject = !!(hit && hit.hasInject) || scriptSource.includes("__cfOp.push");
-        if (hit) {
-          note("scriptFetchConst", {
-            url: (s.url || "").slice(0, 140),
-            len: scriptSource.length,
-            hasInject,
-            idx: hit.idx,
-            marker: hit.marker,
-            fetchSchedule: hit.schedule,
-          });
-          if (wantFetchLoopBp && !hasInject) {
-            const { lineNumber, columnNumber } = sourceLineCol(scriptSource, hit.idx);
-            const bp = await session.send("Debugger.setBreakpoint", {
-              location: { scriptId: s.scriptId, lineNumber, columnNumber },
-              condition: FETCH_LOOP_BP_CONDITION,
-            });
-            if (bp?.breakpointId) {
-              fetchLoopBreakpoints.add(bp.breakpointId);
-              fetchLoopBpRows.push({ session, breakpointId: bp.breakpointId });
-              note("fetchLoopBp", {
+    const parsedJobs = [];
+    session.on("Debugger.scriptParsed", (s) => {
+      parsedJobs.push(
+        (async () => {
+          try {
+            if (scriptNotes.length < 24) {
+              scriptNotes.push({
+                phase: "parsed",
                 url: (s.url || "").slice(0, 140),
-                marker: hit.marker,
-                lineNumber,
-                columnNumber,
-                breakpointId: bp.breakpointId,
+                endLine: s.endLine,
+                endColumn: s.endColumn,
               });
             }
-          }
-        }
-        for (const bpInfo of [compressor, sendHelper]) {
-          if (!bpInfo) continue;
-          const tag = `${s.scriptId}:${bpInfo.pat}`;
-          if (compressorScripts.has(tag)) continue;
-          compressorScripts.add(tag);
-          const bp = await session.send("Debugger.setBreakpoint", {
-            location: {
+            const huge = (s.endColumn || 0) > 8000 || (s.endLine || 0) > 30;
+            if (!huge && !(s.url || "").includes("challenges.cloudflare.com")) return;
+            const { scriptSource } = await session.send("Debugger.getScriptSource", {
               scriptId: s.scriptId,
-              lineNumber: bpInfo.lineNumber,
-              columnNumber: bpInfo.columnNumber,
-            },
-          });
-          if (bp?.breakpointId) compressorBreakpoints.add(bp.breakpointId);
-          note(bpInfo.name ? "sendHelperBp" : "compressorBp", {
-            url: (s.url || "").slice(0, 140),
-            pat: bpInfo.pat,
-            name: bpInfo.name || null,
-            lineNumber: bpInfo.lineNumber,
-            columnNumber: bpInfo.columnNumber,
-            breakpointId: bp?.breakpointId || null,
-          });
-        }
-      } catch (e) {
-        note("bpErr", { error: String(e), url: (s.url || "").slice(0, 80) });
-      }
+            });
+            const hit = fetchMarkerInSource(scriptSource);
+            const compressor = compressorBreakpointAt(scriptSource);
+            const sendHelper = sendHelperBreakpointAt(scriptSource);
+            if (!hit && !compressor && !sendHelper) return;
+            const hasInject =
+              !!(hit && hit.hasInject) || scriptSource.includes("__cfOp.push");
+            if (hit) {
+              note("scriptFetchConst", {
+                url: (s.url || "").slice(0, 140),
+                len: scriptSource.length,
+                hasInject,
+                idx: hit.idx,
+                marker: hit.marker,
+                fetchSchedule: hit.schedule,
+              });
+              if (wantFetchLoopBp && !hasInject) {
+                const patched = await patchExecutedFetchScript(session, s, scriptSource);
+                if (!patched) {
+                  await setFetchLoopBreakpointNear(session, s, scriptSource, hit.idx);
+                }
+              }
+            }
+            for (const bpInfo of [compressor, sendHelper]) {
+              if (!bpInfo) continue;
+              const tag = `${s.scriptId}:${bpInfo.pat}`;
+              if (compressorScripts.has(tag)) continue;
+              compressorScripts.add(tag);
+              const bp = await session.send("Debugger.setBreakpoint", {
+                location: {
+                  scriptId: s.scriptId,
+                  lineNumber: bpInfo.lineNumber,
+                  columnNumber: bpInfo.columnNumber,
+                },
+              });
+              if (bp?.breakpointId) compressorBreakpoints.add(bp.breakpointId);
+              note(bpInfo.name ? "sendHelperBp" : "compressorBp", {
+                url: (s.url || "").slice(0, 140),
+                pat: bpInfo.pat,
+                name: bpInfo.name || null,
+                lineNumber: bpInfo.lineNumber,
+                columnNumber: bpInfo.columnNumber,
+                breakpointId: bp?.breakpointId || null,
+              });
+            }
+          } catch (e) {
+            note("bpErr", { error: String(e), url: (s.url || "").slice(0, 80) });
+          }
+        })(),
+      );
     });
     session.on("Debugger.paused", async (evt) => {
       try {
@@ -2384,6 +2576,10 @@ async function attachSession(session, targetInfo, waitingForDebugger) {
       }
     });
     await session.send("Debugger.enable").catch(() => {});
+    if (waitingForDebugger) {
+      await new Promise((r) => setTimeout(r, 150));
+    }
+    await Promise.all(parsedJobs);
   } catch (e) {
     note("attachErr", { label, error: String(e) });
   } finally {
@@ -2493,6 +2689,7 @@ while (Date.now() < harvestDeadline) {
 await harvestSessions("final");
 
 const frameDumps = [];
+let packedFromFrames = false;
 for (const frame of page.frames()) {
   const fu = frame.url();
   if (!interestingUrl(fu) && frame !== page.mainFrame()) continue;
@@ -2511,6 +2708,18 @@ for (const frame of page.frames()) {
       hookErr: globalThis.__cfHookErr || null,
     }));
     frameDumps.push(dump);
+    if (!packedFromFrames && dump.packedMeta?.packedLen) {
+      try {
+        const packed = await frame.evaluate(
+          () => (typeof globalThis.__cfPacked === "string" ? globalThis.__cfPacked : null),
+        );
+        if (typeof packed === "string" && packed.length > 50000) {
+          fs.writeFileSync(path.join(outDir, "packed-runprogram.txt"), packed);
+          dump.packedMeta.saved = packed.length;
+          packedFromFrames = true;
+        }
+      } catch {}
+    }
   } catch (e) {
     frameDumps.push({ href: fu, error: String(e) });
   }
