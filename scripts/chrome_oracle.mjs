@@ -1971,6 +1971,9 @@ function selfTestInject() {
       bcLen: 50000,
     },
   ]);
+  const handlerSrc =
+    "switch(Q){case 220:Jj[Hq](this);break;case 151:JY[Hq](this);break;} function Jj(a){return a} function JY(a){return a}";
+  const handlerSites = fetchLoopHandlerSites(handlerSrc, handlerSrc.indexOf("switch"));
   return {
     ok:
       a.injected &&
@@ -2108,6 +2111,8 @@ function selfTestInject() {
       live23196Sites.some((x) => x.why === "switch") &&
       live23196Sites.some((x) => x.why === "caseCall" && x.caseOp === 220) &&
       live23196Sites.some((x) => x.why === "case" && x.caseOp === 220) &&
+      handlerSites.some((x) => x.why === "handlerFn" && x.caseOp === 220 && x.name === "Jj") &&
+      handlerSites.some((x) => x.why === "handlerFn" && x.caseOp === 151 && x.name === "JY") &&
       svg8904 == null &&
       fin[0] &&
       fin[0].pc === 0 &&
@@ -2209,11 +2214,14 @@ const compressorScripts = new Set();
 const fetchLoopBreakpoints = new Set();
 const fetchLoopBpRows = [];
 const fetchLoopBpMeta = new Map();
+const handlerNameToOp = new Map();
 const scriptSources = new Map();
 const scriptNotes = [];
 let iframeRewrites = 0;
 let foInitResponse = null;
 let fetchLoopCleared = false;
+let fetchLoopBpPlaced = 0;
+let fetchLoopBpFailed = 0;
 
 async function removeFetchLoopBreakpoint(session, breakpointId) {
   await session
@@ -2507,6 +2515,48 @@ function fetchLoopBreakpointSites(src, markerIdx) {
   return sites;
 }
 
+function fetchLoopHandlerSites(src, markerIdx) {
+  if (!src || markerIdx == null || markerIdx < 0) return [];
+  const window = src.slice(Math.max(0, markerIdx - 400), markerIdx + 25000);
+  const byName = new Map();
+  const re = /case (\d+):(\w+)[\[(]/g;
+  let m;
+  while ((m = re.exec(window))) {
+    const op = Number(m[1]);
+    const name = m[2];
+    if (!byName.has(name)) byName.set(name, new Set());
+    byName.get(name).add(op);
+  }
+  const sites = [];
+  const seenIdx = new Set();
+  for (const [name, ops] of byName) {
+    if (ops.size !== 1) continue;
+    const pat = `function ${name}(`;
+    let from = 0;
+    let count = 0;
+    let first = -1;
+    while (from < src.length) {
+      const i = src.indexOf(pat, from);
+      if (i < 0) break;
+      if (first < 0) first = i;
+      count++;
+      from = i + pat.length;
+    }
+    if (count !== 1 || first < 0) continue;
+    const brace = src.indexOf("{", first);
+    if (brace < 0 || seenIdx.has(brace)) continue;
+    seenIdx.add(brace);
+    sites.push({
+      idx: brace,
+      why: "handlerFn",
+      caseOp: [...ops][0],
+      name,
+      ...sourceLineCol(src, brace),
+    });
+  }
+  return sites;
+}
+
 async function resolveBreakpointLocation(session, loc) {
   try {
     const r = await session.send("Debugger.getPossibleBreakpoints", {
@@ -2529,6 +2579,7 @@ async function resolveBreakpointLocation(session, loc) {
         columnNumber: hit.columnNumber,
         why: loc.why,
         caseOp: loc.caseOp,
+        name: loc.name,
         resolvedFrom: "possible",
       };
     }
@@ -2536,16 +2587,88 @@ async function resolveBreakpointLocation(session, loc) {
   return loc;
 }
 
+async function trySetFetchLoopBp(session, s, scriptSource, loc) {
+  const attempts = [loc];
+  for (let i = 0; i < attempts.length; i++) {
+    const attempt = attempts[i];
+    try {
+      const bp = await session.send("Debugger.setBreakpoint", {
+        location: {
+          scriptId: attempt.scriptId || s.scriptId,
+          lineNumber: attempt.lineNumber,
+          columnNumber: attempt.columnNumber,
+        },
+        condition: FETCH_LOOP_BP_CONDITION,
+      });
+      if (!bp?.breakpointId) continue;
+      fetchLoopBreakpoints.add(bp.breakpointId);
+      fetchLoopBpRows.push({ session, breakpointId: bp.breakpointId });
+      const resolvedOp =
+        loc.caseOp != null
+          ? loc.caseOp
+          : caseOpAt(
+              scriptSource,
+              indexFromLineCol(scriptSource, attempt.lineNumber, attempt.columnNumber),
+            );
+      fetchLoopBpMeta.set(bp.breakpointId, {
+        caseOp: resolvedOp,
+        why: loc.why,
+        name: loc.name,
+        lineNumber: attempt.lineNumber,
+        columnNumber: attempt.columnNumber,
+        scriptId: s.scriptId,
+      });
+      if (loc.why === "handlerFn" && loc.name && resolvedOp != null) {
+        handlerNameToOp.set(loc.name, resolvedOp);
+      }
+      fetchLoopBpPlaced++;
+      note("fetchLoopBp", {
+        url: (s.url || "").slice(0, 140),
+        why: loc.why,
+        name: loc.name || null,
+        caseOp: resolvedOp ?? null,
+        lineNumber: attempt.lineNumber,
+        columnNumber: attempt.columnNumber,
+        breakpointId: bp.breakpointId,
+        resolvedFrom: attempt.resolvedFrom || "exact",
+      });
+      return `${attempt.lineNumber}:${attempt.columnNumber}`;
+    } catch (e) {
+      fetchLoopBpFailed++;
+      note("bpErr", {
+        error: String(e).slice(0, 180),
+        why: loc.why,
+        caseOp: loc.caseOp ?? null,
+        lineNumber: attempt.lineNumber,
+        columnNumber: attempt.columnNumber,
+      });
+      if (i === 0) {
+        const resolved = await resolveBreakpointLocation(session, loc);
+        if (
+          resolved &&
+          (resolved.columnNumber !== loc.columnNumber ||
+            resolved.lineNumber !== loc.lineNumber)
+        ) {
+          attempts.push(resolved);
+        }
+      }
+    }
+  }
+  return null;
+}
+
 async function setFetchLoopBreakpointNear(session, s, scriptSource, idx) {
   scriptSources.set(s.scriptId, scriptSource);
   const sites = fetchLoopBreakpointSites(scriptSource, idx);
+  const handlers = fetchLoopHandlerSites(scriptSource, idx);
   const { lineNumber, columnNumber } = sourceLineCol(scriptSource, idx);
   const caseCalls = sites.filter((x) => x.why === "caseCall");
   const cases = sites.filter((x) => x.why === "case");
   const rest = sites.filter((x) => x.why !== "caseCall" && x.why !== "case");
   const tries = [
-    ...caseCalls,
-    ...cases,
+    ...handlers,
+    ...cases.slice(12),
+    ...caseCalls.slice(12),
     { scriptId: s.scriptId, lineNumber, columnNumber, why: "marker", caseOp: null },
     ...rest,
   ].map((site) => ({
@@ -2554,66 +2677,34 @@ async function setFetchLoopBreakpointNear(session, s, scriptSource, idx) {
     columnNumber: site.columnNumber,
     why: site.why,
     caseOp: site.caseOp,
+    name: site.name,
   }));
   note("fetchLoopSites", {
     n: sites.length,
-    whys: sites.map((x) => x.why).slice(0, 8),
+    handlers: handlers.length,
+    handlerOps: handlers.map((h) => h.caseOp).slice(0, 12),
+    whys: tries.map((x) => x.why).slice(0, 8),
     firstCaseCol: sites.find((x) => x.why === "case")?.columnNumber ?? null,
     firstCaseOp: sites.find((x) => x.why === "case")?.caseOp ?? null,
   });
   let placed = 0;
   const seenCol = new Set();
-  for (const raw of tries) {
+  for (const loc of tries) {
     if (placed >= 48) break;
-    const loc = await resolveBreakpointLocation(session, raw);
     const colKey = `${loc.lineNumber}:${loc.columnNumber}`;
     if (seenCol.has(colKey)) continue;
-    try {
-      const bp = await session.send("Debugger.setBreakpoint", {
-        location: {
-          scriptId: loc.scriptId,
-          lineNumber: loc.lineNumber,
-          columnNumber: loc.columnNumber,
-        },
-        condition: FETCH_LOOP_BP_CONDITION,
-      });
-      if (bp?.breakpointId) {
-        seenCol.add(colKey);
-        fetchLoopBreakpoints.add(bp.breakpointId);
-        fetchLoopBpRows.push({ session, breakpointId: bp.breakpointId });
-        const resolvedOp =
-          caseOpAt(
-            scriptSource,
-            indexFromLineCol(scriptSource, loc.lineNumber, loc.columnNumber),
-          ) ?? loc.caseOp;
-        fetchLoopBpMeta.set(bp.breakpointId, {
-          caseOp: resolvedOp,
-          why: loc.why,
-          lineNumber: loc.lineNumber,
-          columnNumber: loc.columnNumber,
-          scriptId: s.scriptId,
-        });
-        placed++;
-        note("fetchLoopBp", {
-          url: (s.url || "").slice(0, 140),
-          why: loc.why,
-          caseOp: fetchLoopBpMeta.get(bp.breakpointId)?.caseOp ?? null,
-          lineNumber: loc.lineNumber,
-          columnNumber: loc.columnNumber,
-          breakpointId: bp.breakpointId,
-          resolvedFrom: loc.resolvedFrom || "exact",
-        });
-      }
-    } catch (e) {
-      note("bpErr", {
-        error: String(e).slice(0, 180),
-        why: loc.why,
-        caseOp: loc.caseOp ?? null,
-        lineNumber: loc.lineNumber,
-        columnNumber: loc.columnNumber,
-      });
+    const used = await trySetFetchLoopBp(session, s, scriptSource, loc);
+    if (used) {
+      seenCol.add(used);
+      seenCol.add(colKey);
+      placed++;
     }
   }
+  note("fetchLoopBpSummary", {
+    placed: fetchLoopBpPlaced,
+    failed: fetchLoopBpFailed,
+    thisScript: placed,
+  });
   return placed > 0;
 }
 
@@ -2783,6 +2874,10 @@ async function attachSession(session, targetInfo, waitingForDebugger) {
               row.bpWhy = meta.why;
               break;
             }
+          }
+          if (caseOp == null && fname && handlerNameToOp.has(fname)) {
+            caseOp = handlerNameToOp.get(fname);
+            row.bpWhy = row.bpWhy || "handlerFn";
           }
           if (caseOp == null && frame.location) {
             const src =
@@ -3268,6 +3363,8 @@ const summary = {
   foInitResponse: foInitResponse || null,
   fetchTuples,
   fetchTupleCap,
+  fetchLoopBpPlaced,
+  fetchLoopBpFailed,
   fetchLoopRawCount: liveFetchRaw.length,
   harvestTupleCount: harvestTuples.length,
   completeTupleCount: completeTuples.length,
@@ -3313,10 +3410,13 @@ const summary = {
     error: f.error || null,
     hookErr: f.hookErr || null,
   })),
-  events: events.slice(0, fetchTuples ? 80 : 50),
+  events: events.slice(0, fetchTuples ? 400 : 50),
 };
 
 fs.writeFileSync(path.join(outDir, "oracle.json"), JSON.stringify(summary, null, 2));
+try {
+  fs.writeFileSync(path.join(outDir, "events.json"), JSON.stringify(events, null, 2));
+} catch {}
 fs.writeFileSync(
   path.join(outDir, "network.json"),
   JSON.stringify({ fo: foNet, allChallenge: network }, null, 2),
@@ -3334,6 +3434,8 @@ console.log(
       harvestTupleCount: harvestTuples.length,
       completeTupleCount: completeTuples.length,
       fetchLoopRawCount: liveFetchRaw.length,
+      fetchLoopBpPlaced,
+      fetchLoopBpFailed,
       firstHarvestTuple: harvestTuples[0] || null,
       firstCompleteTuple: completeTuples[0] || null,
       readCount: reads.length,

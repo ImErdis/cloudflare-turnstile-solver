@@ -209,6 +209,27 @@ fn harvest_tuple_rows(v: &Value) -> Vec<Value> {
         .unwrap_or_default()
 }
 
+fn html_candidate_from_oracle(v: &Value) -> Option<FetchParams> {
+    let fs = v.get("fetchSchedule")?;
+    let mul = fs.get("keyMul")?.as_u64()? as u32;
+    let add = fs.get("keyAdd")?.as_u64()? as u32;
+    let bias = fs.get("byteBias")?.as_u64()? as u8;
+    let init = fs.get("initKeyCandidate")?.as_u64()? as u8;
+    let quad = fs.get("keyQuadB").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
+    if mul == 0 {
+        return None;
+    }
+    Some(FetchParams {
+        label: "html-candidate",
+        init_pc: 0,
+        init_key: init,
+        byte_bias: bias,
+        key_mul: mul,
+        key_add: add,
+        key_quad_b: quad,
+    })
+}
+
 fn verify_case_tuples_file(path: &PathBuf) -> Result<Value> {
     let raw = fs::read_to_string(path).with_context(|| path.display().to_string())?;
     let v: Value = serde_json::from_str(&raw)?;
@@ -222,7 +243,11 @@ fn verify_case_tuples_file(path: &PathBuf) -> Result<Value> {
         .and_then(|e| e.get("marker").and_then(|m| m.as_str()))
         .unwrap_or("");
     let mut candidates = vec![FETCH_LIVE];
-    if marker == "23196" {
+    if let Some(html) = html_candidate_from_oracle(&v) {
+        if html.key_mul != FETCH_LIVE.key_mul {
+            candidates.push(html);
+        }
+    } else if marker == "23196" {
         candidates.push(HTML_CANDIDATE_23196);
     }
     let mut reports = Vec::new();
