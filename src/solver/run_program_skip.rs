@@ -2,26 +2,35 @@
 //!
 //! Harvests string immediates (`Xf` tag 199/161, `gC`/`gl` LEB, `ge` 4th imm)
 //! without executing handlers, calling host JS, or taking jumps. Linear walk
-//! stops at the first Variable family this module does not skip (call / jump /
-//! float / packed). That is a disassembler of immediates, not a VM.
+//! skips `XU`/177 immediates (no `XI.apply`) and stops at the first jump or
+//! other Variable family this module does not skip. That is a disassembler of
+//! immediates, not a VM.
 //!
 //! `go[i] = String.fromCharCode(i)` on the 56907 iframe, so charset extras
 //! (`136`, `1`, `43`) index latin1 directly.
 
 use crate::solver::run_program_ops::{
-    GE_OPCODE, HANDLER_LAYOUT_B_LATE, InstrWidth, XF_DST_XOR, XF_INT_XOR, XF_OPCODE,
+    GE_OPCODE, InstrWidth, XF_DST_XOR, XF_INT_XOR, XF_OPCODE,
     XF_STRING_CHARSET_XOR, XF_TAG_BYTES, XF_TAG_FALSE, XF_TAG_INT, XF_TAG_LEB, XF_TAG_NULL,
     XF_TAG_NUMBER_A, XF_TAG_NUMBER_B, XF_TAG_REGEXP, XF_TAG_STRING, XF_TAG_UNDEF, XF_TAG_XOR,
-    layout_for_late, operand_from_byte,
+    jump_roles_for_late, layout_for_late, operand_from_byte,
 };
-use crate::solver::run_program_vm::{FETCH_LIVE, FetchParams, next_key, step_fetch};
+use crate::solver::run_program_vm::{FETCH_LIVE, FetchParams, step_fetch};
 use serde::Serialize;
 
 pub const GC_OPCODE: u8 = 226;
 pub const GL_OPCODE: u8 = 140;
+pub const XU_OPCODE: u8 = 177;
 pub const GC_STRING_CHARSET_XOR: u8 = 1;
 pub const GL_STRING_CHARSET_XOR: u8 = 43;
 pub const GE_KEY_IMM_XOR: u8 = 19;
+pub const XU_DST_XOR: u8 = 96;
+pub const XU_KEY_XOR: u8 = 207;
+pub const XU_FLAGS_XOR: u8 = 68;
+pub const XU_ARITY_XOR: u8 = 83;
+pub const XU_ARG_XOR: u8 = 37;
+/// Linear skip cap. Live `/fo/` packed bodies are ~600k+ bytecode bytes.
+pub const SKIP_HARVEST_INSTR_LIMIT: usize = 1_048_576;
 pub const XF_REGEXP_CHARSET_A: u8 = 195;
 pub const XF_REGEXP_CHARSET_B: u8 = 229;
 
@@ -192,8 +201,27 @@ fn skip_ge(cur: &mut Cursor<'_>, imms: &mut Vec<u8>) -> Result<(), &'static str>
     Ok(())
 }
 
-/// Linear skip-harvest from `params.init_pc` / `init_key`. Does not take jumps
-/// or invoke callees. Stops at the first unskipped Variable handler.
+/// Skip `XU`/177 immediates without `XI.apply`.
+///
+/// 56907 HTML: dst^96, u24 (three extra-0 bytes), key^207, flags^68, arity^83,
+/// then `arity` args^37. Does not call host JS.
+fn skip_xu(cur: &mut Cursor<'_>) -> Result<(), &'static str> {
+    let _dst = cur.imm(XU_DST_XOR)?;
+    let _u24_hi = cur.imm(0)?;
+    let _u24_mid = cur.imm(0)?;
+    let _u24_lo = cur.imm(0)?;
+    let _key = cur.imm(XU_KEY_XOR)?;
+    let _flags = cur.imm(XU_FLAGS_XOR)?;
+    let arity = cur.imm(XU_ARITY_XOR)?;
+    for _ in 0..arity {
+        let _ = cur.imm(XU_ARG_XOR)?;
+    }
+    Ok(())
+}
+
+/// Linear skip-harvest from `params.init_pc` / `init_key`. Skips `XU`/177
+/// immediates without apply. Does not take jumps or invoke callees. Stops at
+/// the first unskipped jump / Variable handler.
 pub fn skip_harvest_strings(bytecode: &[u8], params: FetchParams) -> SkipHarvest {
     let mut cur = Cursor {
         bytecode,
@@ -208,7 +236,8 @@ pub fn skip_harvest_strings(bytecode: &[u8], params: FetchParams) -> SkipHarvest
     let mut last_opcode = None;
     let mut stopped = "limit";
 
-    for _ in 0..4_096 {
+    let limit = bytecode.len().max(4_096).min(SKIP_HARVEST_INSTR_LIMIT);
+    for _ in 0..limit {
         if cur.at_end() {
             stopped = "end_of_bytecode";
             break;
@@ -231,6 +260,10 @@ pub fn skip_harvest_strings(bytecode: &[u8], params: FetchParams) -> SkipHarvest
             skip_gl(&mut cur, last_pc, &mut strings)
         } else if op == GE_OPCODE {
             skip_ge(&mut cur, &mut ge_key_imms)
+        } else if op == XU_OPCODE {
+            skip_xu(&mut cur)
+        } else if jump_roles_for_late(op).is_some() {
+            Err("unparsed_jump")
         } else if let Some(layout) = layout_for_late(op) {
             match layout.width {
                 InstrWidth::Fixed(w) => cur.skip_fixed(w),
@@ -241,7 +274,7 @@ pub fn skip_harvest_strings(bytecode: &[u8], params: FetchParams) -> SkipHarvest
         };
         if let Err(reason) = result {
             stopped = match (reason, op) {
-                ("unparsed_variable", 177) => "unparsed_op_177_XU",
+                ("unparsed_jump", _) => "unparsed_jump",
                 ("unparsed_variable", _) => "unparsed_variable",
                 ("xf_unskipped_tag", _) => "xf_unskipped_tag",
                 other => other.0,
@@ -328,6 +361,27 @@ mod tests {
     }
 
     #[test]
+    fn skip_harvests_xu_immediates_without_apply() {
+        let mut buf = Vec::new();
+        let mut key = FETCH_BRANCH_B_LATE.init_key;
+        push_op(&mut buf, &mut key, XU_OPCODE);
+        push_imm(&mut buf, key, XU_DST_XOR, 0);
+        push_imm(&mut buf, key, 0, 0);
+        push_imm(&mut buf, key, 0, 1);
+        push_imm(&mut buf, key, 0, 2);
+        push_imm(&mut buf, key, XU_KEY_XOR, 0);
+        push_imm(&mut buf, key, XU_FLAGS_XOR, 0);
+        push_imm(&mut buf, key, XU_ARITY_XOR, 2);
+        push_imm(&mut buf, key, XU_ARG_XOR, 3);
+        push_imm(&mut buf, key, XU_ARG_XOR, 4);
+        let h = skip_harvest_strings(&buf, FETCH_BRANCH_B_LATE);
+        assert_eq!(h.last_opcode, Some(XU_OPCODE));
+        assert_eq!(h.stopped, "end_of_bytecode");
+        assert_eq!(h.instructions, 1);
+        assert!(h.strings.is_empty());
+    }
+
+    #[test]
     fn inline_56907_stub_has_host_strings_not_followup_idents() {
         let path = std::path::Path::new("artifacts/re-out/chrome-oracle/iframe-1.html");
         if !path.is_file() {
@@ -340,9 +394,9 @@ mod tests {
         assert!(packed.starts_with("71GxwDch"));
         let bc = unpack_packed_run_program(&packed).unwrap();
         let h = skip_harvest_live(&bc);
-        assert_eq!(h.last_opcode, Some(177));
-        assert_eq!(h.stopped, "unparsed_op_177_XU");
-        assert!(h.instructions >= 10);
+        assert!(h.instructions >= 10, "instructions {}", h.instructions);
+        assert_eq!(h.stopped, "unparsed_jump");
+        assert_eq!(h.last_opcode, Some(187));
         let texts: Vec<&str> = h.strings.iter().map(|s| s.text.as_str()).collect();
         assert!(texts.contains(&"window"), "{texts:?}");
         assert!(texts.contains(&"querySelectorAll"), "{texts:?}");

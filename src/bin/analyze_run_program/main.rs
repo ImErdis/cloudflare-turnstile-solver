@@ -542,14 +542,13 @@ fn verify_oracle_file(path: &PathBuf) -> Result<Value> {
                     }
                 }
                 if let Some(hv) = fj.get("inlinePackedHarvest") {
-                    if hv.get("stopped").and_then(|x| x.as_str()) != Some("unparsed_op_177_XU") {
-                        errors.push("foFollowUpJson.inlinePackedHarvest.stopped mismatch".into());
-                    }
                     if hv.get("extraIdentInStub") != Some(&Value::Bool(false)) {
                         errors.push("inlinePackedHarvest.extraIdentInStub should be false".into());
                     }
-                    if hv.get("lastOpcode").and_then(|x| x.as_u64()) != Some(177) {
-                        errors.push("inlinePackedHarvest.lastOpcode should be 177".into());
+                    if hv.get("stopped").and_then(|x| x.as_str()) == Some("unparsed_op_177_XU") {
+                        errors.push(
+                            "inlinePackedHarvest.stopped should not be unparsed_op_177_XU (XU immediates are skipped without apply)".into(),
+                        );
                     }
                 }
                 if fj.get("numericSlotKind").and_then(|x| x.as_str()) == Some("object") {

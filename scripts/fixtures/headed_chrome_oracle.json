@@ -422,13 +422,15 @@
       ],
       "inlinePackedHarvest": {
         "source": "runProgram(`71GxwDch…`) 5k stub in 56907 iframe HTML, not the 822k /fo/ init response",
-        "stopped": "unparsed_op_177_XU",
-        "lastOpcode": 177,
+        "stopped": "unparsed_jump",
+        "lastOpcode": 187,
+        "instructions": 13,
+        "stringCount": 10,
         "hasWindow": true,
         "hasQuerySelectorAll": true,
         "extraIdentInStub": false,
         "geKeyImm1to39": false,
-        "note": "Skip-harvest only. Live 822k packed body was not saved. Do not execute handlers."
+        "note": "Skip-harvest skips XU/177 immediates without XI.apply and stops at the first jump (XX/187). Live 822k packed body is recaptured separately. Do not execute handlers."
       },
       "leftoverProbe": {
         "status": "f4-inferred",

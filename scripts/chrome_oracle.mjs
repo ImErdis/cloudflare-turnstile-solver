@@ -11,8 +11,12 @@
  * Leftover extra-ident writes are logged as `{pc, opcode, key, valueKind}` via a
  * Proxy / `defineProperty` wrap on the `fn(initObj, fj)` argument — not values.
  * Fetch-loop Debugger breakpoints stay off unless `ORACLE_FETCH_LOOP_BP=1`
- * (they stalled `/fo/`). Does **not** reconstruct a live `/fo/` body, dump full
- * POST bodies, fill JSON values, execute handlers as a solver, or harvest a token.
+ * (they stalled `/fo/`). The iframe calls a **local** `runProgram`, so wrapping
+ * `globalThis.runProgram` does not see the packed argument (`packedMeta` stays
+ * null). Capture the init `/fo/` **response** instead (`Fetch.getResponseBody`
+ * then `continueRequest` — do not rewrite `/fo/`). Does **not** reconstruct a
+ * live `/fo/` POST body, dump full POST bodies, fill JSON values, execute
+ * handlers as a solver, or harvest a token.
  *
  * Usage:
  *   DISPLAY=:1 node scripts/chrome_oracle.mjs [url] [out-dir]
@@ -850,6 +854,11 @@ function classifyFoResponseLen(len) {
   return "other";
 }
 
+function rayFromFoUrl(u) {
+  const m = String(u || "").match(/\/fo\/[^/]+\/([0-9a-fA-F]{16})\//);
+  return m ? m[1].toLowerCase() : null;
+}
+
 function foBodyShape(foNet, xhr, iframeHtml) {
   const charset = extractCompressorCharset(iframeHtml || "");
   const rows = [];
@@ -1567,7 +1576,11 @@ function selfTestInject() {
       leftoverRotated.namesRotated === true &&
       leftoverRotated.extraOpcodes[0] === 177 &&
       classifyLeftoverOpcode(226).writePath === "bytecode_string" &&
-      classifyLeftoverOpcode(177).writePath === "host_xi",
+      classifyLeftoverOpcode(177).writePath === "host_xi" &&
+      rayFromFoUrl(
+        "https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/b/fo/907568659:1:x/a2ee5624d969f508/ch",
+      ) === "a2ee5624d969f508" &&
+      rayFromFoUrl("https://example.com/") === null,
     happyOld: { replacements: a.replacements, injected: a.injected },
     happyLive: { replacements: b.replacements, injected: b.injected },
     catchLive: { replacements: c.replacements, injected: c.injected },
@@ -1636,9 +1649,43 @@ const compressorBreakpoints = new Set();
 const compressorScripts = new Set();
 const scriptNotes = [];
 let iframeRewrites = 0;
+let foInitResponse = null;
 
 function note(kind, payload) {
   events.push({ t: Date.now(), kind, ...payload });
+}
+
+function saveFoResponse(url, text, status, via) {
+  const len = (text || "").length;
+  const ray = rayFromFoUrl(url);
+  const band = classifyFoResponseLen(len);
+  const meta = {
+    via,
+    status,
+    respLen: len,
+    respPrefix: String(text || "").slice(0, 24),
+    ray,
+    band,
+    urlTail: String(url || "").split("/fo/")[1] || "",
+  };
+  note("foResponse", meta);
+  const packed =
+    status === 200 && (band === "packedRunProgram" || len >= 50000);
+  if (!packed || selfTest) return meta;
+  if (foInitResponse?.saved) return meta;
+  try {
+    fs.writeFileSync(path.join(outDir, "fo-init-response.txt"), text);
+    if (ray) fs.writeFileSync(path.join(outDir, "fo-init-ray.txt"), ray);
+    fs.writeFileSync(
+      path.join(outDir, "fo-init-response-meta.json"),
+      JSON.stringify({ ...meta, saved: len }, null, 2),
+    );
+    meta.saved = len;
+    foInitResponse = meta;
+  } catch (e) {
+    note("foResponseSaveErr", { error: String(e).slice(0, 160) });
+  }
+  return meta;
 }
 
 async function onFetchPaused(session, evt) {
@@ -1702,6 +1749,28 @@ async function onFetchPaused(session, evt) {
       });
       return;
     }
+    const isFo =
+      evt.responseStatusCode && /\/fo\//.test(reqUrl);
+    if (isFo) {
+      try {
+        const body = await session.send("Fetch.getResponseBody", {
+          requestId: evt.requestId,
+        });
+        const text = body.base64Encoded
+          ? Buffer.from(body.body, "base64").toString("utf8")
+          : body.body;
+        saveFoResponse(reqUrl, text, evt.responseStatusCode, "fetch");
+      } catch (e) {
+        note("foFetchBodyErr", {
+          url: reqUrl.slice(0, 160),
+          error: String(e).slice(0, 160),
+        });
+      }
+      await session
+        .send("Fetch.continueRequest", { requestId: evt.requestId })
+        .catch(() => {});
+      return;
+    }
   } catch (e) {
     note("fetchRewriteErr", { url: reqUrl, error: String(e) });
   }
@@ -1740,6 +1809,22 @@ function wireNetwork(session, label) {
     rec.encodedDataLength = evt.encodedDataLength;
     network.push(redactedPost(rec));
     pending.delete(evt.requestId);
+    const wantFo = /\/fo\//.test(rec.url || "") && rec.status === 200;
+    if (!wantFo || selfTest || foInitResponse?.saved) return;
+    session
+      .send("Network.getResponseBody", { requestId: evt.requestId })
+      .then((body) => {
+        const text = body.base64Encoded
+          ? Buffer.from(body.body, "base64").toString("utf8")
+          : body.body;
+        saveFoResponse(rec.url, text, rec.status, "network");
+      })
+      .catch((e) => {
+        note("foRespBodyErr", {
+          encoded: rec.encodedDataLength,
+          error: String(e).slice(0, 160),
+        });
+      });
   });
 }
 
@@ -2284,6 +2369,7 @@ const summary = {
     : null,
   leftoverProbe: leftoverProbeSummary(writes, followUpJson?.extraIdent || []),
   packedMeta: packedMeta || null,
+  foInitResponse: foInitResponse || null,
   foPlaintextShapes: foShapes.map((s) => ({
     via: s.via,
     keyCount: s.keyCount,
