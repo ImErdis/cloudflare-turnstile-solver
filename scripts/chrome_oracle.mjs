@@ -2112,6 +2112,8 @@ function selfTestInject() {
   const handlerSrc =
     "switch(Q){case 220:Jj[Hq](this);break;case 151:JY[Hq](this);break;case 1:L[Hq](this);break;case 2:L[Hq](this);break;} function Jj(a){return a} function JY(a){return a} function L(a){return a}";
   const handlerSites = fetchLoopHandlerSites(handlerSrc, handlerSrc.indexOf("switch"));
+  const uniqueCalls = fetchLoopUniqueCallSites(handlerSrc, handlerSrc.indexOf("switch"));
+  const jjCall = uniqueCalls.find((x) => x.name === "Jj");
   const handlerThisGSrc =
     "switch(Q){case 220:Jj[Hq](this);break;} function Jj(a){var z=this.g;return z}";
   const handlerThisGSites = fetchLoopHandlerSites(
@@ -2292,6 +2294,11 @@ function selfTestInject() {
       handlerSites.some((x) => x.why === "handlerFn" && x.caseOp === 220 && x.name === "Jj") &&
       handlerSites.some((x) => x.why === "handlerFn" && x.caseOp === 151 && x.name === "JY") &&
       handlerSites.every((x) => x.name !== "L") &&
+      uniqueCalls.some((x) => x.why === "handlerCall" && x.caseOp === 220 && x.name === "Jj") &&
+      uniqueCalls.some((x) => x.why === "handlerCall" && x.caseOp === 151 && x.name === "JY") &&
+      uniqueCalls.every((x) => x.name !== "L") &&
+      jjCall &&
+      handlerSrc.slice(jjCall.idx, jjCall.idx + 2) === "Jj" &&
       handlerThisGSites.some(
         (x) =>
           x.why === "handlerFn" &&
@@ -2727,12 +2734,28 @@ function recordAmbiguousHandlerNames(src, markerIdx) {
   return byName;
 }
 
-/** Pause at `this.g` (before immediates), not the function `{` after a huge object literal. */
-function uniqueHandlerEntryIdx(src, name) {
+function uniqueNamedFunctionIdx(src, name) {
   if (!src || !name) return null;
   const pat = `function ${name}(`;
-  const first = src.indexOf(pat);
-  if (first < 0) return null;
+  let from = 0;
+  let count = 0;
+  let first = -1;
+  while (from < src.length) {
+    const i = src.indexOf(pat, from);
+    if (i < 0) break;
+    if (first < 0) first = i;
+    count++;
+    from = i + pat.length;
+  }
+  if (count !== 1 || first < 0) return null;
+  return first;
+}
+
+/** `this.g` inside a unique handler. Body BPs snap past PW++; live capture uses call sites. */
+function uniqueHandlerEntryIdx(src, name) {
+  if (!src || !name) return null;
+  const first = uniqueNamedFunctionIdx(src, name);
+  if (first == null) return null;
   const brace = src.indexOf("{", first);
   if (brace < 0) return null;
   const nextFn = src.indexOf("function ", brace + 1);
@@ -2747,6 +2770,37 @@ function uniqueHandlerEntryIdx(src, name) {
   return brace;
 }
 
+/** Unique `case N:name[` call in the fetch switch — after decode, before handler PW++. */
+function fetchLoopUniqueCallSites(src, markerIdx) {
+  if (!src || markerIdx == null || markerIdx < 0) return [];
+  const byName = collectHandlerCaseOps(src, markerIdx);
+  const winStart = Math.max(0, markerIdx - 400);
+  const window = src.slice(winStart, markerIdx + 25000);
+  const sites = [];
+  const seenIdx = new Set();
+  const re = /case (\d+):(\w+)[\[(]/g;
+  let m;
+  while ((m = re.exec(window))) {
+    const op = Number(m[1]);
+    const name = m[2];
+    const ops = byName.get(name);
+    if (!ops || ops.size !== 1 || [...ops][0] !== op) continue;
+    if (uniqueNamedFunctionIdx(src, name) == null) continue;
+    let idx = winStart + m.index + m[0].indexOf(":") + 1;
+    while (idx < src.length && src[idx] === " ") idx++;
+    if (seenIdx.has(idx)) continue;
+    seenIdx.add(idx);
+    sites.push({
+      idx,
+      why: "handlerCall",
+      caseOp: op,
+      name,
+      ...sourceLineCol(src, idx),
+    });
+  }
+  return sites;
+}
+
 function fetchLoopHandlerSites(src, markerIdx) {
   if (!src || markerIdx == null || markerIdx < 0) return [];
   const byName = collectHandlerCaseOps(src, markerIdx);
@@ -2754,18 +2808,7 @@ function fetchLoopHandlerSites(src, markerIdx) {
   const seenIdx = new Set();
   for (const [name, ops] of byName) {
     if (ops.size !== 1) continue;
-    const pat = `function ${name}(`;
-    let from = 0;
-    let count = 0;
-    let first = -1;
-    while (from < src.length) {
-      const i = src.indexOf(pat, from);
-      if (i < 0) break;
-      if (first < 0) first = i;
-      count++;
-      from = i + pat.length;
-    }
-    if (count !== 1 || first < 0) continue;
+    if (uniqueNamedFunctionIdx(src, name) == null) continue;
     const idx = uniqueHandlerEntryIdx(src, name);
     if (idx == null || seenIdx.has(idx)) continue;
     seenIdx.add(idx);
@@ -2811,7 +2854,16 @@ async function resolveBreakpointLocation(session, loc) {
 }
 
 async function trySetFetchLoopBp(session, s, scriptSource, loc) {
-  const attempts = [loc];
+  const resolved = await resolveBreakpointLocation(session, loc);
+  const attempts = [];
+  const seenAttempt = new Set();
+  for (const attempt of [resolved, loc]) {
+    if (!attempt) continue;
+    const k = `${attempt.lineNumber}:${attempt.columnNumber}`;
+    if (seenAttempt.has(k)) continue;
+    seenAttempt.add(k);
+    attempts.push(attempt);
+  }
   for (let i = 0; i < attempts.length; i++) {
     const attempt = attempts[i];
     try {
@@ -2824,6 +2876,35 @@ async function trySetFetchLoopBp(session, s, scriptSource, loc) {
         condition: FETCH_LOOP_BP_CONDITION,
       });
       if (!bp?.breakpointId) continue;
+      const actual = bp.actualLocation;
+      const reqIdx = indexFromLineCol(
+        scriptSource,
+        attempt.lineNumber,
+        attempt.columnNumber,
+      );
+      const actIdx =
+        actual && typeof actual.columnNumber === "number"
+          ? indexFromLineCol(scriptSource, actual.lineNumber, actual.columnNumber)
+          : reqIdx;
+      if (
+        reqIdx != null &&
+        actIdx != null &&
+        Math.abs(actIdx - reqIdx) > 120
+      ) {
+        await session
+          .send("Debugger.removeBreakpoint", { breakpointId: bp.breakpointId })
+          .catch(() => {});
+        fetchLoopBpFailed++;
+        note("fetchLoopBpSnapped", {
+          why: loc.why,
+          name: loc.name || null,
+          caseOp: loc.caseOp ?? null,
+          req: reqIdx,
+          act: actIdx,
+          delta: actIdx - reqIdx,
+        });
+        continue;
+      }
       fetchLoopBreakpoints.add(bp.breakpointId);
       fetchLoopBpRows.push({ session, breakpointId: bp.breakpointId });
       const resolvedOp =
@@ -2837,11 +2918,15 @@ async function trySetFetchLoopBp(session, s, scriptSource, loc) {
         caseOp: resolvedOp,
         why: loc.why,
         name: loc.name,
-        lineNumber: attempt.lineNumber,
-        columnNumber: attempt.columnNumber,
+        lineNumber: actual?.lineNumber ?? attempt.lineNumber,
+        columnNumber: actual?.columnNumber ?? attempt.columnNumber,
         scriptId: s.scriptId,
       });
-      if (loc.why === "handlerFn" && loc.name && resolvedOp != null) {
+      if (
+        (loc.why === "handlerFn" || loc.why === "handlerCall") &&
+        loc.name &&
+        resolvedOp != null
+      ) {
         handlerNameToOp.set(loc.name, resolvedOp);
       }
       fetchLoopBpPlaced++;
@@ -2852,6 +2937,8 @@ async function trySetFetchLoopBp(session, s, scriptSource, loc) {
         caseOp: resolvedOp ?? null,
         lineNumber: attempt.lineNumber,
         columnNumber: attempt.columnNumber,
+        actualLine: actual?.lineNumber ?? null,
+        actualColumn: actual?.columnNumber ?? null,
         breakpointId: bp.breakpointId,
         resolvedFrom: attempt.resolvedFrom || "exact",
       });
@@ -2865,16 +2952,6 @@ async function trySetFetchLoopBp(session, s, scriptSource, loc) {
         lineNumber: attempt.lineNumber,
         columnNumber: attempt.columnNumber,
       });
-      if (i === 0) {
-        const resolved = await resolveBreakpointLocation(session, loc);
-        if (
-          resolved &&
-          (resolved.columnNumber !== loc.columnNumber ||
-            resolved.lineNumber !== loc.lineNumber)
-        ) {
-          attempts.push(resolved);
-        }
-      }
     }
   }
   return null;
@@ -2884,6 +2961,7 @@ async function setFetchLoopBreakpointNear(session, s, scriptSource, idx) {
   scriptSources.set(s.scriptId, scriptSource);
   recordAmbiguousHandlerNames(scriptSource, idx);
   const sites = fetchLoopBreakpointSites(scriptSource, idx);
+  const uniqueCalls = fetchLoopUniqueCallSites(scriptSource, idx);
   const handlers = fetchLoopHandlerSites(scriptSource, idx);
   const { lineNumber, columnNumber } = sourceLineCol(scriptSource, idx);
   const caseCalls = sites.filter((x) => x.why === "caseCall");
@@ -2895,7 +2973,8 @@ async function setFetchLoopBreakpointNear(session, s, scriptSource, idx) {
     { scriptId: s.scriptId, lineNumber, columnNumber, why: "marker", caseOp: null },
     ...rest,
   ];
-  const tries = (handlers.length ? handlers : fallback).map((site) => ({
+  const preferred = uniqueCalls.length ? uniqueCalls : handlers;
+  const tries = (preferred.length ? preferred : fallback).map((site) => ({
     scriptId: s.scriptId,
     lineNumber: site.lineNumber,
     columnNumber: site.columnNumber,
@@ -2905,8 +2984,9 @@ async function setFetchLoopBreakpointNear(session, s, scriptSource, idx) {
   }));
   note("fetchLoopSites", {
     n: sites.length,
+    uniqueCalls: uniqueCalls.length,
     handlers: handlers.length,
-    handlerOps: handlers.map((h) => h.caseOp).slice(0, 12),
+    handlerOps: preferred.map((h) => h.caseOp).slice(0, 12),
     whys: tries.map((x) => x.why).slice(0, 8),
     firstCaseCol: sites.find((x) => x.why === "case")?.columnNumber ?? null,
     firstCaseOp: sites.find((x) => x.why === "case")?.caseOp ?? null,
@@ -3081,45 +3161,60 @@ async function attachSession(session, targetInfo, waitingForDebugger) {
         }
         const fetchHit = hit.some((id) => fetchLoopBreakpoints.has(id));
         if (fetchHit && frame && liveFetchRaw.length < fetchTupleCap) {
-          if (fname && ambiguousHandlerNames.has(fname)) {
-            note("fetchLoopSkipAmbiguous", { fn: fname });
-            return;
-          }
-          if (fname && String(fname).includes("<computed>")) {
-            note("fetchLoopSkipComputed", { fn: fname });
-            return;
-          }
-          if (!fname || !handlerNameToOp.has(fname)) {
-            note("fetchLoopSkipNonUniqueFn", { fn: fname || "" });
-            return;
-          }
-          if (frame.location) {
-            const srcForFn =
-              scriptSources.get(frame.location.scriptId) ||
-              scriptSources.get(String(frame.location.scriptId));
-            const entry = srcForFn ? uniqueHandlerEntryIdx(srcForFn, fname) : null;
-            const pauseIdx = srcForFn
-              ? indexFromLineCol(
-                  srcForFn,
-                  frame.location.lineNumber,
-                  frame.location.columnNumber,
-                )
-              : null;
+          let callMeta = null;
+          for (const id of hit) {
+            const meta = fetchLoopBpMeta.get(id);
             if (
-              entry != null &&
-              pauseIdx != null &&
-              Math.abs(pauseIdx - entry) > 240
+              meta &&
+              (meta.why === "handlerCall" || meta.why === "handlerFn") &&
+              meta.caseOp != null
             ) {
-              note("fetchLoopSkipDeepHandler", {
-                fn: fname,
-                pauseIdx,
-                entry,
-                delta: pauseIdx - entry,
-              });
-              return;
+              callMeta = meta;
+              break;
             }
           }
-          const row = { via: "fetchLoop", fn: fname };
+          if (!callMeta) {
+            if (fname && ambiguousHandlerNames.has(fname)) {
+              note("fetchLoopSkipAmbiguous", { fn: fname });
+              return;
+            }
+            if (fname && String(fname).includes("<computed>")) {
+              note("fetchLoopSkipComputed", { fn: fname });
+              return;
+            }
+            if (!fname || !handlerNameToOp.has(fname)) {
+              note("fetchLoopSkipNonUniqueFn", { fn: fname || "" });
+              return;
+            }
+            if (frame.location) {
+              const srcForFn =
+                scriptSources.get(frame.location.scriptId) ||
+                scriptSources.get(String(frame.location.scriptId));
+              const entry = srcForFn ? uniqueHandlerEntryIdx(srcForFn, fname) : null;
+              const pauseIdx = srcForFn
+                ? indexFromLineCol(
+                    srcForFn,
+                    frame.location.lineNumber,
+                    frame.location.columnNumber,
+                  )
+                : null;
+              if (
+                entry != null &&
+                pauseIdx != null &&
+                Math.abs(pauseIdx - entry) > 240
+              ) {
+                note("fetchLoopSkipDeepHandler", {
+                  fn: fname,
+                  pauseIdx,
+                  entry,
+                  delta: pauseIdx - entry,
+                });
+                return;
+              }
+            }
+          }
+          const harvestName = (callMeta && callMeta.name) || fname;
+          const row = { via: "fetchLoop", fn: harvestName };
           const frames = (evt.callFrames || []).slice(0, 6);
           row.frameNames = frames.map((f) => f.functionName || "");
           row.hitBreakpoints = hit;
@@ -3129,22 +3224,27 @@ async function attachSession(session, targetInfo, waitingForDebugger) {
             row.scriptId = frame.location.scriptId;
           }
           let caseOp;
-          for (const id of hit) {
-            const meta = fetchLoopBpMeta.get(id);
-            if (meta && meta.caseOp != null) {
-              caseOp = meta.caseOp;
-              row.bpWhy = meta.why;
-              break;
-            }
-          }
-          const uniqueOp = handlerNameToOp.get(fname);
-          if (caseOp != null && caseOp !== uniqueOp) {
-            row.bpCaseOp = caseOp;
-            row.bpWhy = "pausedFn";
+          if (callMeta && callMeta.caseOp != null) {
+            caseOp = callMeta.caseOp;
+            row.bpWhy = callMeta.why;
           } else {
-            row.bpWhy = row.bpWhy || "handlerFn";
+            for (const id of hit) {
+              const meta = fetchLoopBpMeta.get(id);
+              if (meta && meta.caseOp != null) {
+                caseOp = meta.caseOp;
+                row.bpWhy = meta.why;
+                break;
+              }
+            }
+            const uniqueOp = handlerNameToOp.get(fname);
+            if (caseOp != null && uniqueOp != null && caseOp !== uniqueOp) {
+              row.bpCaseOp = caseOp;
+              row.bpWhy = "pausedFn";
+            } else {
+              row.bpWhy = row.bpWhy || "handlerFn";
+            }
+            caseOp = uniqueOp != null ? uniqueOp : caseOp;
           }
-          caseOp = uniqueOp;
           if (caseOp != null) {
             row.caseOp = caseOp;
             row.op = caseOp & 255;
@@ -3176,7 +3276,7 @@ async function attachSession(session, targetInfo, waitingForDebugger) {
               const v = got.result?.value;
               if (v && typeof v === "object" && (v.hasG || v.gLen || v.pcSlot != null)) {
                 Object.assign(row, v);
-                row.fn = fname || frName || row.fn;
+                row.fn = harvestName || fname || frName || row.fn;
                 break;
               }
               if (v && typeof v === "object" && row.thisType == null) {
