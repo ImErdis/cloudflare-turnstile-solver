@@ -360,6 +360,19 @@
         "gNcr3": "number"
       },
       "jsonOmittedExtraIdent": ["OQbM0", "UjLjP6", "YfDjo7", "Iqrc9", "OZgbm6"],
+      "numericSlotKind": "object",
+      "numericSlotKeyCountMin": 9,
+      "numericSlotKeyCountMax": 32,
+      "numericKinds": {
+        "1": "object:10", "2": "object:11", "3": "object:11", "4": "object:13", "5": "object:10",
+        "6": "object:10", "7": "object:10", "8": "object:10", "9": "object:10", "10": "object:10",
+        "11": "object:14", "12": "object:11", "13": "object:17", "14": "object:32", "15": "object:10",
+        "16": "object:9", "17": "object:20", "18": "object:13", "19": "object:10", "20": "object:17",
+        "21": "object:10", "22": "object:13", "23": "object:15", "24": "object:16", "25": "object:23",
+        "26": "object:11", "27": "object:10", "28": "object:13", "29": "object:14", "30": "object:9",
+        "31": "object:15", "32": "object:9", "33": "object:10", "34": "object:17", "35": "object:25",
+        "36": "object:10", "37": "object:10", "38": "object:12", "39": "object:15"
+      },
       "numericKeysInHtml": false,
       "extraIdentHtml": [
         { "name": "SMrTl9", "html": "chl_opt" },
@@ -416,6 +429,14 @@
         "extraIdentInStub": false,
         "geKeyImm1to39": false,
         "note": "Skip-harvest only. Live 822k packed body was not saved. Do not execute handlers."
+      },
+      "leftoverProbe": {
+        "status": "pending",
+        "unseenNames": [
+          "OQbM0", "UjLjP6", "YfDjo7", "Iqrc9", "OZgbm6", "pFyv1", "SfUI1", "sqKXG6",
+          "HUDi4", "DTBF3", "mQiic7", "gNcr3"
+        ],
+        "note": "Chrome assignment / defineProperty probe for unseen_in_dumps extras. Log {pc, opcode, key, valueKind} only. No value dump, no POST, no fetch-loop breakpoints."
       }
     },
     "eveningLinear": {

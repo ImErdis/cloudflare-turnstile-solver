@@ -64,6 +64,32 @@ pub const FOLLOWUP_NUMERIC_KEY_MAX_B: u32 = 39;
 /// Numeric follow-up slots come from runtime writes, not an object literal.
 pub const FOLLOWUP_NUMERIC_KEYS_IN_HTML: bool = false;
 
+/// Headed Chrome later `f4` (`artifacts/re-out/chrome-oracle-keys`, 56907 day):
+/// every `"1"`..`"39"` value is an object (entry), not a string/number.
+pub const FOLLOWUP_NUMERIC_SLOT_KIND_B: &str = "object";
+
+/// Own-key counts on those entry objects (`object:N` kinds). Lengths only.
+pub const FOLLOWUP_NUMERIC_SLOT_KEYCOUNT_MIN_B: u32 = 9;
+pub const FOLLOWUP_NUMERIC_SLOT_KEYCOUNT_MAX_B: u32 = 32;
+
+/// Extra ident still `unseen_in_dumps` after HTML + stub skip-harvest.
+/// Chrome leftover assignment probe watches these names (plus numeric keys).
+pub const FOLLOWUP_UNSEEN_EXTRA_IDENT_B: &[&str] = &[
+    "OQbM0", "UjLjP6", "YfDjo7", "Iqrc9", "OZgbm6", "pFyv1", "SfUI1", "sqKXG6", "HUDi4",
+    "DTBF3", "mQiic7", "gNcr3",
+];
+
+/// Map a Chrome leftover assignment opcode to a write_path. `None` / unknown
+/// stays `unseen_in_dumps` (inject miss is not a handler story).
+pub fn write_path_from_chrome_opcode(opcode: Option<u8>) -> &'static str {
+    match opcode {
+        Some(177) => "host_xi",
+        Some(226) => "bytecode_string",
+        Some(227) | Some(169) | Some(138) => "property_set",
+        _ => "unseen_in_dumps",
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct ExtraIdentHtmlSource {
     pub name: &'static str,
@@ -96,7 +122,9 @@ pub struct FollowUpFieldWrite {
     pub name: &'static str,
     /// `chl_opt` / `other_object` / `string_table` / `absent` / `init_obj` / `numeric_family`.
     pub source: &'static str,
-    /// `host_copy` / `bytecode_string` / `glue` / `host_xi` / `vm_entry_index` / `unseen_in_dumps`.
+    /// `host_copy` / `bytecode_string` / `glue` / `host_xi` / `property_set` /
+    /// `vm_entry_index` / `unseen_in_dumps`. `property_set` is Chrome leftover
+    /// only (`gG`/227, `ge`/169, `gN`/138) — do not infer it from HTML bodies.
     pub write_path: &'static str,
     pub opcode: Option<u8>,
     pub evidence: &'static str,
@@ -154,7 +182,7 @@ pub const FOLLOWUP_FIELD_WRITE_B: &[FollowUpFieldWrite] = &[
     w("MaOkK2", "init_obj", "glue", None,
         "on the init object literal (\"MaOkK2\": host call). Absent from later f4 identKeys. delete/drop not in HTML."),
     w("1..39", "numeric_family", "vm_entry_index", None,
-        "consecutive 1-based keys, count 39, no quoted \"1\": in HTML. Same kind as orchestrate-era parsed_vm.entries under \"1\"..\"N\". ge/169 can write an integer key imm; the HTML-embedded stub harvested none in 1..=39. Kinds for numeric slots were not saved."),
+        "consecutive 1-based keys, count 39, no quoted \"1\": in HTML. Same kind as orchestrate-era parsed_vm.entries under \"1\"..\"N\". Headed Chrome later f4 (chrome-oracle-keys): every slot is object, own-key counts 9..=32. ge/169 can write an integer key imm; the HTML-embedded stub harvested none in 1..=39."),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -302,6 +330,19 @@ mod tests {
         assert_eq!(dropped.source, "init_obj");
         let numeric = FOLLOWUP_FIELD_WRITE_B.iter().find(|r| r.name == "1..39").unwrap();
         assert_eq!(numeric.write_path, "vm_entry_index");
+        assert_eq!(FOLLOWUP_NUMERIC_SLOT_KIND_B, "object");
+        assert_eq!(FOLLOWUP_NUMERIC_SLOT_KEYCOUNT_MIN_B, 9);
+        assert_eq!(FOLLOWUP_NUMERIC_SLOT_KEYCOUNT_MAX_B, 32);
+        assert_eq!(FOLLOWUP_UNSEEN_EXTRA_IDENT_B.len(), 12);
+        for name in FOLLOWUP_UNSEEN_EXTRA_IDENT_B {
+            let row = FOLLOWUP_FIELD_WRITE_B.iter().find(|r| r.name == *name).unwrap();
+            assert_eq!(row.write_path, "unseen_in_dumps", "{name}");
+        }
+        assert_eq!(write_path_from_chrome_opcode(Some(177)), "host_xi");
+        assert_eq!(write_path_from_chrome_opcode(Some(226)), "bytecode_string");
+        assert_eq!(write_path_from_chrome_opcode(Some(227)), "property_set");
+        assert_eq!(write_path_from_chrome_opcode(Some(169)), "property_set");
+        assert_eq!(write_path_from_chrome_opcode(None), "unseen_in_dumps");
         assert_eq!(NEXT_AFTER_FOLLOWUP_JSON, "handler_semantics");
         let path = std::path::Path::new("artifacts/re-out/chrome-oracle/iframe-1.html");
         if path.is_file() {
@@ -387,6 +428,16 @@ mod tests {
         }
         if let Some(n) = row["numericKeyCount"].as_u64() {
             assert_eq!(n, FOLLOWUP_NUMERIC_KEY_MAX_B as u64);
+        }
+        if row.get("numericSlotKind").and_then(|x| x.as_str()) == Some("object") {
+            assert_eq!(
+                row["numericSlotKeyCountMin"].as_u64(),
+                Some(FOLLOWUP_NUMERIC_SLOT_KEYCOUNT_MIN_B as u64)
+            );
+            assert_eq!(
+                row["numericSlotKeyCountMax"].as_u64(),
+                Some(FOLLOWUP_NUMERIC_SLOT_KEYCOUNT_MAX_B as u64)
+            );
         }
         if let Some(ident) = row["identKeys"].as_array() {
             let names: Vec<String> = ident

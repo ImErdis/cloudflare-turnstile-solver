@@ -8,8 +8,11 @@
  * historical) inside the OOPIF iframe. Logs `{pc, op, key, byte}` so instruction
  * widths are PC deltas — not a 1-byte walk. Debugger on `f4` / `wZ` records the
  * plaintext object's **key names and value kinds** (string lengths, not contents).
- * Does **not** reconstruct a live `/fo/` body, dump full POST bodies, fill JSON
- * values, execute handlers as a solver, or harvest a token.
+ * Leftover extra-ident writes are logged as `{pc, opcode, key, valueKind}` via a
+ * Proxy / `defineProperty` wrap on the `fn(initObj, fj)` argument — not values.
+ * Fetch-loop Debugger breakpoints stay off unless `ORACLE_FETCH_LOOP_BP=1`
+ * (they stalled `/fo/`). Does **not** reconstruct a live `/fo/` body, dump full
+ * POST bodies, fill JSON values, execute handlers as a solver, or harvest a token.
  *
  * Usage:
  *   DISPLAY=:1 node scripts/chrome_oracle.mjs [url] [out-dir]
@@ -61,6 +64,12 @@ const PREAMBLE = `(() => {
   globalThis.__cfXhr = globalThis.__cfXhr || [];
   globalThis.__cfRP = globalThis.__cfRP || [];
   globalThis.__cfFo = globalThis.__cfFo || [];
+  globalThis.__cfWrites = globalThis.__cfWrites || [];
+  const __cfDefProp = Object.defineProperty;
+  const __cfLeftover = {
+    OQbM0:1, UjLjP6:1, YfDjo7:1, Iqrc9:1, OZgbm6:1, pFyv1:1, SfUI1:1,
+    sqKXG6:1, HUDi4:1, DTBF3:1, mQiic7:1, gNcr3:1
+  };
   function __cfKind(v) {
     if (v === null) return "null";
     if (Array.isArray(v)) return "array:" + v.length;
@@ -68,6 +77,72 @@ const PREAMBLE = `(() => {
     if (t === "string") return "string:" + v.length;
     if (t === "object") return "object:" + Object.keys(v).length;
     return t;
+  }
+  function __cfLastOp() {
+    const ops = globalThis.__cfOp || [];
+    const last = ops.length ? ops[ops.length - 1] : null;
+    return {
+      pc: last && last.pc,
+      opcode: last && last.op,
+      fetchKey: last && last.key,
+      opCount: ops.length
+    };
+  }
+  function __cfLogWrite(key, value, via) {
+    try {
+      const k = String(key);
+      const writes = globalThis.__cfWrites;
+      if (writes.length >= 80) return;
+      const isDel = via === "delete";
+      if (writes.some(function (w) { return w.key === k && (isDel ? w.via === "delete" : w.via !== "delete"); })) return;
+      const op = __cfLastOp();
+      writes.push({
+        via: via,
+        key: k,
+        leftover: !!__cfLeftover[k],
+        numeric: /^\\d+$/.test(k),
+        valueKind: String(__cfKind(value)).split(":")[0],
+        pc: op.pc == null ? null : op.pc,
+        opcode: op.opcode == null ? null : op.opcode,
+        opCount: op.opCount
+      });
+    } catch (e) {}
+  }
+  function __cfWatchInit(initObj) {
+    const baseline = Object.create(null);
+    try {
+      const keys = Object.keys(initObj || {});
+      for (let i = 0; i < keys.length; i++) baseline[keys[i]] = 1;
+    } catch (e) {}
+    function interesting(k) {
+      const s = String(k);
+      if (__cfLeftover[s] || s === "MaOkK2") return true;
+      if (/^\\d+$/.test(s)) return true;
+      return !baseline[s];
+    }
+    function log(k, v, via) {
+      if (!interesting(k)) return;
+      __cfLogWrite(k, v, via);
+    }
+    let proxy = initObj;
+    try {
+      proxy = new Proxy(initObj, {
+        set: function (t, p, v) {
+          log(p, v, "set");
+          t[p] = v;
+          return true;
+        },
+        defineProperty: function (t, p, desc) {
+          log(p, desc && ("value" in desc) ? desc.value : undefined, "defineProperty");
+          return __cfDefProp(t, p, desc);
+        },
+        deleteProperty: function (t, p) {
+          log(p, undefined, "delete");
+          return delete t[p];
+        }
+      });
+    } catch (e) {}
+    return { proxy: proxy, baseline: baseline, log: log, interesting: interesting };
   }
   function __cfShape(obj, via) {
     if (!obj || typeof obj !== "object" || Array.isArray(obj)) return null;
@@ -175,10 +250,19 @@ const PREAMBLE = `(() => {
             packedLen: packed && packed.length,
             packedPrefix: String(packed || "").slice(0, 20),
           });
+          if (typeof packed === "string" && packed.length > 50000 && !globalThis.__cfPackedMeta) {
+            globalThis.__cfPackedMeta = {
+              packedLen: packed.length,
+              packedPrefix: packed.slice(0, 20),
+            };
+            globalThis.__cfPacked = packed;
+          }
         } catch {}
         const ret = v.apply(this, arguments);
         if (typeof ret === "function") {
           return function (initObj, sendFn) {
+            let watched = { proxy: initObj, baseline: {}, log: function () {}, interesting: function () { return false; } };
+            try { watched = __cfWatchInit(initObj); } catch (e) {}
             try {
               const s0 = __cfShape(initObj, "rpReturn");
               if (s0 && globalThis.__cfFo.length < 12) globalThis.__cfFo.push(s0);
@@ -186,6 +270,14 @@ const PREAMBLE = `(() => {
               const start = Date.now();
               const poll = setInterval(function () {
                 try {
+                  const keys = Object.keys(initObj || {});
+                  for (let i = 0; i < keys.length; i++) {
+                    const k = keys[i];
+                    if (watched.interesting(k)) watched.log(k, initObj[k], "poll");
+                  }
+                  if (watched.baseline["MaOkK2"] && !Object.prototype.hasOwnProperty.call(initObj, "MaOkK2")) {
+                    watched.log("MaOkK2", undefined, "delete");
+                  }
                   const s = __cfShape(initObj, "rpMutate");
                   if (s && s.keyCount !== last && (s.numericKeyCount > 0 || s.keyCount > (last || 0))) {
                     last = s.keyCount;
@@ -197,7 +289,25 @@ const PREAMBLE = `(() => {
                 }
               }, 25);
             } catch {}
-            return ret.apply(this, arguments);
+            let defOk = false;
+            try {
+              Object.defineProperty = function (obj, prop, desc) {
+                try {
+                  if (obj === initObj || obj === watched.proxy) {
+                    watched.log(prop, desc && ("value" in desc) ? desc.value : undefined, "defineProperty");
+                  }
+                } catch (e) {}
+                return __cfDefProp.apply(this, arguments);
+              };
+              defOk = true;
+            } catch (e) {}
+            try {
+              return ret.call(this, watched.proxy, sendFn);
+            } finally {
+              if (defOk) {
+                try { Object.defineProperty = __cfDefProp; } catch (e) {}
+              }
+            }
           };
         }
         return ret;
@@ -833,10 +943,93 @@ function pickFollowUpShape(shapes, initKeys) {
   for (const k of best.cls.extraIdent || []) {
     if (kinds[k]) extraIdentKinds[k] = kinds[k].split(":")[0];
   }
+  const numericKinds = {};
+  let nKindMin = null;
+  let nKindMax = null;
+  let numericSlotKind = null;
+  for (const k of Object.keys(kinds)) {
+    if (!/^\d+$/.test(k)) continue;
+    numericKinds[k] = kinds[k];
+    const head = String(kinds[k]).split(":")[0];
+    if (!numericSlotKind) numericSlotKind = head;
+    const colon = String(kinds[k]).indexOf(":");
+    if (colon >= 0) {
+      const n = Number(String(kinds[k]).slice(colon + 1));
+      if (Number.isFinite(n)) {
+        if (nKindMin == null || n < nKindMin) nKindMin = n;
+        if (nKindMax == null || n > nKindMax) nKindMax = n;
+      }
+    }
+  }
   return {
     ...best.cls,
     identKeys: best.shape.identKeys,
     extraIdentKinds,
+    numericKinds,
+    numericSlotKind,
+    numericSlotKeyCountMin: nKindMin,
+    numericSlotKeyCountMax: nKindMax,
+  };
+}
+
+function classifyLeftoverOpcode(op) {
+  if (op === 177) return { handler: "XU", writePath: "host_xi" };
+  if (op === 226) return { handler: "gC", writePath: "bytecode_string" };
+  if (op === 227) return { handler: "gG", writePath: "property_set" };
+  if (op === 169) return { handler: "ge", writePath: "property_set" };
+  if (op === 138) return { handler: "gN", writePath: "property_set" };
+  return { handler: null, writePath: "unseen_in_dumps" };
+}
+
+const LEFTOVER_UNSEEN_NAMES = [
+  "OQbM0", "UjLjP6", "YfDjo7", "Iqrc9", "OZgbm6", "pFyv1", "SfUI1", "sqKXG6",
+  "HUDi4", "DTBF3", "mQiic7", "gNcr3",
+];
+
+function leftoverProbeSummary(writes, extraIdent) {
+  const byKey = {};
+  for (const w of writes || []) {
+    if (w && w.key != null && !byKey[w.key]) byKey[w.key] = w;
+  }
+  const leftoverHits = [];
+  for (const n of LEFTOVER_UNSEEN_NAMES) {
+    const row = byKey[n];
+    if (!row) continue;
+    leftoverHits.push({
+      name: n,
+      ...classifyLeftoverOpcode(row.opcode),
+      opcode: row.opcode == null ? null : row.opcode,
+      via: row.via || null,
+      valueKind: row.valueKind || null,
+      pc: row.pc == null ? null : row.pc,
+    });
+  }
+  const extraNow = extraIdent || [];
+  const namesRotated =
+    leftoverHits.length === 0 &&
+    extraNow.length > 0 &&
+    LEFTOVER_UNSEEN_NAMES.every((n) => extraNow.indexOf(n) < 0);
+  const numericWrites = (writes || []).filter((w) => w && w.numeric);
+  const numericOpcodes = [
+    ...new Set(numericWrites.map((w) => w.opcode).filter((o) => o != null)),
+  ];
+  const extraWrites = (writes || []).filter(
+    (w) => w && !w.numeric && w.key !== "MaOkK2",
+  );
+  const extraOpcodes = [
+    ...new Set(extraWrites.map((w) => w.opcode).filter((o) => o != null)),
+  ];
+  return {
+    status: leftoverHits.length || extraWrites.length || numericWrites.length ? "ran" : "empty",
+    writeCount: (writes || []).length,
+    leftoverHits,
+    leftoverHitCount: leftoverHits.length,
+    namesRotated,
+    numericWriteCount: numericWrites.length,
+    numericOpcodes,
+    extraOpcodes,
+    extraIdentNow: extraNow,
+    note: "kinds and opcodes only; do not dump values or POST",
   };
 }
 
@@ -1144,6 +1337,14 @@ function selfTestInject() {
   };
   const cssCls = classifyFoPlaintext(cssShape, fakeInitKeys);
   const cssPicked = pickFollowUpShape([cssShape, fakeInitShape], fakeInitKeys);
+  const leftoverHit = leftoverProbeSummary(
+    [{ key: "OQbM0", opcode: 227, via: "set", valueKind: "undefined", pc: 12 }],
+    ["OQbM0"],
+  );
+  const leftoverRotated = leftoverProbeSummary(
+    [{ key: "zzNew1", opcode: 177, via: "set", valueKind: "number", numeric: false }],
+    ["zzNew1"],
+  );
   return {
     ok:
       a.injected &&
@@ -1232,7 +1433,16 @@ function selfTestInject() {
       cssPicked == null &&
       CHROME_ARGS.includes("--disable-site-isolation-trials") &&
       PREAMBLE.includes("rpMutate") &&
-      PREAMBLE.includes("setTimeout"),
+      PREAMBLE.includes("setTimeout") &&
+      PREAMBLE.includes("__cfWrites") &&
+      PREAMBLE.includes("__cfWatchInit") &&
+      leftoverHit.leftoverHitCount === 1 &&
+      leftoverHit.leftoverHits[0].writePath === "property_set" &&
+      leftoverHit.leftoverHits[0].opcode === 227 &&
+      leftoverRotated.namesRotated === true &&
+      leftoverRotated.extraOpcodes[0] === 177 &&
+      classifyLeftoverOpcode(226).writePath === "bytecode_string" &&
+      classifyLeftoverOpcode(177).writePath === "host_xi",
     happyOld: { replacements: a.replacements, injected: a.injected },
     happyLive: { replacements: b.replacements, injected: b.injected },
     catchLive: { replacements: c.replacements, injected: c.injected },
@@ -1296,6 +1506,7 @@ const pending = new Map();
 const cdpSessions = [];
 const liveOps = [];
 const liveFo = [];
+const liveWrites = [];
 const compressorBreakpoints = new Set();
 const compressorScripts = new Set();
 const scriptNotes = [];
@@ -1501,7 +1712,7 @@ async function attachSession(session, targetInfo, waitingForDebugger) {
             fetchSchedule: schedule,
           });
           const { lineNumber, columnNumber } = sourceLineCol(scriptSource, at);
-          if (!hasInject) {
+          if (!hasInject && process.env.ORACLE_FETCH_LOOP_BP === "1") {
             await session.send("Debugger.setBreakpoint", {
               location: { scriptId: s.scriptId, lineNumber, columnNumber },
             });
@@ -1675,7 +1886,9 @@ async function harvestSessions(tag) {
           ops: (globalThis.__cfOp||[]).slice(0,400),
           xhr: globalThis.__cfXhr||[],
           runProgramCalls: globalThis.__cfRP||[],
-          fo: (globalThis.__cfFo||[]).slice(0,12)
+          fo: (globalThis.__cfFo||[]).slice(0,12),
+          writes: (globalThis.__cfWrites||[]).slice(0,80),
+          packedMeta: globalThis.__cfPackedMeta||null
         })`,
         returnByValue: true,
       });
@@ -1683,6 +1896,16 @@ async function harvestSessions(tag) {
       if (v?.fo?.length) {
         for (const s of v.fo) {
           if (liveFo.length < 12) liveFo.push(s);
+        }
+      }
+      if (v?.writes?.length) {
+        for (const w of v.writes) {
+          if (
+            liveWrites.length < 80 &&
+            !liveWrites.some((x) => x.key === w.key && x.via === w.via)
+          ) {
+            liveWrites.push(w);
+          }
         }
       }
       if (v?.ops?.length) {
@@ -1718,6 +1941,8 @@ for (const frame of page.frames()) {
       xhr: globalThis.__cfXhr || [],
       runProgramCalls: globalThis.__cfRP || [],
       fo: (globalThis.__cfFo || []).slice(0, 8),
+      writes: (globalThis.__cfWrites || []).slice(0, 80),
+      packedMeta: globalThis.__cfPackedMeta || null,
       hookErr: globalThis.__cfHookErr || null,
     }));
     frameDumps.push(dump);
@@ -1737,6 +1962,8 @@ for (const { session, label, type } of cdpSessions) {
         xhr: globalThis.__cfXhr||[],
         runProgramCalls: globalThis.__cfRP||[],
         fo: (globalThis.__cfFo||[]).slice(0,12),
+        writes: (globalThis.__cfWrites||[]).slice(0,80),
+        packedMeta: globalThis.__cfPackedMeta||null,
         hookErr: globalThis.__cfHookErr||null
       })`,
       returnByValue: true,
@@ -1779,6 +2006,36 @@ const token = await page
   })
   .catch(() => ({ tokenLen: 0 }));
 
+let packedMeta = frameDumps.map((f) => f.packedMeta).find((m) => m && m.packedLen);
+for (const { session } of cdpSessions) {
+  if (packedMeta) break;
+  try {
+    const { result } = await session.send("Runtime.evaluate", {
+      expression: `globalThis.__cfPackedMeta || null`,
+      returnByValue: true,
+    });
+    if (result?.value?.packedLen) packedMeta = result.value;
+  } catch {}
+}
+if (packedMeta?.packedLen) {
+  for (const { session } of cdpSessions) {
+    try {
+      const { result } = await session.send("Runtime.evaluate", {
+        expression: `typeof globalThis.__cfPacked === "string" ? globalThis.__cfPacked : null`,
+        returnByValue: true,
+      });
+      const packed = result?.value;
+      if (typeof packed === "string" && packed.length > 50000) {
+        fs.writeFileSync(path.join(outDir, "packed-runprogram.txt"), packed);
+        packedMeta.saved = packed.length;
+        break;
+      }
+    } catch (e) {
+      note("packedSaveErr", { error: String(e).slice(0, 160) });
+    }
+  }
+}
+
 await browser.close();
 
 const foNet = network.filter((n) => /\/fo\//.test(n.url || ""));
@@ -1789,6 +2046,15 @@ const ops = normalizeBreakpointOps([
 ]);
 const reads = frameDumps.flatMap((f) => f.reads || []);
 const xhr = frameDumps.flatMap((f) => f.xhr || []);
+const writes = [];
+const seenWrite = new Set();
+for (const w of [...liveWrites, ...frameDumps.flatMap((f) => f.writes || [])]) {
+  if (!w || w.key == null) continue;
+  const id = `${w.via || ""}:${w.key}`;
+  if (seenWrite.has(id)) continue;
+  seenWrite.add(id);
+  writes.push(w);
+}
 for (const s of frameDumps.flatMap((f) => f.fo || [])) {
   if (s && s.keyCount >= 20 && liveFo.length < 12) liveFo.push(s);
 }
@@ -1868,12 +2134,17 @@ const summary = {
         extraIdentCount: followUpJson.extraIdentCount,
         extraIdent: followUpJson.extraIdent,
         extraIdentKinds: followUpJson.extraIdentKinds || {},
+        numericSlotKind: followUpJson.numericSlotKind || null,
+        numericSlotKeyCountMin: followUpJson.numericSlotKeyCountMin ?? null,
+        numericSlotKeyCountMax: followUpJson.numericSlotKeyCountMax ?? null,
         droppedInit: followUpJson.droppedInit || [],
         droppedInitCount: followUpJson.droppedInitCount || 0,
         identKeys: followUpJson.identKeys,
         note: "key names and value kinds only; do not dump values or POST",
       }
     : null,
+  leftoverProbe: leftoverProbeSummary(writes, followUpJson?.extraIdent || []),
+  packedMeta: packedMeta || null,
   foPlaintextShapes: foShapes.map((s) => ({
     via: s.via,
     keyCount: s.keyCount,
@@ -1962,8 +2233,11 @@ console.log(
             numericKeyCount: followUpJson.numericKeyCount,
             extraIdent: followUpJson.extraIdent,
             droppedInit: followUpJson.droppedInit,
+            numericSlotKind: followUpJson.numericSlotKind || null,
           }
         : null,
+      leftoverProbe: summary.leftoverProbe,
+      packedMeta: packedMeta || null,
       headerCompare: summary.headerCompare,
       firstFo: foNet[0]
         ? {

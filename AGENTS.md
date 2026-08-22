@@ -187,12 +187,15 @@ Chrome Debugger on `f4`'s first argument or the `setTimeout(send, 100)` helper
 or POST that JSON. Follow-up **write paths** (56907 dumps): `SMrTl9` / `xBCsP4`
 are `host_copy` from `_cf_chl_opt` (early `f4` already has `xBCsP4`); `MaOkK2`
 is on the init literal and dropped before the later `f4` (`glue`); numeric
-`"1"`..`"39"` is a `vm_entry_index` family (not HTML literals). The other extra
-ident names are `unseen_in_dumps` — not in iframe HTML, and skip-harvest of the
-HTML-embedded 5k `runProgram` stub (stops at `XU`/177) does not contain them.
-The live ~822k packed `/fo/` body was not saved. Skip-harvest is immediates
-only (`src/solver/run_program_skip.rs`); do not execute handlers. Next gap is
-`handler_semantics`; do not run handlers as a solver.
+`"1"`..`"39"` is a `vm_entry_index` family (not HTML literals). Headed Chrome
+later `f4` kinds: every numeric slot is an **object** with 9..32 own keys
+(entry analog). The other extra ident names are `unseen_in_dumps` after HTML +
+the HTML-embedded 5k `runProgram` stub skip-harvest (stops at `XU`/177). Chrome
+leftover assignment / `defineProperty` probe (`scripts/chrome_oracle.mjs`)
+logs `{pc, opcode, key, valueKind}` on those names and numeric keys — no value
+dump, no crate POST, no fetch-loop Debugger breakpoints (those stalled `/fo/`).
+Skip-harvest is immediates only (`src/solver/run_program_skip.rs`); do not
+execute handlers. Next gap is `handler_semantics`; do not run handlers as a solver.
 
 `probe_iframe` / `solve_test` should get iframe HTTP 200 + parsed options, then an honest
 failure: orchestrate is not the VM, live `/fo/` without a valid init body 400s. `/cmg/1` 404s

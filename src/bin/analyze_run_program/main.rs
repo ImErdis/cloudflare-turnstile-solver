@@ -8,12 +8,14 @@
 //! ```text
 //! cargo run --locked --bin analyze_run_program -- --ray <c_ray> path/to/fo_body.js
 //! cargo run --locked --bin analyze_run_program -- --decode 16 packed.txt
+//! cargo run --locked --bin analyze_run_program -- --skip-harvest packed.txt
 //! cargo run --locked --bin analyze_run_program -- --oracle scripts/fixtures/headed_chrome_oracle.json
 //! ```
 
 use anyhow::{Context, Result, bail};
 use cf::reverse::encryption::decrypt_cloudflare_response;
 use cf::solver::run_program::unpack_packed_run_program;
+use cf::solver::run_program_skip::skip_harvest_live;
 use cf::solver::run_program_ops::{
     CALL_IMM_ROLES_B_LATE, DN_OPCODE, DN_TAG_STRING, HANDLER_LAYOUT_B_LATE, JUMP_IMM_ROLES_B_LATE,
     LATE_DIRECT_HANDLER_COUNT, LEB_OBJECT_ROLES_B_LATE, PROPERTY_IMM_ROLES_B_LATE, S1_CASES_B_LATE,
@@ -61,6 +63,7 @@ fn run() -> Result<Value> {
     let mut ray = None;
     let mut decode_n: usize = 0;
     let mut oracle: Option<PathBuf> = None;
+    let mut skip_harvest = false;
     let mut files = Vec::<PathBuf>::new();
     let mut args = env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -73,6 +76,8 @@ fn run() -> Result<Value> {
             oracle = Some(PathBuf::from(
                 args.next().context("--oracle needs a json path")?,
             ));
+        } else if arg == "--skip-harvest" {
+            skip_harvest = true;
         } else if arg.starts_with('-') {
             bail!("unknown flag {arg}");
         } else {
@@ -84,8 +89,8 @@ fn run() -> Result<Value> {
         return verify_oracle_file(&path);
     }
 
-    if files.is_empty() {
-        bail!("usage: analyze_run_program [--ray <c_ray>] [--decode N] [--oracle json] <file>...");
+        if files.is_empty() {
+        bail!("usage: analyze_run_program [--ray <c_ray>] [--decode N] [--skip-harvest] [--oracle json] <file>...");
     }
 
     let mut reports = Vec::new();
@@ -112,6 +117,32 @@ fn run() -> Result<Value> {
             "analysis": analysis,
             "summary": analysis.summary(),
         });
+        if skip_harvest && analysis.decode_ok {
+            let bytecode = unpack_packed_run_program(&packed)?;
+            let h = skip_harvest_live(&bytecode);
+            let extra: Vec<&str> = cf::FOLLOWUP_EXTRA_IDENT_B
+                .iter()
+                .copied()
+                .filter(|n| h.contains_ident(n))
+                .collect();
+            let unseen: Vec<&str> = cf::FOLLOWUP_UNSEEN_EXTRA_IDENT_B
+                .iter()
+                .copied()
+                .filter(|n| h.contains_ident(n))
+                .collect();
+            row["skipHarvest"] = json!({
+                "note": "width-aware skip of immediates; does not execute handlers",
+                "paramsLabel": h.params_label,
+                "instructions": h.instructions,
+                "lastPc": h.last_pc,
+                "lastOpcode": h.last_opcode,
+                "stopped": h.stopped,
+                "stringCount": h.strings.len(),
+                "geKeyImm1to39": h.ge_key_imms.iter().any(|k| (1..=39).contains(k)),
+                "extraIdentHits": extra,
+                "unseenIdentHits": unseen,
+            });
+        }
         if decode_n > 0 && analysis.decode_ok {
             let bytecode = unpack_packed_run_program(&packed)?;
             let (params, table) = params_for_magic(&bytecode).unwrap_or((FETCH_LIVE, cf::solver::run_program_vm::OPCODE_TABLE));
@@ -519,6 +550,21 @@ fn verify_oracle_file(path: &PathBuf) -> Result<Value> {
                     }
                     if hv.get("lastOpcode").and_then(|x| x.as_u64()) != Some(177) {
                         errors.push("inlinePackedHarvest.lastOpcode should be 177".into());
+                    }
+                }
+                if fj.get("numericSlotKind").and_then(|x| x.as_str()) == Some("object") {
+                    if fj.get("numericSlotKeyCountMin").and_then(|x| x.as_u64())
+                        != Some(u64::from(cf::solver::fo_followup_json::FOLLOWUP_NUMERIC_SLOT_KEYCOUNT_MIN_B))
+                    {
+                        errors.push("foFollowUpJson.numericSlotKeyCountMin mismatch".into());
+                    }
+                }
+                if let Some(lp) = fj.get("leftoverProbe") {
+                    if let Some(names) = lp.get("unseenNames").and_then(|x| x.as_array()) {
+                        let got: Vec<&str> = names.iter().filter_map(|k| k.as_str()).collect();
+                        if got != cf::FOLLOWUP_UNSEEN_EXTRA_IDENT_B {
+                            errors.push("leftoverProbe.unseenNames mismatch".into());
+                        }
                     }
                 }
                 if let Some(ident) = fj.get("identKeys").and_then(|x| x.as_array()) {
