@@ -10,8 +10,10 @@
  * plaintext object's **key names and value kinds** (string lengths, not contents).
  * Leftover extra-ident writes are logged as `{pc, opcode, key, valueKind}` via a
  * Proxy / `defineProperty` wrap on the `fn(initObj, fj)` argument — not values.
- * Fetch-loop Debugger breakpoints stay off unless `ORACLE_FETCH_LOOP_BP=1`
- * (they stalled `/fo/`). The iframe calls a **local** `runProgram`, so wrapping
+ * Fetch-loop Debugger breakpoints stay off unless `ORACLE_FETCH_TUPLES=1`
+ * (finite harvest + large-bytecode condition) or `ORACLE_FETCH_LOOP_BP=1`.
+ * Always-on pauses stalled `/fo/` because the HTML stub hits the same loop
+ * before init POST. The iframe calls a **local** `runProgram`, so wrapping
  * `globalThis.runProgram` does not see the packed argument (`packedMeta` stays
  * null). Capture the init `/fo/` **response** instead (`Fetch.getResponseBody`
  * then `continueRequest` — do not rewrite `/fo/`). Does **not** reconstruct a
@@ -24,11 +26,14 @@
  *
  * Env:
  *   CHROME_PATH          default /usr/bin/google-chrome-stable
- *   ORACLE_WAIT_MS       default 22000
+ *   ORACLE_WAIT_MS       default 22000 (45000 when ORACLE_FETCH_TUPLES=1)
  *   ORACLE_HEADLESS      set to 1 to force headless (not the intended mode)
  *   ORACLE_SITE_ISOLATION set to 1 to keep OOPIF isolation (hooks will miss the iframe)
  *   ORACLE_SKIP_IFRAME_REWRITE set to 1 to save iframe HTML without Fetch.fulfillRequest
  *                    (packed /fo/ recapture; rewrite can stall a new fetch build)
+ *   ORACLE_FETCH_TUPLES set to 1 for a finite fetch-loop Debugger harvest
+ *                    ({pc,op,key,byte} then removeBreakpoint). Implies skip iframe rewrite.
+ *                    Always-on fetch-loop BPs stall /fo/ because the HTML stub runs first.
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -39,10 +44,18 @@ const positional = process.argv.slice(2).filter((a) => a !== "--self-test");
 const url = positional[0] || "https://solvegate.io/demo/invisible";
 const outDir = positional[1] || path.join("artifacts", "re-out", "chrome-oracle");
 const chrome = process.env.CHROME_PATH || "/usr/bin/google-chrome-stable";
-const waitMs = Number(process.env.ORACLE_WAIT_MS || 22_000);
+const fetchTuples = process.env.ORACLE_FETCH_TUPLES === "1";
+const fetchLoopBp = process.env.ORACLE_FETCH_LOOP_BP === "1";
+const wantFetchLoopBp = fetchTuples || fetchLoopBp;
+const waitMs = Number(process.env.ORACLE_WAIT_MS || (fetchTuples ? 45_000 : 22_000));
 const headed = process.env.ORACLE_HEADLESS !== "1";
 const isolateIframes = process.env.ORACLE_SITE_ISOLATION === "1";
-const skipIframeRewrite = process.env.ORACLE_SKIP_IFRAME_REWRITE === "1";
+const skipIframeRewrite =
+  process.env.ORACLE_SKIP_IFRAME_REWRITE === "1" || fetchTuples;
+const fetchTupleCap = Number(process.env.ORACLE_FETCH_TUPLE_CAP || 24);
+/** Skip the HTML-embedded stub (~5k packed). Live `/fo/` packed is ~600k+. */
+const FETCH_LOOP_BP_CONDITION =
+  '(function(){try{var g=this&&this.g;if(!g)return false;if(typeof this.l==="number"&&g[this.l]&&g[this.l].length>10000)return true;for(var i=0;i<Math.min(g.length||0,48);i++){var v=g[i];if(v&&v.length>10000)return true;}return false;}catch(e){return false;}})()';
 
 const CHROME_ARGS = [
   "--no-sandbox",
@@ -359,6 +372,9 @@ const PREAMBLE = `(() => {
 
 function fetchSnippet(html) {
   for (const marker of [
+    "23196",
+    "32619",
+    "19372",
     "*31579,59205",
     "I*I*8904",
     "*8904,",
@@ -396,10 +412,13 @@ function extractFetchQuadratic(html) {
   const mulStar = window.match(
     /(\d{4,5})\*\((\w+)\*\2\),(\2)\*(\d{4,5})\)\+(\d{4,5}),255/,
   );
+  const sqAmp = window.match(
+    /(\w+)\*\1\*(\d{4,5})\+[\s\S]{0,96}?\(\1,(\d{4,5})\)\+(\d{4,5})&255/,
+  );
   const biasM = window.match(/\]-(\d{2,3}),256\)&255/);
   const biasAdd = window.match(/\[(\w+)\],(\d{2,3})\)\+256/);
   const caseM = window.match(/\{case (\d+):/);
-  const hit = sq || sqPlus || alt || mulStar;
+  const hit = sq || sqPlus || sqAmp || alt || mulStar;
   if (!hit) return null;
   let keyMul;
   let keyQuadB;
@@ -415,6 +434,11 @@ function extractFetchQuadratic(html) {
     keyQuadB = Number(sqPlus[3]);
     keyAdd = Number(sqPlus[4]);
     spelling = "mix*mix*mul+";
+  } else if (sqAmp) {
+    keyMul = Number(sqAmp[2]);
+    keyQuadB = Number(sqAmp[3]);
+    keyAdd = Number(sqAmp[4]);
+    spelling = "mix*mix*mul+helper&255";
   } else if (mulStar) {
     keyMul = Number(mulStar[1]);
     keyQuadB = Number(mulStar[4]);
@@ -470,8 +494,51 @@ function extractFetchLinear(html) {
   };
 }
 
+function extractVmEntryKey(html) {
+  if (!html) return null;
+  const m = String(html).match(/new \w+\(\w+\)\(0,(\d{1,3}),\[\]\)/);
+  return m ? Number(m[1]) : null;
+}
+
 function extractFetchSchedule(html) {
-  return extractFetchQuadratic(html) || extractFetchLinear(html);
+  const s = extractFetchQuadratic(html) || extractFetchLinear(html);
+  if (!s) return null;
+  const initKeyCandidate = extractVmEntryKey(html);
+  if (initKeyCandidate != null) s.initKeyCandidate = initKeyCandidate;
+  return s;
+}
+
+/** Markers observed in headed iframe HTML (not FETCH_LIVE). 8904 alone matches SVG. */
+const FETCH_SOURCE_MARKERS = [
+  "23196",
+  "32619",
+  "19372",
+  "56907",
+  "39695",
+  "36163",
+  "19663",
+  "28814",
+  "31579",
+  "59205",
+  "I*I*8904",
+  "*8904,",
+];
+
+function fetchMarkerInSource(src) {
+  if (!src) return null;
+  const schedule = extractFetchSchedule(src);
+  for (const marker of FETCH_SOURCE_MARKERS) {
+    const idx = src.indexOf(marker);
+    if (idx >= 0) {
+      return { marker, idx, schedule, hasInject: src.includes("__cfOp.push") };
+    }
+  }
+  if (schedule && schedule.keyMul != null) {
+    const marker = String(schedule.keyMul);
+    const idx = src.indexOf(marker);
+    if (idx >= 0) return { marker, idx, schedule, hasInject: src.includes("__cfOp.push") };
+  }
+  return null;
 }
 
 /**
@@ -759,13 +826,141 @@ function pcDeltas(ops) {
   return rows;
 }
 
+function isCompleteTuple(r) {
+  return (
+    r &&
+    Number.isFinite(Number(r.pc)) &&
+    Number.isFinite(Number(r.op)) &&
+    Number.isFinite(Number(r.key)) &&
+    Number.isFinite(Number(r.byte))
+  );
+}
+
+function inferLocalOpMix(rows) {
+  const names = new Set();
+  for (const r of rows) {
+    for (const k of Object.keys(r.locals || {})) names.add(k);
+  }
+  let opKey;
+  let mixKey;
+  for (const k of names) {
+    const vals = rows.map((r) => r.locals && r.locals[k]).filter((v) => typeof v === "number");
+    if (vals.length < 2) continue;
+    const uniq = new Set(vals);
+    if (uniq.size <= 1) continue;
+    const max = Math.max(...vals);
+    if (max <= 255 && opKey == null) opKey = k;
+    else if (max > 255 && mixKey == null) mixKey = k;
+  }
+  return { opKey, mixKey };
+}
+
+function inferPcSlotFromGNums(rows) {
+  if (!rows.length || !rows[0].gNums) return null;
+  for (const idx of Object.keys(rows[0].gNums)) {
+    const vals = rows.map((r) => r.gNums && r.gNums[idx]).filter((v) => typeof v === "number");
+    if (vals.length < rows.length) continue;
+    let inc = vals.length >= 2;
+    for (let i = 1; i < vals.length; i++) {
+      if (vals[i] <= vals[i - 1]) inc = false;
+    }
+    if (inc && vals[0] >= 0 && vals[0] <= 2) return Number(idx);
+  }
+  return null;
+}
+
+/** 56907 Chrome: pause at the mul is after `pc+=1` (first observed pcSlot 1). */
+function finalizeFetchLoopRows(rows) {
+  const fl = (rows || []).filter((r) => r && r.via === "fetchLoop");
+  if (!fl.length) return [];
+  const large = fl.filter((r) => (r.bcLen || 0) > 10000);
+  const use = large.length ? large : fl;
+  const { opKey, mixKey } = inferLocalOpMix(use);
+  const pcFromG = inferPcSlotFromGNums(use);
+  return use.map((r) => {
+    let pcSlot = r.pcSlot;
+    if (!Number.isFinite(pcSlot) && pcFromG != null && r.gNums && Number.isFinite(r.gNums[pcFromG])) {
+      pcSlot = r.gNums[pcFromG];
+    }
+    const adjust = Number.isFinite(pcSlot) && pcSlot >= 1;
+    const pc = Number.isFinite(pcSlot) ? (adjust ? pcSlot - 1 : pcSlot) : r.pc;
+    let op = r.op;
+    let mix = r.mix;
+    let key = r.key;
+    if (op == null && opKey && r.locals && typeof r.locals[opKey] === "number") {
+      op = r.locals[opKey] & 255;
+    }
+    if (mix == null && mixKey && r.locals && typeof r.locals[mixKey] === "number") {
+      mix = r.locals[mixKey];
+    }
+    if (key == null && Number.isFinite(r.keySlot)) key = r.keySlot & 255;
+    if (op == null && Number.isFinite(mix) && Number.isFinite(key)) {
+      op = (mix - key) & 255;
+    }
+    if (key == null && Number.isFinite(mix) && Number.isFinite(op)) {
+      key = (mix - op) & 255;
+    }
+    let byte = r.byte;
+    if (byte == null) {
+      byte = adjust ? r.byteAtPcMinus1 : r.byteAtPc;
+    }
+    return {
+      via: "fetchLoop",
+      pc,
+      op: Number.isFinite(op) ? op & 255 : undefined,
+      key: Number.isFinite(key) ? key & 255 : undefined,
+      byte: Number.isFinite(byte) ? byte & 255 : undefined,
+      mix: Number.isFinite(mix) ? mix : undefined,
+      bcLen: r.bcLen,
+      pcSlot,
+      byteVia: Number.isFinite(byte) ? "vm" : undefined,
+    };
+  });
+}
+
+function fillBytesFromPacked(rows, packedStr) {
+  if (!packedStr) return rows;
+  let bc;
+  try {
+    bc = Buffer.from(String(packedStr).replace(/\s/g, ""), "base64");
+  } catch {
+    return rows;
+  }
+  if (!bc.length) return rows;
+  return (rows || []).map((r) => {
+    if (!r || Number.isFinite(r.byte) || !Number.isFinite(r.pc)) return r;
+    if (r.pc < 0 || r.pc >= bc.length) return r;
+    return { ...r, byte: bc[r.pc], byteVia: "packed" };
+  });
+}
+
 /** Breakpoint locals rotate; opcode is the 0–255 varying number, mix is often >255. */
 function normalizeBreakpointOps(rows) {
-  const bp = rows.filter((r) => r.via === "breakpoint");
+  const kept = [];
+  for (const r of rows || []) {
+    if (!r) continue;
+    if (r.via === "breakpoint" && r.op == null && r.byte == null && r.pc == null && r.mix == null) {
+      continue;
+    }
+    kept.push(r);
+  }
+  const bp = kept.filter((r) => r.via === "breakpoint" && !isCompleteTuple(r));
   const keys = new Set();
   for (const r of bp) {
     for (const k of Object.keys(r)) {
-      if (k === "via" || k === "op" || k === "mix" || k === "key" || k === "pc" || k === "gLen" || k === "keySlot") {
+      if (
+        k === "via" ||
+        k === "op" ||
+        k === "mix" ||
+        k === "key" ||
+        k === "pc" ||
+        k === "gLen" ||
+        k === "keySlot" ||
+        k === "byte" ||
+        k === "bcLen" ||
+        k === "pcSlot" ||
+        k === "byteVia"
+      ) {
         continue;
       }
       keys.add(k);
@@ -781,7 +976,20 @@ function normalizeBreakpointOps(rows) {
     if (max <= 255 && opKey == null) opKey = k;
     else if (max > 255 && mixKey == null) mixKey = k;
   }
-  return rows.map((r) => {
+  return kept.map((r) => {
+    if (r.via === "fetchLoop" || (r.via === "breakpoint" && isCompleteTuple(r))) {
+      const row = {
+        via: r.via,
+        pc: r.pc,
+        op: Number.isFinite(r.op) ? r.op & 255 : undefined,
+        key: Number.isFinite(r.key) ? r.key & 255 : undefined,
+        byte: Number.isFinite(r.byte) ? r.byte & 255 : undefined,
+      };
+      if (Number.isFinite(r.mix)) row.mix = r.mix;
+      if (r.byteVia) row.byteVia = r.byteVia;
+      if (r.bcLen) row.bcLen = r.bcLen;
+      return row;
+    }
     if (r.via !== "breakpoint") return r;
     const op = r.op != null ? r.op : opKey != null ? r[opKey] & 255 : undefined;
     const mix = r.mix != null ? r.mix : mixKey != null ? r[mixKey] : undefined;
@@ -791,7 +999,9 @@ function normalizeBreakpointOps(rows) {
         : typeof op === "number" && typeof mix === "number"
           ? (mix - op) & 255
           : undefined;
-    return { via: "breakpoint", pc: r.pc, op, mix, key };
+    const row = { via: "breakpoint", pc: r.pc, op, mix, key };
+    if (Number.isFinite(r.byte)) row.byte = r.byte & 255;
+    return row;
   });
 }
 
@@ -1171,6 +1381,55 @@ function sendHelperBreakpointAt(scriptSource) {
   return { ...sourceLineCol(scriptSource, brace), pat, idx, name };
 }
 
+const TUPLE_HARVEST_EXPR = `(() => {
+  const g = this && this.g;
+  const thisNums = {};
+  if (this) {
+    const names = ["i","j","l","h","o","u","n","m","k","p"];
+    for (let n = 0; n < names.length; n++) {
+      const k = names[n];
+      if (typeof this[k] === "number") thisNums[k] = this[k];
+    }
+  }
+  let pcSlot;
+  let keySlot;
+  let bc;
+  if (g && typeof this.j === "number") pcSlot = g[this.j];
+  if (g && typeof this.i === "number") keySlot = g[this.i];
+  if (g && typeof this.l === "number" && g[this.l] && typeof g[this.l].length === "number") {
+    bc = g[this.l];
+  }
+  if (!bc && g) {
+    for (let i = 0; i < Math.min(g.length || 0, 64); i++) {
+      const v = g[i];
+      if (v && typeof v.length === "number" && v.length > 10000 && typeof v[0] === "number") {
+        bc = v;
+        break;
+      }
+    }
+  }
+  const byteAt = function (p) {
+    return (bc && typeof p === "number" && p >= 0 && p < bc.length) ? (bc[p] & 255) : undefined;
+  };
+  const gNums = {};
+  if (g) {
+    for (let i = 0; i < Math.min(g.length || 0, 24); i++) {
+      if (typeof g[i] === "number") gNums[i] = g[i];
+    }
+  }
+  return {
+    via: "fetchLoop",
+    pcSlot: typeof pcSlot === "number" ? pcSlot : undefined,
+    keySlot: typeof keySlot === "number" ? (keySlot & 255) : undefined,
+    gLen: g && g.length,
+    bcLen: bc && bc.length,
+    byteAtPc: byteAt(pcSlot),
+    byteAtPcMinus1: typeof pcSlot === "number" ? byteAt(pcSlot - 1) : undefined,
+    thisNums: thisNums,
+    gNums: gNums
+  };
+})()`;
+
 const FO_SHAPE_EXPR = `(() => {
   function kind(v) {
     if (v === null) return "null";
@@ -1474,6 +1733,28 @@ function selfTestInject() {
     [{ key: "zzNew1", opcode: 177, via: "set", valueKind: "number", numeric: false }],
     ["zzNew1"],
   );
+  const packed2Snippet =
+    "new HC(H)(0,63,[]);if(Q=zD[K],Q!==Q)return zD[R];switch(zD[K]=Q+1,Q=zD[k]^xx(zD[Q],217)+256&255,M=zD[k]+Q,zD[k]=M*M*23196+yy(M,32619)+19372&255,Q){case 220:fn(this);break;}";
+  const packed2Mark = fetchMarkerInSource(packed2Snippet);
+  const packed2Sched = extractFetchQuadratic(packed2Snippet);
+  const packed2Entry = extractVmEntryKey(packed2Snippet);
+  const svg8904 = fetchMarkerInSource('width="8904" height="12"');
+  const fin = finalizeFetchLoopRows([
+    {
+      via: "fetchLoop",
+      pcSlot: 1,
+      op: 220,
+      keySlot: 63,
+      mix: 283,
+      byteAtPcMinus1: 77,
+      bcLen: 50000,
+    },
+  ]);
+  const filled = fillBytesFromPacked(
+    [{ via: "fetchLoop", pc: 0, op: 1, key: 2 }],
+    Buffer.from([9, 8, 7]).toString("base64"),
+  );
+  const droppedShell = normalizeBreakpointOps([{ via: "breakpoint" }]);
   return {
     ok:
       a.injected &&
@@ -1581,6 +1862,27 @@ function selfTestInject() {
       classifyLeftoverOpcode(226).writePath === "bytecode_string" &&
       classifyLeftoverOpcode(177).writePath === "host_xi" &&
       skipIframeRewrite === false &&
+      fetchTuples === false &&
+      wantFetchLoopBp === false &&
+      packed2Mark &&
+      packed2Mark.marker === "23196" &&
+      packed2Sched &&
+      packed2Sched.keyMul === 23196 &&
+      packed2Sched.keyQuadB === 32619 &&
+      packed2Sched.keyAdd === 19372 &&
+      packed2Sched.byteBias === 217 &&
+      packed2Sched.firstSwitchCase === 220 &&
+      packed2Entry === 63 &&
+      svg8904 == null &&
+      fin[0] &&
+      fin[0].pc === 0 &&
+      fin[0].op === 220 &&
+      fin[0].key === 63 &&
+      fin[0].byte === 77 &&
+      filled[0] &&
+      filled[0].byte === 9 &&
+      filled[0].byteVia === "packed" &&
+      droppedShell.length === 0 &&
       rayFromFoUrl(
         "https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/b/fo/907568659:1:x/a2ee5624d969f508/ch",
       ) === "a2ee5624d969f508" &&
@@ -1619,6 +1921,13 @@ function selfTestInject() {
       sendHelperBp: sendBp && sendBp.name,
       cssRejected: cssCls && cssCls.kind,
     },
+    fetchDetect: {
+      marker: packed2Mark && packed2Mark.marker,
+      keyMul: packed2Sched && packed2Sched.keyMul,
+      initKeyCandidate: packed2Entry,
+      svgRejected: svg8904 == null,
+      finalizePc: fin[0] && fin[0].pc,
+    },
   };
 }
 
@@ -1649,11 +1958,27 @@ const cdpSessions = [];
 const liveOps = [];
 const liveFo = [];
 const liveWrites = [];
+const liveFetchRaw = [];
 const compressorBreakpoints = new Set();
 const compressorScripts = new Set();
+const fetchLoopBreakpoints = new Set();
+const fetchLoopBpRows = [];
 const scriptNotes = [];
 let iframeRewrites = 0;
 let foInitResponse = null;
+let fetchLoopCleared = false;
+
+async function clearFetchLoopBreakpoints() {
+  if (fetchLoopCleared) return;
+  fetchLoopCleared = true;
+  for (const row of fetchLoopBpRows) {
+    await row.session
+      .send("Debugger.removeBreakpoint", { breakpointId: row.breakpointId })
+      .catch(() => {});
+  }
+  fetchLoopBreakpoints.clear();
+  note("fetchLoopBpCleared", { cap: fetchTupleCap, harvested: liveFetchRaw.length });
+}
 
 function note(kind, payload) {
   events.push({ t: Date.now(), kind, ...payload });
@@ -1892,62 +2217,37 @@ async function attachSession(session, targetInfo, waitingForDebugger) {
         const { scriptSource } = await session.send("Debugger.getScriptSource", {
           scriptId: s.scriptId,
         });
-        const idxQ = scriptSource.indexOf("56907");
-        const idx = scriptSource.indexOf("36163");
-        const idxG = scriptSource.indexOf("19663");
-        const idxLin = scriptSource.indexOf("28814");
-        const idxEveQ = scriptSource.indexOf("I*I*8904") >= 0
-          ? scriptSource.indexOf("I*I*8904")
-          : scriptSource.indexOf("*8904,");
-        const idx31579 = scriptSource.indexOf("31579");
-        const idx59205 = scriptSource.indexOf("59205");
-        const idx39695 = scriptSource.indexOf("39695");
-        const schedule = extractFetchSchedule(scriptSource);
-        const hasFetch =
-          idxQ >= 0 ||
-          idx >= 0 ||
-          idxG >= 0 ||
-          idxLin >= 0 ||
-          idxEveQ >= 0 ||
-          idx31579 >= 0 ||
-          idx59205 >= 0 ||
-          idx39695 >= 0 ||
-          !!schedule;
+        const hit = fetchMarkerInSource(scriptSource);
         const compressor = compressorBreakpointAt(scriptSource);
         const sendHelper = sendHelperBreakpointAt(scriptSource);
-        if (!hasFetch && !compressor && !sendHelper) return;
-        const hasInject = scriptSource.includes("__cfOp.push");
-        if (hasFetch) {
-          const marker =
-            idx39695 >= 0
-              ? "39695"
-              : idx31579 >= 0
-              ? "31579"
-              : idx59205 >= 0
-                ? "59205"
-                : idxEveQ >= 0
-                  ? (scriptSource.includes("I*I*8904") ? "I*I*8904" : "*8904,")
-                  : idxQ >= 0
-                    ? "56907"
-                    : idx >= 0
-                      ? "36163"
-                      : idxG >= 0
-                        ? "19663"
-                        : "28814";
-          const at = scriptSource.indexOf(marker);
+        if (!hit && !compressor && !sendHelper) return;
+        const hasInject = !!(hit && hit.hasInject) || scriptSource.includes("__cfOp.push");
+        if (hit) {
           note("scriptFetchConst", {
             url: (s.url || "").slice(0, 140),
             len: scriptSource.length,
             hasInject,
-            idx: at,
-            marker,
-            fetchSchedule: schedule,
+            idx: hit.idx,
+            marker: hit.marker,
+            fetchSchedule: hit.schedule,
           });
-          const { lineNumber, columnNumber } = sourceLineCol(scriptSource, at);
-          if (!hasInject && process.env.ORACLE_FETCH_LOOP_BP === "1") {
-            await session.send("Debugger.setBreakpoint", {
+          if (wantFetchLoopBp && !hasInject) {
+            const { lineNumber, columnNumber } = sourceLineCol(scriptSource, hit.idx);
+            const bp = await session.send("Debugger.setBreakpoint", {
               location: { scriptId: s.scriptId, lineNumber, columnNumber },
+              condition: FETCH_LOOP_BP_CONDITION,
             });
+            if (bp?.breakpointId) {
+              fetchLoopBreakpoints.add(bp.breakpointId);
+              fetchLoopBpRows.push({ session, breakpointId: bp.breakpointId });
+              note("fetchLoopBp", {
+                url: (s.url || "").slice(0, 140),
+                marker: hit.marker,
+                lineNumber,
+                columnNumber,
+                breakpointId: bp.breakpointId,
+              });
+            }
           }
         }
         for (const bpInfo of [compressor, sendHelper]) {
@@ -2017,23 +2317,22 @@ async function attachSession(session, targetInfo, waitingForDebugger) {
           }
           return;
         }
-        if (frame && liveOps.length < 80) {
-          const row = { via: "breakpoint" };
+        const fetchHit = hit.some((id) => fetchLoopBreakpoints.has(id));
+        if (fetchHit && frame && liveFetchRaw.length < fetchTupleCap) {
+          const row = { via: "fetchLoop" };
           try {
             const got = await session.send("Debugger.evaluateOnCallFrame", {
               callFrameId: frame.callFrameId,
-              expression: `(() => {
-                const g = this && this.g;
-                const pc = g && typeof this.j === 'number' ? g[this.j] : undefined;
-                const keySlot = g && typeof this.i === 'number' ? g[this.i] : undefined;
-                return { pc, keySlot, gLen: g && g.length };
-              })()`,
+              expression: TUPLE_HARVEST_EXPR,
               returnByValue: true,
             });
             const v = got.result?.value;
             if (v && typeof v === "object") Object.assign(row, v);
-          } catch {}
-          if (row.op == null) {
+          } catch (e) {
+            row.evalErr = String(e).slice(0, 120);
+          }
+          const locals = {};
+          try {
             const local = frame.scopeChain?.find((sc) => sc.type === "local");
             if (local?.object?.objectId) {
               const got = await session.send("Runtime.getProperties", {
@@ -2042,17 +2341,41 @@ async function attachSession(session, targetInfo, waitingForDebugger) {
               });
               for (const p of got.result || []) {
                 if (p.value?.type === "number" && typeof p.value.value === "number") {
-                  row[p.name] = p.value.value;
+                  locals[p.name] = p.value.value;
                 }
               }
-              if (typeof row.A === "number") row.op = row.A & 255;
-              if (typeof row.D === "number") row.mix = row.D;
             }
+          } catch {}
+          row.locals = locals;
+          const mixHit = Object.values(locals).find((v) => v > 255 && v < 4096);
+          const opCands = Object.values(locals).filter(
+            (v) => v >= 0 && v <= 255 && v !== row.keySlot,
+          );
+          if (typeof mixHit === "number") row.mix = mixHit;
+          if (opCands.length === 1) row.op = opCands[0] & 255;
+          if (typeof row.A === "number") row.op = row.A & 255;
+          if (typeof row.D === "number") row.mix = row.D;
+          if (row.op == null && typeof row.mix === "number" && Number.isFinite(row.keySlot)) {
+            row.op = (row.mix - row.keySlot) & 255;
           }
-          if (typeof row.op === "number" && typeof row.mix === "number") {
+          if (row.key == null && typeof row.mix === "number" && Number.isFinite(row.op)) {
             row.key = (row.mix - row.op) & 255;
           }
-          liveOps.push(row);
+          if (row.key == null && Number.isFinite(row.keySlot)) row.key = row.keySlot;
+          liveFetchRaw.push(row);
+          if (liveFetchRaw.length === 1 || liveFetchRaw.length === fetchTupleCap) {
+            note("fetchLoopTuple", {
+              n: liveFetchRaw.length,
+              pcSlot: row.pcSlot,
+              op: row.op,
+              key: row.key,
+              bcLen: row.bcLen,
+              byteAtPcMinus1: row.byteAtPcMinus1,
+            });
+          }
+          if (liveFetchRaw.length >= fetchTupleCap) {
+            await clearFetchLoopBreakpoints();
+          }
         }
       } catch (e) {
         note("pausedErr", { error: String(e) });
@@ -2280,9 +2603,24 @@ if (packedMeta?.packedLen) {
 
 await browser.close();
 
+let packedStr = null;
+try {
+  packedStr = fs.readFileSync(path.join(outDir, "packed-runprogram.txt"), "utf8");
+} catch {
+  packedStr = null;
+}
+const fetchLoopFinal = fillBytesFromPacked(finalizeFetchLoopRows(liveFetchRaw), packedStr);
+try {
+  fs.writeFileSync(
+    path.join(outDir, "fetch-loop-raw.json"),
+    JSON.stringify({ raw: liveFetchRaw, final: fetchLoopFinal }, null, 2),
+  );
+} catch {}
+const completeTuples = fetchLoopFinal.filter(isCompleteTuple);
 const foNet = network.filter((n) => /\/fo\//.test(n.url || ""));
 const firstFo = foNet[0] || null;
 const ops = normalizeBreakpointOps([
+  ...completeTuples,
   ...frameDumps.flatMap((f) => f.ops || []),
   ...liveOps,
 ]);
@@ -2388,6 +2726,11 @@ const summary = {
   leftoverProbe: leftoverProbeSummary(writes, followUpJson?.extraIdent || []),
   packedMeta: packedMeta || null,
   foInitResponse: foInitResponse || null,
+  fetchTuples,
+  fetchTupleCap,
+  fetchLoopRawCount: liveFetchRaw.length,
+  completeTupleCount: completeTuples.length,
+  fetchLoopTuples: completeTuples.slice(0, 128),
   foPlaintextShapes: foShapes.map((s) => ({
     via: s.via,
     keyCount: s.keyCount,
@@ -2429,7 +2772,7 @@ const summary = {
     error: f.error || null,
     hookErr: f.hookErr || null,
   })),
-  events: events.slice(0, 50),
+  events: events.slice(0, fetchTuples ? 80 : 50),
 };
 
 fs.writeFileSync(path.join(outDir, "oracle.json"), JSON.stringify(summary, null, 2));
@@ -2441,11 +2784,15 @@ fs.writeFileSync(
 console.log(
   JSON.stringify(
     {
-      ok: foNet.length > 0 || ops.length > 0,
+      ok: foNet.length > 0 || ops.length > 0 || completeTuples.length > 0,
       headed,
+      fetchTuples,
       iframeRewrites,
       foCount: foNet.length,
       opcodeCount: ops.length,
+      completeTupleCount: completeTuples.length,
+      fetchLoopRawCount: liveFetchRaw.length,
+      firstCompleteTuple: completeTuples[0] || null,
       readCount: reads.length,
       firstOpcode: ops[0] || null,
       firstWidths: deltas.slice(0, 12),
