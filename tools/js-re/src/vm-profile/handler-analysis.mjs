@@ -126,11 +126,26 @@ function resolveHelper(node, context) {
   return { fn, expression };
 }
 
+function expressionIdentity(node) {
+  if (!node) return "?";
+  if (node.type === "Identifier") return `id:${node.name}`;
+  if (node.type === "ThisExpression") return "this";
+  if (node.type === "MemberExpression") {
+    const property =
+      node.property.type === "Identifier"
+        ? `id:${node.property.name}`
+        : node.property.type === "Literal"
+          ? `lit:${String(node.property.value)}`
+          : expressionIdentity(node.property);
+    return `member(${expressionIdentity(node.object)},${node.computed ? "[]" : "."}${property})`;
+  }
+  return node.type;
+}
+
 function semanticRead(node) {
   return (
     node?.type === "MemberExpression" &&
     node.computed &&
-    node.object.type === "Identifier" &&
     node.property.type === "UpdateExpression" &&
     node.property.operator === "++" &&
     node.property.argument.type === "Identifier"
@@ -143,7 +158,7 @@ function semantic(node, context, environment = new Map(), depth = 0) {
     return {
       type: "read",
       start: node.start,
-      buffer: node.object.name,
+      buffer: expressionIdentity(node.object),
       pc: node.property.argument.name,
     };
   }
@@ -277,14 +292,21 @@ function decodeCandidate(node, readStart) {
     const readTerms = terms.filter((term) =>
       semanticContains(term, (candidate) => candidate.type === "read" && candidate.start === readStart),
     );
-    const identifierTerms = terms.filter((term) => term?.type === "identifier");
+    const keyTerms = terms.filter(
+      (term) =>
+        ["identifier", "member"].includes(term?.type) &&
+        !semanticContains(
+          term,
+          (candidate) => candidate.type === "read" && candidate.start === readStart,
+        ),
+    );
     const literalTerms = terms.filter(
       (term) => term?.type === "literal" && typeof term.value === "number",
     );
     if (
       readTerms.length === 1 &&
-      identifierTerms.length === 1 &&
-      readTerms.length + identifierTerms.length + literalTerms.length === terms.length
+      keyTerms.length === 1 &&
+      readTerms.length + keyTerms.length + literalTerms.length === terms.length
     ) {
       let extra = 0;
       for (const literal of literalTerms) {
@@ -294,7 +316,10 @@ function decodeCandidate(node, readStart) {
       }
       return {
         extra: extra & 255,
-        keyIdentifier: identifierTerms[0].name,
+        keyIdentifier:
+          keyTerms[0].type === "identifier"
+            ? `id:${keyTerms[0].name}`
+            : canonicalJson(keyTerms[0]),
       };
     }
   }
@@ -316,7 +341,7 @@ function dominantReadPair(fn) {
   const reads = collect(fn, semanticRead);
   const counts = new Map();
   for (const read of reads) {
-    const key = `${read.object.name}\0${read.property.argument.name}`;
+    const key = `${expressionIdentity(read.object)}\0${read.property.argument.name}`;
     counts.set(key, (counts.get(key) ?? 0) + 1);
   }
   const sorted = [...counts.entries()].sort((a, b) => b[1] - a[1]);
@@ -328,7 +353,7 @@ function dominantReadPair(fn) {
     reads: reads
       .filter(
         (read) =>
-          read.object.name === buffer && read.property.argument.name === pc,
+          expressionIdentity(read.object) === buffer && read.property.argument.name === pc,
       )
       .sort((a, b) => a.start - b.start),
   };
@@ -422,7 +447,7 @@ function charsetReadExtras(node, pair, context) {
       candidate.type === "MemberExpression" &&
       candidate.computed &&
       candidate.object.type === "Identifier" &&
-      candidate.object.name !== pair.buffer,
+      expressionIdentity(candidate.object) !== pair.buffer,
   )) {
     for (const read of pair.reads) {
       if (read.start >= member.property.start && read.end <= member.property.end) {
@@ -611,6 +636,45 @@ export function recognizeLebTable(fn, analysis) {
     readPair: { count: pair.reads.length },
     doWhileCount: doWhiles.length,
     hasCountedFor: true,
+    spec,
+  };
+  return {
+    spec,
+    handlerFingerprint: sha256Hex(canonicalJson(evidence)),
+    evidence,
+  };
+}
+
+export function recognizeFixedReads(fn, analysis) {
+  const context = indexFunction(fn, analysis);
+  const pair = dominantReadPair(fn);
+  if (!pair || !pair.reads.length || pair.reads.length > 256) return null;
+  if (collect(fn, semanticRead).length !== pair.reads.length) return null;
+  const hasVariableControlFlow = contains(fn, (node) =>
+    [
+      "IfStatement",
+      "SwitchStatement",
+      "ForStatement",
+      "ForInStatement",
+      "ForOfStatement",
+      "WhileStatement",
+      "DoWhileStatement",
+      "ConditionalExpression",
+      "TryStatement",
+    ].includes(node.type),
+  );
+  if (hasVariableControlFlow) return null;
+  const decodes = pair.reads.map((read) => readDecode(read, context));
+  if (decodes.some((decode) => !decode)) return null;
+  const keyIdentifiers = new Set(decodes.map((decode) => decode.keyIdentifier));
+  if (keyIdentifiers.size !== 1) return null;
+  const spec = {
+    kind: "fixed_reads",
+    extra_xors: decodes.map((decode) => decode.extra),
+  };
+  const evidence = {
+    kind: "fixed_reads",
+    readPair: { count: pair.reads.length },
     spec,
   };
   return {

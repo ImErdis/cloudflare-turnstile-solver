@@ -104,6 +104,14 @@ test("leftover rotations produce equivalent exact 181 and 167 specs", { timeout:
     length_byte_xor: 0,
     char_xor: 225,
   });
+  assert.deepEqual(handler(one.profile, 246).spec, {
+    kind: "fixed_reads",
+    extra_xors: [0],
+  });
+  assert.deepEqual(handler(four.profile, 246).spec, {
+    kind: "fixed_reads",
+    extra_xors: [64],
+  });
 });
 
 test("identifier rotation survives while semantic changes invalidate", { timeout: 30_000 }, (t) => {

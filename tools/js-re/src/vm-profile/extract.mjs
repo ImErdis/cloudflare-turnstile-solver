@@ -3,6 +3,7 @@ import { collect, contains } from "./ast-utils.mjs";
 import { canonicalJson, sha256Hex } from "./canonicalize.mjs";
 import {
   createHandlerAnalysis,
+  recognizeFixedReads,
   recognizeJumpStop,
   recognizeLebTable,
   recognizeTaggedLoad,
@@ -244,13 +245,12 @@ function inferEntry(ast) {
 }
 
 function recognizedHandler(fn, analysis) {
-  const recognizers = [
-    recognizeTaggedLoad(fn, analysis),
-    recognizeLebTable(fn, analysis),
-    recognizeJumpStop(fn, analysis),
-  ].filter(Boolean);
-  if (recognizers.length > 1) return null;
-  return recognizers[0] ?? null;
+  return (
+    recognizeTaggedLoad(fn, analysis) ??
+    recognizeLebTable(fn, analysis) ??
+    recognizeJumpStop(fn, analysis) ??
+    recognizeFixedReads(fn, analysis)
+  );
 }
 
 export function extractVmProfile(source, { sourceName = "<memory>" } = {}) {
