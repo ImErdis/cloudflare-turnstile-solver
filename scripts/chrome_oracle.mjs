@@ -34,11 +34,15 @@
  *   ORACLE_SITE_ISOLATION set to 1 to keep OOPIF isolation (hooks will miss the iframe)
  *   ORACLE_SKIP_IFRAME_REWRITE set to 1 to save iframe HTML without Fetch.fulfillRequest
  *                    (packed /fo/ recapture; rewrite can stall a new fetch build)
- *   ORACLE_FETCH_TUPLES set to 1 for a finite fetch-loop Debugger harvest
- *                    ({pc,op,key,byte} then removeBreakpoint). Skips unmodified iframe
- *                    rewrite, but still Fetch.fulfillRequest when injectOpcodeLog matches
- *                    the live fetch spelling (Chrome 148 removed setScriptSource).
- *                    Always-on fetch-loop BPs stall /fo/ because the HTML stub runs first.
+ *   ORACLE_FETCH_TUPLES set to 1 for a finite fetch-loop harvest. Prefers a logpoint on
+ *                    the fetch `switch(...){` (discriminant already holds `op`; condition
+ *                    returns false so packed `/fo/` is not stalled). Unique handler `{`
+ *                    BPs are fallback only. Skips iframe rewrite unless ORACLE_INJECT_IFRAME=1
+ *                    (rewrite can hit the wrong document and 400 the follow-up POST).
+ *                    Chrome 148 removed setScriptSource. Always-on fetch-loop pauses stall
+ *                    /fo/ because the HTML stub runs first.
+ *   ORACLE_INJECT_IFRAME set to 1 to Fetch.fulfillRequest-inject `__cfOp.push` into the
+ *                    first turnstile iframe document (optional; default off).
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -57,6 +61,8 @@ const headed = process.env.ORACLE_HEADLESS !== "1";
 const isolateIframes = process.env.ORACLE_SITE_ISOLATION === "1";
 const skipIframeRewrite =
   process.env.ORACLE_SKIP_IFRAME_REWRITE === "1" || fetchTuples;
+/** Fetch.fulfillRequest inject into iframe HTML. Off by default: rewrite is not the packed script. */
+const injectIframe = process.env.ORACLE_INJECT_IFRAME === "1";
 /** Unique packed `case N` hits, then remove those BPs. Default 16. */
 const fetchTupleCap = Number(process.env.ORACLE_FETCH_TUPLE_CAP || 16);
 /** Skip the HTML-embedded stub (~7k packed). Live `/fo/` packed is ~600k+. */
@@ -1826,6 +1832,92 @@ function indexFromLineCol(src, lineNumber, columnNumber) {
   return idx + columnNumber;
 }
 
+/** Mix local assigned as `W=state[key]+op` (or helper) just before the quadratic. */
+function inferMixVarNearFetch(src, braceIdx, opVar) {
+  if (!src || braceIdx == null || braceIdx < 0 || !/^[A-Za-z_$][\w$]*$/.test(opVar || "")) {
+    return null;
+  }
+  const pre = String(src).slice(Math.max(0, braceIdx - 320), braceIdx);
+  const plus = pre.match(new RegExp(`(\\w+)=\\w+\\[\\w+\\]\\+${opVar}(?![\\w$])`));
+  if (plus) return plus[1];
+  const helper = pre.match(
+    new RegExp(`(\\w+)=\\w+\\[[^\\]]{0,80}\\]\\(\\w+\\[\\w+\\],${opVar}\\)`),
+  );
+  if (helper) return helper[1];
+  const sq = pre.match(/(\w+)\*\1\*\d{4,5}/);
+  if (sq) return sq[1];
+  const pair = pre.match(/\((\w+),\1\)\s*\*/);
+  if (pair) return pair[1];
+  return null;
+}
+
+/**
+ * Logpoint condition at fetch `switch(...){`. Must be an expression (arrow IIFE)
+ * so `try/catch` can swallow lookup errors without pausing. Locals (`op`/`mix`)
+ * are visible to the arrow via the call-frame eval scope; `this` is the VM.
+ * Always returns false — do not pause packed `/fo/`.
+ */
+function switchLogCondition(opVar, mixVar) {
+  if (!/^[A-Za-z_$][\w$]*$/.test(opVar || "")) return "false";
+  const mixOk = /^[A-Za-z_$][\w$]*$/.test(mixVar || "");
+  const mixPart = mixOk
+    ? `,mix:typeof ${mixVar}==="number"?${mixVar}:null,key:typeof ${mixVar}==="number"?((${mixVar}-${opVar})&255):null`
+    : "";
+  return (
+    `(()=>{try{var __g=this&&this.g;` +
+    `if(__g&&typeof this.l==="number"&&__g[this.l]&&__g[this.l].length>10000){` +
+    `globalThis.__cfOp=globalThis.__cfOp||[];` +
+    `if(globalThis.__cfOp.length<128){` +
+    `var __pc=typeof this.j==="number"?((__g[this.j]|0)-1):null;` +
+    `var __bc=__g[this.l];` +
+    `globalThis.__cfOp.push({pc:__pc,op:(${opVar}&255),` +
+    `nextKey:typeof this.i==="number"?(__g[this.i]&255):null,` +
+    `byte:(__bc&&__pc>=0&&__pc<__bc.length)?(__bc[__pc]&255):null` +
+    `${mixPart},via:"switchLog"});` +
+    `typeof console!=="undefined"&&console.debug&&console.debug("__cfOp",globalThis.__cfOp[globalThis.__cfOp.length-1]);` +
+    `}} }catch(__e){}return false})()`
+  );
+}
+
+/**
+ * Fetch-loop switch body's `{` after `,op){case N:`. Discriminant already holds `op`.
+ * Happy + catch copies only; skip nested decoder `switch(...,x){case 3:`.
+ */
+function fetchLoopSwitchLogSites(src, markerIdx) {
+  if (!src || markerIdx == null || markerIdx < 0) return [];
+  const winStart = Math.max(0, markerIdx - 80);
+  const window = String(src).slice(winStart, markerIdx + 4000);
+  const firstNear = window.match(/\{case (\d+):/);
+  const firstCase = firstNear ? Number(firstNear[1]) : null;
+  const sites = [];
+  const re = /,(\w+)\)\{case (\d+):/g;
+  let m;
+  while ((m = re.exec(window))) {
+    const caseOp = Number(m[2]);
+    const abs = winStart + m.index;
+    const brace = abs + m[0].indexOf("{");
+    const dist = brace - markerIdx;
+    if (dist < -80 || dist > 3500) continue;
+    if (firstCase != null && caseOp !== firstCase) continue;
+    if (firstCase == null && caseOp < 16) continue;
+    const pre = String(src).slice(Math.max(0, abs - 48), abs);
+    if (/switch\(\w+\[\w+\]=\w+,/.test(pre) && caseOp < 16) continue;
+    const opVar = m[1];
+    const mixVar = inferMixVarNearFetch(src, brace, opVar);
+    sites.push({
+      idx: brace,
+      why: "switchBrace",
+      opVar,
+      mixVar,
+      caseOp,
+      condition: switchLogCondition(opVar, mixVar),
+      ...sourceLineCol(src, brace),
+    });
+    if (sites.length >= 2) break;
+  }
+  return sites;
+}
+
 /** Opcode is the `case N:` label at or just before idx. */
 function caseOpAt(src, idx) {
   if (!src || idx == null || idx < 0) return null;
@@ -2306,6 +2398,18 @@ function selfTestInject() {
   const live54260AmpF = extractFetchQuadratic(live54260AmpHappy);
   const live54260AmpH = injectOpcodeLog(live54260AmpHappy, { jsOnly: true });
   const live54260AmpC = injectOpcodeLog(live54260AmpCatch, { jsOnly: true });
+  const live54260HelperPair =
+    "Kv[iX(Os.g)](W,W)*54260+Kv[iX(Os.KQ)](W,43539),20295)&255,B){case 191:x7[iX(Os.KJ)](this);break;";
+  const live54260HelperPairF = extractFetchQuadratic(live54260HelperPair);
+  const switchAmp = fetchLoopSwitchLogSites(live54260AmpHappy, live54260AmpHappy.indexOf("54260"));
+  const switchHp = fetchLoopSwitchLogSites(
+    live54260HelperPair,
+    live54260HelperPair.indexOf("54260"),
+  );
+  const switchCatch = fetchLoopSwitchLogSites(
+    "if(Kd=KA[KZ],Kd!==Kd)return KA[Kh];switch(KA[KZ]=Kd+1,KE=Kv[iX(Os.K)](KA[KQ],Kv[iX(Os.KG)](Kv[iX(Os.a)](Kp[Kd]-160,256),255)),Kw=KA[KQ]+KE,KA[KQ]=Kv[iX(Os.Uo)](Kv[iX(Os.Us)](Kw*Kw,54260),Kv[iX(Os.g)](Kw,43539))+20295&255.01,KE){case 191:x7[iX(Os.U1)](this);break;",
+    0,
+  );
   const falseLinFirst =
     "x=8696)+44379&255,j){case 143:zz();}" + live55067Bmix;
   const falseLinFirstF = extractFetchQuadratic(falseLinFirst);
@@ -2518,6 +2622,7 @@ function selfTestInject() {
       skipIframeRewrite === false &&
       fetchTuples === false &&
       wantFetchLoopBp === false &&
+      injectIframe === false &&
       packed2Mark &&
       packed2Mark.marker === "23196" &&
       packed2Sched &&
@@ -2598,6 +2703,25 @@ function selfTestInject() {
       live54260AmpH.html.includes("pc:B") &&
       live54260AmpC.injected &&
       live54260AmpC.html.includes("__cfOp.push") &&
+      live54260HelperPairF &&
+      live54260HelperPairF.keyMul === 54260 &&
+      live54260HelperPairF.keyQuadB === 43539 &&
+      live54260HelperPairF.keyAdd === 20295 &&
+      switchAmp.length === 1 &&
+      switchAmp[0].why === "switchBrace" &&
+      switchAmp[0].opVar === "B" &&
+      switchAmp[0].mixVar === "W" &&
+      switchAmp[0].caseOp === 191 &&
+      switchAmp[0].condition.includes('via:"switchLog"') &&
+      switchAmp[0].condition.includes("return false") &&
+      live54260AmpHappy.slice(switchAmp[0].idx, switchAmp[0].idx + 1) === "{" &&
+      switchHp.length === 1 &&
+      switchHp[0].opVar === "B" &&
+      switchHp[0].caseOp === 191 &&
+      switchCatch.length === 1 &&
+      switchCatch[0].opVar === "KE" &&
+      switchCatch[0].mixVar === "Kw" &&
+      injectIframe === false &&
       falseLinFirstF &&
       falseLinFirstF.keyMul === 55067 &&
       falseLinFirstS &&
@@ -2853,7 +2977,7 @@ async function onFetchPaused(session, evt) {
         text.slice(0, 400000),
       );
       if (skipIframeRewrite) {
-        if (fetchTuples && iframeRewrites === 1) {
+        if (injectIframe && fetchTuples && iframeRewrites === 1) {
           const inj = injectOpcodeLog(text);
           if (inj.injected && inj.html.includes("__cfOp.push")) {
             const headers = (evt.responseHeaders || []).filter(
@@ -3279,6 +3403,9 @@ async function resolveBreakpointLocation(session, loc) {
         why: loc.why,
         caseOp: loc.caseOp,
         name: loc.name,
+        condition: loc.condition,
+        idx: loc.idx,
+        switchLog: loc.switchLog,
         resolvedFrom: "possible",
       };
     }
@@ -3306,7 +3433,7 @@ async function trySetFetchLoopBp(session, s, scriptSource, loc) {
           lineNumber: attempt.lineNumber,
           columnNumber: attempt.columnNumber,
         },
-        condition: FETCH_LOOP_BP_CONDITION,
+        condition: attempt.condition || loc.condition || FETCH_LOOP_BP_CONDITION,
       });
       if (!bp?.breakpointId) continue;
       const actual = bp.actualLocation;
@@ -3319,7 +3446,12 @@ async function trySetFetchLoopBp(session, s, scriptSource, loc) {
         actual && typeof actual.columnNumber === "number"
           ? indexFromLineCol(scriptSource, actual.lineNumber, actual.columnNumber)
           : reqIdx;
-      const bound = loc.name ? handlerImmediateBound(scriptSource, loc.name) : null;
+      const bound =
+        loc.why === "switchBrace" || loc.switchLog
+          ? null
+          : loc.name
+            ? handlerImmediateBound(scriptSource, loc.name)
+            : null;
       const snappedPastImm =
         bound &&
         bound.plus >= 0 &&
@@ -3329,7 +3461,18 @@ async function trySetFetchLoopBp(session, s, scriptSource, loc) {
         bound &&
         actIdx != null &&
         (actIdx < bound.brace || (bound.end >= 0 && actIdx > bound.end));
-      if (snappedPastImm || snappedOutside) {
+      const braceIdx = loc.idx;
+      const snappedBeforeSwitchBrace =
+        loc.why === "switchBrace" &&
+        actIdx != null &&
+        braceIdx != null &&
+        actIdx < braceIdx;
+      const snappedIntoCaseBody =
+        loc.why === "switchBrace" &&
+        actIdx != null &&
+        braceIdx != null &&
+        actIdx > braceIdx + 20;
+      if (snappedPastImm || snappedOutside || snappedBeforeSwitchBrace || snappedIntoCaseBody) {
         await session
           .send("Debugger.removeBreakpoint", { breakpointId: bp.breakpointId })
           .catch(() => {});
@@ -3344,6 +3487,8 @@ async function trySetFetchLoopBp(session, s, scriptSource, loc) {
           brace: bound && bound.brace,
           pastImm: !!snappedPastImm,
           outside: !!snappedOutside,
+          beforeSwitchBrace: !!snappedBeforeSwitchBrace,
+          intoCaseBody: !!snappedIntoCaseBody,
         });
         continue;
       }
@@ -3357,9 +3502,10 @@ async function trySetFetchLoopBp(session, s, scriptSource, loc) {
               indexFromLineCol(scriptSource, attempt.lineNumber, attempt.columnNumber),
             );
       fetchLoopBpMeta.set(bp.breakpointId, {
-        caseOp: resolvedOp,
+        caseOp: loc.why === "switchBrace" ? null : resolvedOp,
         why: loc.why,
         name: loc.name,
+        switchLog: loc.why === "switchBrace",
         lineNumber: actual?.lineNumber ?? attempt.lineNumber,
         columnNumber: actual?.columnNumber ?? attempt.columnNumber,
         scriptId: s.scriptId,
@@ -3402,6 +3548,58 @@ async function trySetFetchLoopBp(session, s, scriptSource, loc) {
 async function setFetchLoopBreakpointNear(session, s, scriptSource, idx) {
   scriptSources.set(s.scriptId, scriptSource);
   recordAmbiguousHandlerNames(scriptSource, idx);
+  if (fetchTuples) {
+    const switchSites = fetchLoopSwitchLogSites(scriptSource, idx);
+    note("fetchLoopSwitchSites", {
+      n: switchSites.length,
+      sites: switchSites.map((x) => ({
+        why: x.why,
+        opVar: x.opVar,
+        mixVar: x.mixVar,
+        caseOp: x.caseOp,
+        lineNumber: x.lineNumber,
+        columnNumber: x.columnNumber,
+      })),
+    });
+    let placedSwitch = 0;
+    const seenSwitch = new Set();
+    for (const site of switchSites) {
+      const colKey = `${site.lineNumber}:${site.columnNumber}`;
+      if (seenSwitch.has(colKey)) continue;
+      const used = await trySetFetchLoopBp(session, s, scriptSource, {
+        scriptId: s.scriptId,
+        lineNumber: site.lineNumber,
+        columnNumber: site.columnNumber,
+        why: site.why,
+        caseOp: site.caseOp,
+        name: site.opVar,
+        condition: site.condition,
+        idx: site.idx,
+        switchLog: true,
+      });
+      if (used) {
+        seenSwitch.add(used);
+        seenSwitch.add(colKey);
+        placedSwitch++;
+      }
+    }
+    if (placedSwitch > 0) {
+      note("fetchLoopBpSummary", {
+        placed: fetchLoopBpPlaced,
+        failed: fetchLoopBpFailed,
+        thisScript: placedSwitch,
+        switchLog: placedSwitch,
+        skippedUniqueBraces: true,
+      });
+      return true;
+    }
+    note("fetchLoopSwitchLogMiss", {
+      n: switchSites.length,
+      error: switchSites.length
+        ? "Could not resolve switchBrace"
+        : "no ,op){case N: near fetch marker",
+    });
+  }
   const sites = fetchLoopBreakpointSites(scriptSource, idx);
   const uniqueCalls = fetchLoopUniqueCallSites(scriptSource, idx);
   const braces = fetchLoopUniqueBraceSites(scriptSource, idx);
@@ -3529,7 +3727,7 @@ async function attachSession(session, targetInfo, waitingForDebugger) {
               });
               if (wantFetchLoopBp && !hasInject) {
                 const packedHits = liveFetchRaw.filter((r) => (r.bcLen || 0) > 10000).length;
-                if (packedHits >= fetchTupleCap) {
+                if (packedHits >= fetchTupleCap && !fetchTuples) {
                   note("fetchLoopSkipNewScript", { reason: "cap", packedHits });
                 } else {
                   const patched = await patchExecutedFetchScript(session, s, scriptSource);
@@ -3609,6 +3807,14 @@ async function attachSession(session, targetInfo, waitingForDebugger) {
           return;
         }
         const fetchHit = hit.some((id) => fetchLoopBreakpoints.has(id));
+        const switchLogHit = hit.some((id) => {
+          const meta = fetchLoopBpMeta.get(id);
+          return meta && (meta.why === "switchBrace" || meta.switchLog);
+        });
+        if (switchLogHit) {
+          note("fetchLoopSwitchLogPause", { n: hit.length });
+          return;
+        }
         if (fetchHit && frame && liveFetchRaw.length < fetchTupleCap) {
           let callMeta = null;
           for (const id of hit) {
@@ -4087,6 +4293,13 @@ const ops = normalizeBreakpointOps([
   ...frameDumps.flatMap((f) => f.ops || []),
   ...liveOps,
 ]);
+const switchLogRows = ops.filter(
+  (r) => r && r.via === "switchLog" && (isHarvestTuple(r) || isCompleteTuple(r)),
+);
+const publishedHarvest = harvestTuples.length ? harvestTuples : switchLogRows;
+const publishedComplete = completeTuples.length
+  ? completeTuples
+  : switchLogRows.filter(isCompleteTuple);
 const reads = frameDumps.flatMap((f) => f.reads || []);
 const xhr = frameDumps.flatMap((f) => f.xhr || []);
 const writes = [];
@@ -4207,9 +4420,9 @@ const summary = {
   fetchLoopBpPlaced,
   fetchLoopBpFailed,
   fetchLoopRawCount: liveFetchRaw.length,
-  harvestTupleCount: harvestTuples.length,
-  completeTupleCount: completeTuples.length,
-  fetchLoopTuples: harvestTuples.slice(0, 128),
+  harvestTupleCount: publishedHarvest.length,
+  completeTupleCount: publishedComplete.length,
+  fetchLoopTuples: publishedHarvest.slice(0, 128),
   foPlaintextShapes: foShapes.map((s) => ({
     via: s.via,
     keyCount: s.keyCount,
@@ -4266,19 +4479,19 @@ fs.writeFileSync(
 console.log(
   JSON.stringify(
     {
-      ok: foNet.length > 0 || ops.length > 0 || completeTuples.length > 0,
+      ok: foNet.length > 0 || ops.length > 0 || publishedComplete.length > 0,
       headed,
       fetchTuples,
       iframeRewrites,
       foCount: foNet.length,
       opcodeCount: ops.length,
-      harvestTupleCount: harvestTuples.length,
-      completeTupleCount: completeTuples.length,
+      harvestTupleCount: publishedHarvest.length,
+      completeTupleCount: publishedComplete.length,
       fetchLoopRawCount: liveFetchRaw.length,
       fetchLoopBpPlaced,
       fetchLoopBpFailed,
-      firstHarvestTuple: harvestTuples[0] || null,
-      firstCompleteTuple: completeTuples[0] || null,
+      firstHarvestTuple: publishedHarvest[0] || null,
+      firstCompleteTuple: publishedComplete[0] || null,
       readCount: reads.length,
       firstOpcode: ops[0] || null,
       firstWidths: deltas.slice(0, 12),
