@@ -455,6 +455,10 @@ function extractFetchQuadratic(html) {
   const nestPairCommaMul = window.match(
     /\((\w+),\1\),(\d{4,5})\)\+[\s\S]{0,96}?\(\1,(\d{4,5})\),(\d{4,5})\),255/,
   );
+  // tuples26 catch: helper(mix,mix),mul),b*mix)+add&255
+  const nestPairCommaStarBmixAmp = window.match(
+    /(\w+),\1\),(\d{4,5})\),(\d{4,5})\*\1\)\+(\d{4,5})&255/,
+  );
   const nestSqCommaMulHelper = window.match(
     /(\w+)\*\1,(\d{4,5})\)\+[\s\S]{0,96}?\(\1,(\d{4,5})\),(\d{4,5})\)&255/,
   );
@@ -508,6 +512,9 @@ function extractFetchQuadratic(html) {
   const nestSqStarBmixCommaAddAmp = window.match(
     /(\w+)\*\1,(\d{4,5})\)\+\1\*(\d{4,5}),(\d{4,5})\)&255/,
   );
+  const nestSqStarBmixPlusAddAmp = window.match(
+    /(\w+)\*\1,(\d{4,5})\)\+\1\*(\d{4,5})\+(\d{4,5})&255/,
+  );
   const biasM = window.match(/\]-(\d{2,3}),256\)&255/);
   const biasSub = window.match(/\]-(\d{2,3}),256/);
   const biasAdd = window.match(/\[(\w+)\],(\d{2,3})\)\+256/);
@@ -524,6 +531,7 @@ function extractFetchQuadratic(html) {
     sqAmp ||
     nestMul ||
     nestPairCommaMul ||
+    nestPairCommaStarBmixAmp ||
     nestSqCommaMulHelper ||
     starMix ||
     mulTimesSq ||
@@ -538,6 +546,7 @@ function extractFetchQuadratic(html) {
     helperPairCommaAdd ||
     nestSqStarBmixCommaAdd ||
     nestSqStarBmixCommaAddAmp ||
+    nestSqStarBmixPlusAddAmp ||
     mulCommaHelper ||
     sqCommaHelper ||
     alt ||
@@ -582,6 +591,11 @@ function extractFetchQuadratic(html) {
     keyQuadB = Number(nestPairCommaMul[3]);
     keyAdd = Number(nestPairCommaMul[4]);
     spelling = "helper(mix,mix),mul)+helper(mix,b),add),255";
+  } else if (nestPairCommaStarBmixAmp) {
+    keyMul = Number(nestPairCommaStarBmixAmp[2]);
+    keyQuadB = Number(nestPairCommaStarBmixAmp[3]);
+    keyAdd = Number(nestPairCommaStarBmixAmp[4]);
+    spelling = "helper(mix,mix),mul),b*mix)+add&255";
   } else if (nestSqCommaMulHelper) {
     keyMul = Number(nestSqCommaMulHelper[2]);
     keyQuadB = Number(nestSqCommaMulHelper[3]);
@@ -652,6 +666,11 @@ function extractFetchQuadratic(html) {
     keyQuadB = Number(nestSqStarBmixCommaAddAmp[3]);
     keyAdd = Number(nestSqStarBmixCommaAddAmp[4]);
     spelling = "helper(mix*mix,mul)+mix*b,add)&255";
+  } else if (nestSqStarBmixPlusAddAmp) {
+    keyMul = Number(nestSqStarBmixPlusAddAmp[2]);
+    keyQuadB = Number(nestSqStarBmixPlusAddAmp[3]);
+    keyAdd = Number(nestSqStarBmixPlusAddAmp[4]);
+    spelling = "helper(mix*mix,mul)+mix*b+add&255";
   } else if (mulCommaHelper) {
     keyMul = Number(mulCommaHelper[1]);
     keyQuadB = Number(mulCommaHelper[3]);
@@ -776,6 +795,8 @@ const FETCH_SOURCE_MARKERS = [
   "54260",
   "43539",
   "20295",
+  "5886",
+  "50261",
   "I*I*8904",
   "*8904,",
 ];
@@ -796,7 +817,8 @@ function fetchMarkerInSource(src) {
   }
   const nested = src.match(/(\d{4,5})\*\([A-Za-z_$][\w$]*\*[A-Za-z_$][\w$]*\)/);
   const sqMul = src.match(/([A-Za-z_$][\w$]*)\*\1\*(\d{4,5})/);
-  const extra = nested ? nested[1] : sqMul ? sqMul[2] : null;
+  const sqCommaMul = src.match(/([A-Za-z_$][\w$]*)\*\1,(\d{4,5})/);
+  const extra = nested ? nested[1] : sqMul ? sqMul[2] : sqCommaMul ? sqCommaMul[2] : null;
   if (extra) {
     const idx = src.indexOf(extra);
     if (idx >= 0) {
@@ -2630,6 +2652,35 @@ function selfTestInject() {
   const live5886NestF = extractFetchQuadratic(live5886NestSqStar);
   const live5886Mark = fetchMarkerInSource(live5886Happy);
   const live5886NestMark = fetchMarkerInSource(live5886NestSqStar);
+  // tuples26 iframe (executed HTML, not guessed): helper(mix*mix,mul)+mix*b+add&255
+  const live5886Iframe26 =
+    "if(s=YU[YW],s!==s)return YU[Yw];switch(YU[YW]=YD[yB(Dr.N)](s,1),s=YD[yB(Dr.Yv)](YU[YZ],YD[yB(Dr.YG)](YD[yB(Dr.YU)](YH[s],187)+256,255)),N=YU[YZ]+s,YU[YZ]=YD[yB(Dr.YM)](N*N,5886)+N*50261+1243&255.37,s){case 135:YY[yB(Dr.Yg)](this);break;} new Yz(Y)[yo(Dl.Y)](0,176,[])";
+  const live5886Iframe26Catch =
+    "switch(YU[YW]=YD[yB(Dr.N)](Yv,1),YG=YU[YZ]^YD[yB(Dr.uQ)](YD[yB(Dr.N)](YH[Yv]-187,256),255),Yg=YU[YZ]+YG,YU[YZ]=YD[yB(Dr.ua)](YD[yB(Dr.YM)](YD[yB(Dr.uT)](Yg,Yg),5886),50261*Yg)+1243&255.14,YG){case 135:YY[yB(Dr.u7)](this);break;}";
+  const live5886Iframe26F = extractFetchQuadratic(live5886Iframe26);
+  const live5886Iframe26Fc = extractFetchQuadratic(live5886Iframe26Catch);
+  const live5886Iframe26Mark = fetchMarkerInSource(live5886Iframe26);
+  const live5886Iframe26Sw = fetchLoopSwitchLogSites(
+    live5886Iframe26,
+    live5886Iframe26.indexOf("5886"),
+  );
+  let live5886Iframe26FileOk = true;
+  const live5886Iframe26Path = "artifacts/re-out/chrome-oracle-tuples26/iframe-1.html";
+  if (fs.existsSync(live5886Iframe26Path)) {
+    const html = fs.readFileSync(live5886Iframe26Path, "utf8");
+    const sched = extractFetchSchedule(html);
+    const mark = fetchMarkerInSource(html);
+    live5886Iframe26FileOk = !!(
+      sched &&
+      sched.keyMul === 5886 &&
+      sched.keyQuadB === 50261 &&
+      sched.keyAdd === 1243 &&
+      sched.byteBias === 187 &&
+      sched.initKeyCandidate === 176 &&
+      mark &&
+      (mark.marker === "5886" || mark.marker === "50261")
+    );
+  }
   const live54260NestHappy =
     "if(x=pj[pB],pv[en(IT.pQ)](x,x))return pj[pD];switch(pj[pB]=x+1,x=pj[pQ]^pv[en(IT.N)](pv[en(IT.x)](pg[x],160)+256,255),L=pj[pQ]+x,pj[pQ]=pv[en(IT.pF)](pv[en(IT.pF)](pv[en(IT.pg)](L*L,54260),L*43539),20295)&255.77,x){case 191:s8[en(IT.po)](this);break;} new sz(p)[eP(c0.p)](0,166,[])";
   const live54260NestCatch =
@@ -3036,6 +3087,26 @@ function selfTestInject() {
       live5886NestMark &&
       live5886NestMark.schedule &&
       live5886NestMark.schedule.initKeyCandidate === 176 &&
+      live5886Iframe26F &&
+      live5886Iframe26F.keyMul === 5886 &&
+      live5886Iframe26F.keyQuadB === 50261 &&
+      live5886Iframe26F.keyAdd === 1243 &&
+      live5886Iframe26F.byteBias === 187 &&
+      live5886Iframe26F.spelling === "helper(mix*mix,mul)+mix*b+add&255" &&
+      live5886Iframe26Fc &&
+      live5886Iframe26Fc.keyMul === 5886 &&
+      live5886Iframe26Fc.keyQuadB === 50261 &&
+      live5886Iframe26Fc.keyAdd === 1243 &&
+      live5886Iframe26Fc.byteBias === 187 &&
+      live5886Iframe26Mark &&
+      live5886Iframe26Mark.marker === "5886" &&
+      live5886Iframe26Mark.schedule &&
+      live5886Iframe26Mark.schedule.initKeyCandidate === 176 &&
+      live5886Iframe26Sw.length >= 1 &&
+      live5886Iframe26Sw[0].opVar === "s" &&
+      live5886Iframe26Sw[0].mixVar === "N" &&
+      live5886Iframe26Sw[0].caseOp === 135 &&
+      live5886Iframe26FileOk &&
       extractFetchQuadratic(
         "HJ[Hj]=HT[Xp(Nf.Hu)](HT[Xp(Nf.HP)](HT[Xp(Nf.HS)](HS,HS)*5886,50261*HS)+1243,255),X){case 135:",
       )?.keyMul === 5886 &&
@@ -3177,6 +3248,10 @@ function selfTestInject() {
       initKeyCandidate: packed2Entry,
       svgRejected: svg8904 == null,
       finalizePc: fin[0] && fin[0].pc,
+      iframe26Mul: live5886Iframe26F && live5886Iframe26F.keyMul,
+      iframe26CatchMul: live5886Iframe26Fc && live5886Iframe26Fc.keyQuadB,
+      iframe26Bias: live5886Iframe26F && live5886Iframe26F.byteBias,
+      iframe26FileOk: live5886Iframe26FileOk,
     },
   };
 }
