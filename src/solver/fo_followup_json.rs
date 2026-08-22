@@ -72,7 +72,7 @@ pub const FOLLOWUP_NUMERIC_SLOT_KIND_B: &str = "object";
 pub const FOLLOWUP_NUMERIC_SLOT_KEYCOUNT_MIN_B: u32 = 9;
 pub const FOLLOWUP_NUMERIC_SLOT_KEYCOUNT_MAX_B: u32 = 32;
 
-/// Extra ident still `unseen_in_dumps` after HTML + stub skip-harvest.
+/// Extra ident still `unseen_in_dumps` after HTML + stub skip-harvest + live packed recapture.
 /// Chrome leftover assignment probe watches these names (plus numeric keys).
 pub const FOLLOWUP_UNSEEN_EXTRA_IDENT_B: &[&str] = &[
     "OQbM0", "UjLjP6", "YfDjo7", "Iqrc9", "OZgbm6", "pFyv1", "SfUI1", "sqKXG6", "HUDi4",
@@ -83,6 +83,21 @@ pub const FOLLOWUP_UNSEEN_EXTRA_IDENT_B: &[&str] = &[
 /// opcode was not recovered. OOPIF ignores `Fetch.fulfillRequest` rewrite;
 /// fetch-loop Debugger breakpoints stay off (they stalled `/fo/`).
 pub const FOLLOWUP_LEFTOVER_OPCODE_RECOVERED: bool = false;
+
+/// Live `/fo/` packed body recaptured 2026-08-22 (`artifacts/.../chrome-oracle-packed2`,
+/// gitignored). Runtime `runProgram` arg prefix; decrypt magic matches. Not the
+/// 56907 `71GxwDch` packer. Do not commit the blob.
+pub const FOLLOWUP_LIVE_PACKED_RECAPTURED: bool = true;
+
+/// First 20 chars of the live packed `runProgram` argument (`packedMeta`).
+pub const FOLLOWUP_LIVE_PACKED_PREFIX: &str = "1oUjjpq4sauymkoqjx4C";
+
+/// Init `/fo/` response length (packed-runProgram band) from Fetch.getResponseBody.
+pub const FOLLOWUP_LIVE_PACKED_RESP_LEN: usize = 846_200;
+
+/// HTML fetch on that iframe (`mix²*23196 + mix*32619 + 19372`, bias 217,
+/// `new HC(H)(0,63,[])`, first case 220). **Not** `FETCH_LIVE` (still 56907).
+pub const FOLLOWUP_LIVE_PACKED_FETCH_MUL: u32 = 23_196;
 
 /// Map a Chrome leftover assignment opcode to a write_path. `None` / unknown
 /// stays `unseen_in_dumps` (inject miss is not a handler story).
@@ -152,9 +167,12 @@ const fn w(
 }
 
 /// How each follow-up field is written (56907 dumps). Names were already known.
-/// The 822k live `/fo/` packed body was not saved; skip-harvest of the HTML-embedded
-/// 5k `runProgram(\`71GxwDch…\`)` stub does not contain the 14 extra ident names.
-/// Do not fill values or POST.
+/// HTML-embedded 5k `runProgram(\`71GxwDch…\`)` stub has none of the 14 extras
+/// (skip-harvest stops at jump XX/187 after skipping XU/177 immediates).
+/// Live `/fo/` packed body recaptured 2026-08-22 (`FOLLOWUP_LIVE_PACKED_*`):
+/// prefix `1oUjjpq4…`, fetch `mix²*23196` — not `FETCH_LIVE`. Skip-harvest with
+/// 56907 fetch stops at unmapped opcode 245; leftover names are not in the
+/// decrypted packed plaintext. Still `unseen_in_dumps`. Do not fill values or POST.
 pub const FOLLOWUP_FIELD_WRITE_B: &[FollowUpFieldWrite] = &[
     w("SMrTl9", "chl_opt", "host_copy", None,
         "_cf_chl_opt SMrTl9 is the 16-hex ray; follow-up kind string. Not on the init JSON literal. Assignment onto initObj is not in HTML."),
@@ -349,6 +367,11 @@ mod tests {
         assert_eq!(write_path_from_chrome_opcode(Some(169)), "property_set");
         assert_eq!(write_path_from_chrome_opcode(None), "unseen_in_dumps");
         assert!(!FOLLOWUP_LEFTOVER_OPCODE_RECOVERED);
+        assert!(FOLLOWUP_LIVE_PACKED_RECAPTURED);
+        assert_eq!(FOLLOWUP_LIVE_PACKED_PREFIX, "1oUjjpq4sauymkoqjx4C");
+        assert_eq!(FOLLOWUP_LIVE_PACKED_RESP_LEN, 846_200);
+        assert_eq!(FOLLOWUP_LIVE_PACKED_FETCH_MUL, 23_196);
+        assert_eq!(crate::solver::run_program_vm::FETCH_LIVE.key_mul, 56_907);
         assert_eq!(NEXT_AFTER_FOLLOWUP_JSON, "handler_semantics");
         let path = std::path::Path::new("artifacts/re-out/chrome-oracle/iframe-1.html");
         if path.is_file() {
@@ -452,6 +475,12 @@ mod tests {
                 let got: Vec<&str> = names.iter().filter_map(|k| k.as_str()).collect();
                 assert_eq!(got, FOLLOWUP_UNSEEN_EXTRA_IDENT_B);
             }
+        }
+        if let Some(ph) = row.get("packedHarvest") {
+            assert_eq!(ph["recaptured"], true);
+            assert_eq!(ph["fetchLiveUnchanged"], true);
+            assert_eq!(ph["packedPrefix"], FOLLOWUP_LIVE_PACKED_PREFIX);
+            assert_eq!(ph["fetchMul"], FOLLOWUP_LIVE_PACKED_FETCH_MUL);
         }
         if let Some(ident) = row["identKeys"].as_array() {
             let names: Vec<String> = ident

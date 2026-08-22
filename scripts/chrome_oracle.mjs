@@ -27,6 +27,8 @@
  *   ORACLE_WAIT_MS       default 22000
  *   ORACLE_HEADLESS      set to 1 to force headless (not the intended mode)
  *   ORACLE_SITE_ISOLATION set to 1 to keep OOPIF isolation (hooks will miss the iframe)
+ *   ORACLE_SKIP_IFRAME_REWRITE set to 1 to save iframe HTML without Fetch.fulfillRequest
+ *                    (packed /fo/ recapture; rewrite can stall a new fetch build)
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -40,6 +42,7 @@ const chrome = process.env.CHROME_PATH || "/usr/bin/google-chrome-stable";
 const waitMs = Number(process.env.ORACLE_WAIT_MS || 22_000);
 const headed = process.env.ORACLE_HEADLESS !== "1";
 const isolateIframes = process.env.ORACLE_SITE_ISOLATION === "1";
+const skipIframeRewrite = process.env.ORACLE_SKIP_IFRAME_REWRITE === "1";
 
 const CHROME_ARGS = [
   "--no-sandbox",
@@ -1577,6 +1580,7 @@ function selfTestInject() {
       leftoverRotated.extraOpcodes[0] === 177 &&
       classifyLeftoverOpcode(226).writePath === "bytecode_string" &&
       classifyLeftoverOpcode(177).writePath === "host_xi" &&
+      skipIframeRewrite === false &&
       rayFromFoUrl(
         "https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/b/fo/907568659:1:x/a2ee5624d969f508/ch",
       ) === "a2ee5624d969f508" &&
@@ -1702,6 +1706,25 @@ async function onFetchPaused(session, evt) {
       const text = body.base64Encoded
         ? Buffer.from(body.body, "base64").toString("utf8")
         : body.body;
+      iframeRewrites++;
+      fs.writeFileSync(
+        path.join(outDir, `iframe-${iframeRewrites}.html`),
+        text.slice(0, 400000),
+      );
+      if (skipIframeRewrite) {
+        note("iframeSavedNoRewrite", {
+          url: reqUrl,
+          bytes: text.length,
+          has56907: text.includes("56907"),
+          has27076: text.includes("27076"),
+          hasRunProgram: text.includes("runProgram"),
+          fetchSchedule: extractFetchSchedule(text),
+        });
+        await session
+          .send("Fetch.continueRequest", { requestId: evt.requestId })
+          .catch(() => {});
+        return;
+      }
       const { html, injected, replacements, snippet } = injectOpcodeLog(text);
       const headers = (evt.responseHeaders || []).filter(
         (h) => !/^(content-encoding|content-length)$/i.test(h.name),
@@ -1716,11 +1739,6 @@ async function onFetchPaused(session, evt) {
         responseHeaders: headers,
         body: Buffer.from(html).toString("base64"),
       });
-      iframeRewrites++;
-      fs.writeFileSync(
-        path.join(outDir, `iframe-${iframeRewrites}.html`),
-        text.slice(0, 400000),
-      );
       fs.writeFileSync(
         path.join(outDir, `iframe-rewritten-${iframeRewrites}.html`),
         html.slice(0, 400000),

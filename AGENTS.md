@@ -190,12 +190,16 @@ is on the init literal and dropped before the later `f4` (`glue`); numeric
 `"1"`..`"39"` is a `vm_entry_index` family (not HTML literals). Headed Chrome
 later `f4` kinds: every numeric slot is an **object** with 9..32 own keys
 (entry analog). The other extra ident names are `unseen_in_dumps` after HTML +
-the HTML-embedded 5k `runProgram` stub skip-harvest (stops at `XU`/177). Chrome
-leftover (2026-08-22) still sees those 12 names on the later `f4` (`f4-inferred`;
-names did not rotate). Assignment opcode was **not** recovered: the OOPIF
-ignores `Fetch.fulfillRequest` rewrite (`hasInject: false`) and fetch-loop
-Debugger breakpoints stay off. Live HTML fetch is `mix²*39695+mix*3159+64171`
-(not `FETCH_LIVE`). Skip-harvest is immediates only
+the HTML-embedded 5k `runProgram` stub skip-harvest (stops at jump `XX`/187 after
+skipping `XU`/177 immediates without apply). Chrome leftover (2026-08-22) still
+sees those 12 names on the later `f4` (`f4-inferred`; names did not rotate).
+Assignment opcode was **not** recovered: the OOPIF ignores `Fetch.fulfillRequest`
+rewrite (`hasInject: false`) and fetch-loop Debugger breakpoints stay off. Live
+packed `/fo/` body recaptured the same day (846200-byte init response; packed
+prefix `1oUjjpq4…`; HTML fetch `mix²*23196+mix*32619+19372`, not `FETCH_LIVE`).
+Skip-harvest of that blob with 56907 fetch stops at unmapped opcode 245; leftover
+names are not in the decrypted packed plaintext and stay `unseen_in_dumps`.
+`FETCH_LIVE` remains `56907`. Skip-harvest is immediates only
 (`src/solver/run_program_skip.rs`); do not execute handlers. Next gap is
 `handler_semantics`; do not run handlers as a solver.
 

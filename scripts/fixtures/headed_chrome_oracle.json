@@ -443,6 +443,15 @@
         "writeCount": 0,
         "leftoverHitCount": 0,
         "note": "Headed Chrome 2026-08-22: leftover names still live on later f4 (same 12 as 56907). First f4 is init+xBCsP4; later f4 has 14 extras + numeric 1..39 objects. OOPIF ignores Fetch.fulfillRequest rewrite so __cfOp is empty; fetch-loop Debugger breakpoints stay off. Assignment traps did not fire on the f4 argument. Opcode stays unknown. Live HTML fetch is mix²*39695 — not FETCH_LIVE."
+      },
+      "packedHarvest": {
+        "recaptured": true,
+        "packedPrefix": "1oUjjpq4sauymkoqjx4C",
+        "respLen": 846200,
+        "fetchMul": 23196,
+        "fetchLiveUnchanged": true,
+        "unseenIdentHits": [],
+        "note": "Init /fo/ response saved via Fetch.getResponseBody (no /fo/ rewrite). Packed magic/fetch rotated off 56907; FETCH_LIVE skip-harvest stops at unmapped opcode 245. Leftover names are not in decrypted packed plaintext. Do not execute handlers."
       }
     },
     "eveningLinear": {

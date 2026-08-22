@@ -569,6 +569,24 @@ fn verify_oracle_file(path: &PathBuf) -> Result<Value> {
                         }
                     }
                 }
+                if let Some(ph) = fj.get("packedHarvest") {
+                    if ph.get("recaptured") != Some(&Value::Bool(true)) {
+                        errors.push("packedHarvest.recaptured should be true".into());
+                    }
+                    if ph.get("fetchLiveUnchanged") != Some(&Value::Bool(true)) {
+                        errors.push("packedHarvest.fetchLiveUnchanged should be true".into());
+                    }
+                    if ph.get("packedPrefix").and_then(|x| x.as_str())
+                        != Some(cf::solver::fo_followup_json::FOLLOWUP_LIVE_PACKED_PREFIX)
+                    {
+                        errors.push("packedHarvest.packedPrefix mismatch".into());
+                    }
+                    if ph.get("unseenIdentHits").and_then(|x| x.as_array()).map(|a| a.len())
+                        != Some(0)
+                    {
+                        errors.push("packedHarvest.unseenIdentHits should be empty".into());
+                    }
+                }
                 if let Some(ident) = fj.get("identKeys").and_then(|x| x.as_array()) {
                     let names: Vec<String> = ident
                         .iter()

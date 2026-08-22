@@ -308,10 +308,10 @@ pub fn extract_inline_run_program_packed(html: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::solver::fo_followup_json::FOLLOWUP_EXTRA_IDENT_B;
+    use crate::solver::fo_followup_json::{FOLLOWUP_EXTRA_IDENT_B, FOLLOWUP_UNSEEN_EXTRA_IDENT_B};
     use crate::solver::run_program::unpack_packed_run_program;
     use crate::solver::run_program_ops::XF_TAG_XOR;
-    use crate::solver::run_program_vm::{FETCH_BRANCH_B_LATE, encode_byte, next_key};
+    use crate::solver::run_program_vm::{FETCH_BRANCH_B_LATE, FetchParams, encode_byte, next_key};
 
     fn push_op(buf: &mut Vec<u8>, key: &mut u8, opcode: u8) {
         buf.push(encode_byte(FETCH_BRANCH_B_LATE, *key, opcode));
@@ -412,5 +412,62 @@ mod tests {
             "stub ge key imms {:?}",
             h.ge_key_imms
         );
+    }
+
+    #[test]
+    fn live_fo_packed_leftover_idents_unseen_if_dump_present() {
+        let path = std::path::Path::new("artifacts/re-out/chrome-oracle-packed2/fo-init-response.txt");
+        let ray_path = std::path::Path::new("artifacts/re-out/chrome-oracle-packed2/fo-init-ray.txt");
+        if !path.is_file() || !ray_path.is_file() {
+            return;
+        }
+        let ray = std::fs::read_to_string(ray_path).unwrap();
+        let ray = ray.trim();
+        let body = std::fs::read_to_string(path).unwrap();
+        let compact: String = body.chars().filter(|c| !c.is_whitespace()).collect();
+        let padded = match compact.len() % 4 {
+            2 => format!("{compact}=="),
+            3 => format!("{compact}="),
+            _ => compact,
+        };
+        let packed = crate::reverse::encryption::decrypt_cloudflare_response(ray, &padded).unwrap();
+        assert!(packed.starts_with("1oUjjpq4"), "prefix {}", &packed[..20.min(packed.len())]);
+        for name in FOLLOWUP_UNSEEN_EXTRA_IDENT_B {
+            assert!(
+                !packed.contains(name),
+                "leftover {name} in decrypted packed plaintext"
+            );
+        }
+        let bc = unpack_packed_run_program(&packed).unwrap();
+        let live_fetch = skip_harvest_live(&bc);
+        assert_eq!(live_fetch.params_label, FETCH_LIVE.label);
+        for name in FOLLOWUP_UNSEEN_EXTRA_IDENT_B {
+            assert!(
+                !live_fetch.contains_ident(name),
+                "FETCH_LIVE harvest hit {name} stopped={} op={:?}",
+                live_fetch.stopped,
+                live_fetch.last_opcode
+            );
+        }
+        // HTML formula on this iframe (not FETCH_LIVE): mix²*23196 + mix*32619 + 19372.
+        let html_fetch = FetchParams {
+            label: "chrome-oracle-2026-08-22-b-23196",
+            init_pc: 0,
+            init_key: 63,
+            byte_bias: 217,
+            key_mul: 23_196,
+            key_add: 19_372,
+            key_quad_b: 32_619,
+        };
+        let h = skip_harvest_strings(&bc, html_fetch);
+        for name in FOLLOWUP_UNSEEN_EXTRA_IDENT_B {
+            assert!(
+                !h.contains_ident(name),
+                "html-fetch harvest hit {name} stopped={} op={:?} strings={}",
+                h.stopped,
+                h.last_opcode,
+                h.strings.len()
+            );
+        }
     }
 }
