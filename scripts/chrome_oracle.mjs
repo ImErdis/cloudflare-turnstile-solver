@@ -3772,9 +3772,7 @@ async function setFetchLoopBreakpointNear(session, s, scriptSource, idx) {
       failed: fetchLoopBpFailed,
       thisScript: n,
       via: "switchPause",
-      skippedUniqueBraces: true,
     });
-    return n > 0;
   }
   const sites = fetchLoopBreakpointSites(scriptSource, idx);
   const uniqueCalls = fetchLoopUniqueCallSites(scriptSource, idx);
@@ -4015,6 +4013,15 @@ async function attachSession(session, targetInfo, waitingForDebugger) {
           const frames = (evt.callFrames || []).slice(0, 6);
           const frameNames = frames.map((f) => f.functionName || "");
           const pausedH = pausedUniqueHandler(frameNames);
+          if (
+            !switchMeta &&
+            frameNames.slice(1).some(
+              (n) => n && handlerNameToOp.has(n) && !ambiguousHandlerNames.has(n),
+            )
+          ) {
+            note("fetchLoopSkipCallee", { fn: fname, caller: frameNames[1] });
+            return;
+          }
           if (!switchMeta && !callMeta && !pausedH) {
             if (fname && ambiguousHandlerNames.has(fname)) {
               note("fetchLoopSkipAmbiguous", { fn: fname });
