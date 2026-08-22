@@ -419,6 +419,7 @@ function extractFetchQuadratic(html) {
     html.search(/\d{4,5}\*\(([A-Za-z_$][\w$]*)\*\1\)/),
     html.search(/([A-Za-z_$][\w$]*)\*\1\*\d{4,5}/),
     html.search(/([A-Za-z_$][\w$]*)\*\1,\d{4,5}/),
+    html.search(/([A-Za-z_$][\w$]*),\1\),\d{4,5}/),
     html.search(/([A-Za-z_$][\w$]*),\1\)\*\d{4,5}/),
   ]) {
     if (x >= 0 && (idx < 0 || x < idx)) idx = x;
@@ -449,6 +450,12 @@ function extractFetchQuadratic(html) {
   );
   const sqAmp = window.match(
     /(\w+)\*\1\*(\d{4,5})\+[\s\S]{0,96}?\(\1,(\d{4,5})\)\+(\d{4,5})&255/,
+  );
+  const nestPairCommaMul = window.match(
+    /\((\w+),\1\),(\d{4,5})\)\+[\s\S]{0,96}?\(\1,(\d{4,5})\),(\d{4,5})\),255/,
+  );
+  const nestSqCommaMulHelper = window.match(
+    /(\w+)\*\1,(\d{4,5})\)\+[\s\S]{0,96}?\(\1,(\d{4,5})\),(\d{4,5})\)&255/,
   );
   const nestMul = window.match(
     /\((\w+),\1\),(\d{4,5})\),[\s\S]{0,96}?\(\1,(\d{4,5})\)\)\+(\d{4,5}),255/,
@@ -504,6 +511,8 @@ function extractFetchQuadratic(html) {
     sqPlus ||
     sqAmp ||
     nestMul ||
+    nestPairCommaMul ||
+    nestSqCommaMulHelper ||
     starMix ||
     mulTimesSq ||
     mulSqPlusBmix ||
@@ -553,6 +562,16 @@ function extractFetchQuadratic(html) {
     keyQuadB = Number(nestMul[3]);
     keyAdd = Number(nestMul[4]);
     spelling = "helper(mix,mix),mul";
+  } else if (nestPairCommaMul) {
+    keyMul = Number(nestPairCommaMul[2]);
+    keyQuadB = Number(nestPairCommaMul[3]);
+    keyAdd = Number(nestPairCommaMul[4]);
+    spelling = "helper(mix,mix),mul)+helper(mix,b),add),255";
+  } else if (nestSqCommaMulHelper) {
+    keyMul = Number(nestSqCommaMulHelper[2]);
+    keyQuadB = Number(nestSqCommaMulHelper[3]);
+    keyAdd = Number(nestSqCommaMulHelper[4]);
+    spelling = "mix*mix,mul)+helper(mix,b),add)&255";
   } else if (starMix) {
     keyMul = Number(starMix[2]);
     keyQuadB = Number(starMix[3]);
@@ -1883,18 +1902,22 @@ function switchLogCondition(opVar, mixVar) {
     ? `,mix:typeof ${mixVar}==="number"?${mixVar}:null,key:typeof ${mixVar}==="number"?((${mixVar}-${opVar})&255):null`
     : "";
   return (
-    `(()=>{try{var __g=this&&this.g;` +
-    `if(__g&&typeof this.l==="number"&&__g[this.l]&&__g[this.l].length>10000){` +
+    `(()=>{try{globalThis.__cfSwitchHit=(globalThis.__cfSwitchHit|0)+1;` +
+    `var __g=this&&this.g,__bc;` +
+    `if(__g){` +
+    `if(typeof this.l==="number"&&__g[this.l]&&__g[this.l].length>10000)__bc=__g[this.l];` +
+    `if(!__bc){for(var __i=0;__i<Math.min(__g.length||0,64);__i++){var __v=__g[__i];if(__v&&__v.length>10000&&typeof __v[0]==="number"){__bc=__v;break;}}}` +
+    `}` +
+    `if(__bc){` +
     `globalThis.__cfOp=globalThis.__cfOp||[];` +
     `if(globalThis.__cfOp.length<128){` +
     `var __pc=typeof this.j==="number"?((__g[this.j]|0)-1):null;` +
-    `var __bc=__g[this.l];` +
     `globalThis.__cfOp.push({pc:__pc,op:(${opVar}&255),` +
     `nextKey:typeof this.i==="number"?(__g[this.i]&255):null,` +
-    `byte:(__bc&&__pc>=0&&__pc<__bc.length)?(__bc[__pc]&255):null` +
-    `${mixPart},via:"switchLog"});` +
+    `byte:(__pc>=0&&__pc<__bc.length)?(__bc[__pc]&255):null` +
+    `${mixPart},via:"switchLog",gLen:__g&&__g.length,bcLen:__bc.length});` +
     `typeof console!=="undefined"&&console.debug&&console.debug("__cfOp",globalThis.__cfOp[globalThis.__cfOp.length-1]);` +
-    `}} }catch(__e){}return false})()`
+    `}} }catch(__e){globalThis.__cfSwitchErr=String(__e)}return false})()`
   );
 }
 
@@ -2481,6 +2504,13 @@ function selfTestInject() {
   const live54260AmpF = extractFetchQuadratic(live54260AmpHappy);
   const live54260AmpH = injectOpcodeLog(live54260AmpHappy, { jsOnly: true });
   const live54260AmpC = injectOpcodeLog(live54260AmpCatch, { jsOnly: true });
+  const live5886Happy =
+    "if(s=YU[YW],YD[yB(zj.Yw)](s,s))return YU[Yw];switch(YU[YW]=s+1,s=YU[YZ]^YD[yB(zj.s)](YH[s]-187,256)&255,N=YU[YZ]+s,YU[YZ]=YD[yB(zj.Yv)](YD[yB(zj.N)](YD[yB(zj.YG)](YD[yB(zj.YD)](N,N),5886)+YD[yB(zj.YU)](N,50261),1243),255),s){case 135:YY[yB(zj.Yg)](this);break;} new qz(P)[po(T4.P)](0,176,[])";
+  const live5886Catch =
+    "switch(YU[YW]=Yv+1,YG=YD[yB(zj.Y)](YU[YZ],YD[yB(zj.s)](YH[Yv]-187,256)&255.28),Yg=YD[yB(zj.uN)](YU[YZ],YG),YU[YZ]=YD[yB(zj.YW)](YD[yB(zj.uS)](Yg*Yg,5886)+YD[yB(zj.Yq)](Yg,50261),1243)&255.25,YG){case 135:YY[yB(zj.uQ)](this);break;}";
+  const live5886F = extractFetchQuadratic(live5886Happy);
+  const live5886Fc = extractFetchQuadratic(live5886Catch);
+  const live5886Mark = fetchMarkerInSource(live5886Happy);
   const live54260NestHappy =
     "if(x=pj[pB],pv[en(IT.pQ)](x,x))return pj[pD];switch(pj[pB]=x+1,x=pj[pQ]^pv[en(IT.N)](pv[en(IT.x)](pg[x],160)+256,255),L=pj[pQ]+x,pj[pQ]=pv[en(IT.pF)](pv[en(IT.pF)](pv[en(IT.pg)](L*L,54260),L*43539),20295)&255.77,x){case 191:s8[en(IT.po)](this);break;} new sz(p)[eP(c0.p)](0,166,[])";
   const live54260NestCatch =
@@ -2836,6 +2866,17 @@ function selfTestInject() {
       live54260NestSwitch.length === 1 &&
       live54260NestSwitch[0].opVar === "x" &&
       live54260NestSwitch[0].mixVar === "L" &&
+      live5886F &&
+      live5886F.keyMul === 5886 &&
+      live5886F.keyQuadB === 50261 &&
+      live5886F.keyAdd === 1243 &&
+      live5886F.byteBias === 187 &&
+      live5886Fc &&
+      live5886Fc.keyMul === 5886 &&
+      live5886Mark &&
+      live5886Mark.marker === "5886" &&
+      live5886Mark.schedule &&
+      live5886Mark.schedule.initKeyCandidate === 176 &&
       switchKwSites.length === 1 &&
       live54260NestHappy.slice(switchKwSites[0].idx, switchKwSites[0].idx + 6) === "switch" &&
       caseCallSw.length === 1 &&
@@ -3638,7 +3679,13 @@ async function trySetFetchLoopBp(session, s, scriptSource, loc) {
         caseOp: loc.why === "switchBrace" ? null : resolvedOp,
         why: loc.why,
         name: loc.name,
-        switchLog: loc.why === "switchBrace",
+        switchLog: !!(
+          loc.switchLog ||
+          loc.why === "switchBrace" ||
+          loc.why === "switchKw" ||
+          loc.why === "switchPossible" ||
+          loc.why === "caseCallLog"
+        ),
         lineNumber: actual?.lineNumber ?? attempt.lineNumber,
         columnNumber: actual?.columnNumber ?? attempt.columnNumber,
         scriptId: s.scriptId,
@@ -3776,14 +3823,26 @@ async function setFetchLoopBreakpointNear(session, s, scriptSource, idx) {
         columnNumber: x.columnNumber,
       })),
     });
-    if (await placeLogSites(switchSites, "switchBrace")) return true;
-    if (await placeLogSites(await possibleInSwitchRange(), "switchPossible")) return true;
+    const placedVia = [];
+    if (await placeLogSites(switchSites, "switchBrace")) placedVia.push("switchBrace");
+    if (await placeLogSites(await possibleInSwitchRange(), "switchPossible")) {
+      placedVia.push("switchPossible");
+    }
     if (await placeLogSites(fetchLoopSwitchKeywordSites(scriptSource, switchSites), "switchKw")) {
-      return true;
+      placedVia.push("switchKw");
     }
     const callLogs = fetchLoopCaseCallLogSites(scriptSource, idx, switchSites);
     note("fetchLoopCaseCallLogSites", { n: callLogs.length });
-    if (await placeLogSites(callLogs, "caseCallLog")) return true;
+    if (await placeLogSites(callLogs, "caseCallLog")) placedVia.push("caseCallLog");
+    if (placedVia.length) {
+      note("fetchLoopBpSummary", {
+        placed: fetchLoopBpPlaced,
+        failed: fetchLoopBpFailed,
+        via: placedVia.join("+"),
+        skippedUniqueBraces: true,
+      });
+      return true;
+    }
     note("fetchLoopSwitchLogMiss", {
       n: switchSites.length,
       error: switchSites.length
@@ -3922,7 +3981,9 @@ async function attachSession(session, targetInfo, waitingForDebugger) {
                 if (packedHits >= fetchTupleCap && !fetchTuples) {
                   note("fetchLoopSkipNewScript", { reason: "cap", packedHits });
                 } else {
-                  const patched = await patchExecutedFetchScript(session, s, scriptSource);
+              const patched = fetchTuples
+                ? false
+                : await patchExecutedFetchScript(session, s, scriptSource);
                   if (!patched) {
                     await setFetchLoopBreakpointNear(session, s, scriptSource, hit.idx);
                   }
@@ -4299,6 +4360,8 @@ async function harvestSessions(tag) {
           label: ${JSON.stringify(label)},
           type: ${JSON.stringify(type)},
           opCount: (globalThis.__cfOp||[]).length,
+          switchHit: globalThis.__cfSwitchHit||0,
+          switchErr: globalThis.__cfSwitchErr||null,
           ops: (globalThis.__cfOp||[]).slice(0,400),
           xhr: globalThis.__cfXhr||[],
           runProgramCalls: globalThis.__cfRP||[],
@@ -4328,7 +4391,9 @@ async function harvestSessions(tag) {
         for (const o of v.ops) {
           if (liveOps.length < 400) liveOps.push(o);
         }
-        note("harvest", { tag, label, opCount: v.opCount });
+      }
+      if (v?.switchHit || v?.ops?.length) {
+        note("harvest", { tag, label, opCount: v.opCount, switchHit: v.switchHit, switchErr: v.switchErr });
       }
     } catch (e) {
       const msg = String(e).slice(0, 160);
@@ -4390,6 +4455,8 @@ for (const { session, label, type } of cdpSessions) {
         label: ${JSON.stringify(label)},
         type: ${JSON.stringify(type)},
         opCount: (globalThis.__cfOp||[]).length,
+        switchHit: globalThis.__cfSwitchHit||0,
+        switchErr: globalThis.__cfSwitchErr||null,
         ops: (globalThis.__cfOp||[]).slice(0,400),
         xhr: globalThis.__cfXhr||[],
         runProgramCalls: globalThis.__cfRP||[],
