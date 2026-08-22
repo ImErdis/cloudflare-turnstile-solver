@@ -2676,7 +2676,10 @@ async function harvestSessions(tag) {
         note("harvest", { tag, label, opCount: v.opCount });
       }
     } catch (e) {
-      note("harvestErr", { tag, label, error: String(e).slice(0, 160) });
+      const msg = String(e).slice(0, 160);
+      if (!/Session closed|Target closed/i.test(msg)) {
+        note("harvestErr", { tag, label, error: msg });
+      }
     }
   }
 }
