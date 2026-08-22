@@ -430,6 +430,9 @@ function extractFetchQuadratic(html) {
   const mulTimesSq = window.match(
     /(\d{4,5})\*\((\w+)\*\2\)\+[\s\S]{0,96}?\(\2,(\d{4,5})\)\+(\d{4,5})&255/,
   );
+  const mulSqPlusBmix = window.match(
+    /(\d{4,5})\*\((\w+)\*\2\)\+(\d{4,5})\*\2,(\d{4,5})\)/,
+  );
   const mulCommaHelper = window.match(
     /(\d{4,5})\*\((\w+)\*\2\),[\s\S]{0,120}?\(\2,(\d{4,5})\)\),(\d{4,5})\)&255/,
   );
@@ -448,6 +451,7 @@ function extractFetchQuadratic(html) {
     nestMul ||
     starMix ||
     mulTimesSq ||
+    mulSqPlusBmix ||
     mulCommaHelper ||
     sqCommaHelper ||
     alt ||
@@ -487,6 +491,11 @@ function extractFetchQuadratic(html) {
     keyQuadB = Number(mulTimesSq[3]);
     keyAdd = Number(mulTimesSq[4]);
     spelling = "mul*(mix*mix)+helper&255";
+  } else if (mulSqPlusBmix) {
+    keyMul = Number(mulSqPlusBmix[1]);
+    keyQuadB = Number(mulSqPlusBmix[3]);
+    keyAdd = Number(mulSqPlusBmix[4]);
+    spelling = "mul*(mix*mix)+b*mix,add";
   } else if (mulCommaHelper) {
     keyMul = Number(mulCommaHelper[1]);
     keyQuadB = Number(mulCommaHelper[3]);
@@ -1985,6 +1994,10 @@ function selfTestInject() {
   const live55067F = extractFetchQuadratic(live55067Comma);
   const live55067Fc = extractFetchQuadratic(live55067Catch);
   const live55067Mark = fetchMarkerInSource(live55067Comma);
+  const live55067Bmix =
+    "j=tL[rn(f9.ts)](173+tV[j],255),G=tB[tz]+j,tB[tz]=tL[rn(f9.tD)](tL[rn(f9.tv)](55067*(G*G)+8696*G,44379),255),j){case 143:e7[rn(f9.tx)](this);break;}";
+  const live55067BmixF = extractFetchQuadratic(live55067Bmix);
+  const live55067BmixMark = fetchMarkerInSource(live55067Bmix);
   const svg8904 = fetchMarkerInSource('width="8904" height="12"');
   const fin = finalizeFetchLoopRows([
     {
@@ -2167,6 +2180,12 @@ function selfTestInject() {
       live55067Fc.keyMul === 55067 &&
       live55067Mark &&
       live55067Mark.marker === "55067" &&
+      live55067BmixF &&
+      live55067BmixF.keyMul === 55067 &&
+      live55067BmixF.keyQuadB === 8696 &&
+      live55067BmixF.keyAdd === 44379 &&
+      live55067BmixMark &&
+      live55067BmixMark.marker === "55067" &&
       live23196H.html.includes("__cfOp.push") &&
       live23196C.html.includes("__cfOp.push") &&
       live23196F &&
@@ -2953,6 +2972,13 @@ async function attachSession(session, targetInfo, waitingForDebugger) {
           if (caseOp == null && fname && handlerNameToOp.has(fname)) {
             caseOp = handlerNameToOp.get(fname);
             row.bpWhy = row.bpWhy || "handlerFn";
+          }
+          // Hit-BP caseOp is the handler we bound; the paused frame may be a
+          // callee. Prefer the unique paused function's case when it disagrees.
+          if (fname && handlerNameToOp.has(fname) && handlerNameToOp.get(fname) !== caseOp) {
+            row.bpCaseOp = caseOp;
+            caseOp = handlerNameToOp.get(fname);
+            row.bpWhy = "pausedFn";
           }
           if (caseOp == null && frame.location) {
             const src =
