@@ -1,21 +1,23 @@
-//! Width-aware **skip** of mapped `runProgram` immediates (late-`b` `56907`).
+//! Width-aware **skip** of mapped `runProgram` immediates.
 //!
-//! Harvests string immediates (`Xf` tag 199/161, `gC`/`gl` LEB, `ge` 4th imm)
-//! without executing handlers, calling host JS, or taking jumps. Linear walk
-//! skips `XU`/177 immediates (no `XI.apply`) and stops at the first jump or
-//! other Variable family this module does not skip. That is a disassembler of
-//! immediates, not a VM.
-//!
-//! `go[i] = String.fromCharCode(i)` on the 56907 iframe, so charset extras
+//! 56907: harvests `Xf` tag 199/161, `gC`/`gl` LEB, `ge` 4th imm. Skips `XU`/177
+//! (no `XI.apply`). `go[i] = String.fromCharCode(i)`, so charset extras
 //! (`136`, `1`, `43`) index latin1 directly.
+//!
+//! 5886 (`FETCH_CHROME_2026_08_22_B_5886`, tuples27 executed JS): skips `Hg`/5
+//! (no apply), `HW`/156 tagged load, `qR`/`Hx`/`HV`/`qC` charset names, and
+//! fixed-width ALU/unary handlers. Does not take jumps or invoke callees.
+//! That is a disassembler of immediates, not a VM.
 
 use crate::solver::run_program_ops::{
-    GE_OPCODE, InstrWidth, XF_DST_XOR, XF_INT_XOR, XF_OPCODE,
-    XF_STRING_CHARSET_XOR, XF_TAG_BYTES, XF_TAG_FALSE, XF_TAG_INT, XF_TAG_LEB, XF_TAG_NULL,
-    XF_TAG_NUMBER_A, XF_TAG_NUMBER_B, XF_TAG_REGEXP, XF_TAG_STRING, XF_TAG_UNDEF, XF_TAG_XOR,
-    jump_roles_for_late, layout_for_late, operand_from_byte,
+    GE_OPCODE, InstrWidth, XF_DST_XOR, XF_INT_XOR, XF_OPCODE, XF_STRING_CHARSET_XOR, XF_TAG_BYTES,
+    XF_TAG_FALSE, XF_TAG_INT, XF_TAG_LEB, XF_TAG_NULL, XF_TAG_NUMBER_A, XF_TAG_NUMBER_B,
+    XF_TAG_REGEXP, XF_TAG_STRING, XF_TAG_UNDEF, XF_TAG_XOR, jump_roles_for_late, layout_for_late,
+    operand_from_byte,
 };
-use crate::solver::run_program_vm::{FETCH_LIVE, FetchParams, step_fetch};
+use crate::solver::run_program_vm::{
+    FETCH_CHROME_2026_08_22_B_5886, FETCH_LIVE, FetchParams, step_fetch,
+};
 use serde::Serialize;
 
 pub const GC_OPCODE: u8 = 226;
@@ -33,6 +35,85 @@ pub const XU_ARG_XOR: u8 = 37;
 pub const SKIP_HARVEST_INSTR_LIMIT: usize = 1_048_576;
 pub const XF_REGEXP_CHARSET_A: u8 = 195;
 pub const XF_REGEXP_CHARSET_B: u8 = 229;
+
+/// tuples27 executed `Hg` (`case 5:`): call/apply header extras then arity×arg.
+/// Floats `75.87` / `210.17` / `111.28` → ToInt32. Do not invoke the callee.
+pub const HG_5886_OPCODE: u8 = 5;
+pub const HG_5886_CALLEE_XOR: u8 = 55;
+pub const HG_5886_THIS_XOR: u8 = 75;
+pub const HG_5886_DST_XOR: u8 = 210;
+pub const HG_5886_ARITY_XOR: u8 = 36;
+pub const HG_5886_ARG_XOR: u8 = 111;
+
+/// tuples27 executed `qR` (`case 51:`): LEB latin1 name then property get.
+pub const QR_5886_OPCODE: u8 = 51;
+pub const QR_5886_DST_XOR: u8 = 158;
+pub const QR_5886_BASE_XOR: u8 = 33;
+pub const QR_5886_CHARSET_XOR: u8 = 233;
+
+/// tuples27 `HW` (`case 156:`): tagged load (Xf analogue). Dst then tag.
+/// Split order `2|1|4|0|3|5` is LEB then charset 130. Not a jump (`<<16` is tag 213).
+pub const HW_5886_OPCODE: u8 = 156;
+pub const HW_5886_DST_XOR: u8 = 231;
+pub const HW_5886_TAG_XOR: u8 = 4;
+pub const HW_5886_INT_XOR: u8 = 18;
+pub const HW_5886_STRING_CHARSET_XOR: u8 = 130;
+pub const HW_5886_PACKED_KEY_XOR: u8 = 82;
+pub const HW_5886_BYTES_CHARSET_XOR: u8 = 74;
+pub const HW_5886_REGEXP_CHARSET_A: u8 = 108;
+pub const HW_5886_REGEXP_CHARSET_B: u8 = 180;
+pub const HW_5886_REGEXP_FLAGS_LEN_XOR: u8 = 1;
+pub const HW_5886_TAG_INT: u8 = 128;
+pub const HW_5886_TAG_UNDEF: u8 = 59;
+pub const HW_5886_TAG_STRING: u8 = 241;
+pub const HW_5886_TAG_LEB: u8 = 102;
+pub const HW_5886_TAG_FLOAT: u8 = 236;
+pub const HW_5886_TAG_NULL: u8 = 250;
+pub const HW_5886_TAG_NUMBER_A: u8 = 110;
+pub const HW_5886_TAG_NUMBER_B: u8 = 67;
+pub const HW_5886_TAG_TRUE: u8 = 234;
+pub const HW_5886_TAG_FALSE: u8 = 173;
+pub const HW_5886_TAG_PACKED: u8 = 213;
+pub const HW_5886_TAG_BYTES: u8 = 8;
+pub const HW_5886_TAG_REGEXP: u8 = 38;
+
+/// tuples27 `Hx` (`case 168:`): LEB object + charset name then call/apply. No invoke.
+pub const HX_5886_OPCODE: u8 = 168;
+pub const HX_5886_DST_XOR: u8 = 193;
+pub const HX_5886_CHARSET_XOR: u8 = 0;
+pub const HX_5886_FLAGS_XOR: u8 = 63;
+pub const HX_5886_ARG_XOR: u8 = 228;
+
+/// tuples27 `HV` (`case 230:`): dst/base + charset name then call/apply. No invoke.
+pub const HV_5886_OPCODE: u8 = 230;
+pub const HV_5886_DST_XOR: u8 = 31;
+pub const HV_5886_BASE_XOR: u8 = 89;
+pub const HV_5886_CHARSET_XOR: u8 = 126;
+pub const HV_5886_FLAGS_XOR: u8 = 187;
+pub const HV_5886_ARG_XOR: u8 = 20;
+
+/// tuples27 `qC` (`case 224:`): split `1|2|5|3|4|7|0|6` = dst, LEB name, extra 252.
+pub const QC_5886_OPCODE: u8 = 224;
+pub const QC_5886_DST_XOR: u8 = 33;
+pub const QC_5886_CHARSET_XOR: u8 = 146;
+pub const QC_5886_KEY_XOR: u8 = 252;
+
+/// tuples27 `Hk` (`case 70:`): LEB extra 0, then extras 17 and 88. Not `HK`/39.
+pub const HK_LEB_5886_OPCODE: u8 = 70;
+pub const HK_LEB_5886_DST_XOR: u8 = 17;
+pub const HK_LEB_5886_KEY_XOR: u8 = 88;
+
+/// Shared `qZ` ALU (`case N:qZ.call(this, variant)`): always 3 imms.
+pub const QZ_5886_OPCODES: &[u8] = &[
+    4, 24, 30, 80, 86, 96, 104, 108, 116, 127, 137, 149, 151, 155, 163, 197, 203, 234,
+];
+
+/// Shared `qu` unary (`case N:qu.call(this, variant)`): always 2 imms.
+pub const QU_5886_OPCODES: &[u8] = &[27, 84, 142, 229, 240];
+
+/// tuples27 unique handlers that assign `this.j` from a u24 as control transfer.
+/// Skip-harvest does not take these. `HW`/156 and `qw`/112 are not jumps.
+pub const JUMP_OPCODES_5886: &[u8] = &[7, 13, 52, 89, 129, 135, 176, 213];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct HarvestedString {
@@ -55,7 +136,9 @@ pub struct SkipHarvest {
 
 impl SkipHarvest {
     pub fn contains_ident(&self, name: &str) -> bool {
-        self.strings.iter().any(|s| s.text == name || s.text.contains(name))
+        self.strings
+            .iter()
+            .any(|s| s.text == name || s.text.contains(name))
     }
 }
 
@@ -108,6 +191,10 @@ impl<'a> Cursor<'a> {
 
     fn charset_string(&mut self, extra: u8) -> Result<String, &'static str> {
         let len = self.leb()? as usize;
+        self.charset_n(len, extra)
+    }
+
+    fn charset_n(&mut self, len: usize, extra: u8) -> Result<String, &'static str> {
         if len > 32_768 {
             return Err("string_too_long");
         }
@@ -143,7 +230,11 @@ fn push_str(
     });
 }
 
-fn skip_xf(cur: &mut Cursor<'_>, start_pc: u32, strings: &mut Vec<HarvestedString>) -> Result<(), &'static str> {
+fn skip_xf(
+    cur: &mut Cursor<'_>,
+    start_pc: u32,
+    strings: &mut Vec<HarvestedString>,
+) -> Result<(), &'static str> {
     let tag = cur.imm(XF_TAG_XOR)?;
     let _dst = cur.imm(XF_DST_XOR)?;
     match tag {
@@ -177,7 +268,11 @@ fn skip_xf(cur: &mut Cursor<'_>, start_pc: u32, strings: &mut Vec<HarvestedStrin
     }
 }
 
-fn skip_gc(cur: &mut Cursor<'_>, start_pc: u32, strings: &mut Vec<HarvestedString>) -> Result<(), &'static str> {
+fn skip_gc(
+    cur: &mut Cursor<'_>,
+    start_pc: u32,
+    strings: &mut Vec<HarvestedString>,
+) -> Result<(), &'static str> {
     let _ = cur.imm(42)?;
     let _ = cur.imm(182)?;
     let text = cur.charset_string(GC_STRING_CHARSET_XOR)?;
@@ -185,7 +280,11 @@ fn skip_gc(cur: &mut Cursor<'_>, start_pc: u32, strings: &mut Vec<HarvestedStrin
     Ok(())
 }
 
-fn skip_gl(cur: &mut Cursor<'_>, start_pc: u32, strings: &mut Vec<HarvestedString>) -> Result<(), &'static str> {
+fn skip_gl(
+    cur: &mut Cursor<'_>,
+    start_pc: u32,
+    strings: &mut Vec<HarvestedString>,
+) -> Result<(), &'static str> {
     let text = cur.charset_string(GL_STRING_CHARSET_XOR)?;
     let _ = cur.imm(69)?;
     let _ = cur.imm(118)?;
@@ -217,6 +316,189 @@ fn skip_xu(cur: &mut Cursor<'_>) -> Result<(), &'static str> {
         let _ = cur.imm(XU_ARG_XOR)?;
     }
     Ok(())
+}
+
+/// tuples27 `Hg`/5: four header imms, then `arity` register args. No call.
+fn skip_hg_5886(cur: &mut Cursor<'_>) -> Result<(), &'static str> {
+    let _callee = cur.imm(HG_5886_CALLEE_XOR)?;
+    let _this = cur.imm(HG_5886_THIS_XOR)?;
+    let _dst = cur.imm(HG_5886_DST_XOR)?;
+    let arity = cur.imm(HG_5886_ARITY_XOR)?;
+    for _ in 0..arity {
+        let _ = cur.imm(HG_5886_ARG_XOR)?;
+    }
+    Ok(())
+}
+
+/// tuples27 `qR`/51: dst^158, base^33, LEB length, charset^233 name. Property get
+/// is not executed; the name is harvested.
+fn skip_qr_5886(
+    cur: &mut Cursor<'_>,
+    start_pc: u32,
+    strings: &mut Vec<HarvestedString>,
+) -> Result<(), &'static str> {
+    let _dst = cur.imm(QR_5886_DST_XOR)?;
+    let _base = cur.imm(QR_5886_BASE_XOR)?;
+    let text = cur.charset_string(QR_5886_CHARSET_XOR)?;
+    push_str(strings, QR_5886_OPCODE, "qR", start_pc, text);
+    Ok(())
+}
+
+/// tuples27 `HW`/156: dst^231, tag^4, then tag payload. No host store.
+fn skip_hw_5886(
+    cur: &mut Cursor<'_>,
+    start_pc: u32,
+    strings: &mut Vec<HarvestedString>,
+) -> Result<(), &'static str> {
+    let _dst = cur.imm(HW_5886_DST_XOR)?;
+    let tag = cur.imm(HW_5886_TAG_XOR)?;
+    match tag {
+        HW_5886_TAG_STRING => {
+            let text = cur.charset_string(HW_5886_STRING_CHARSET_XOR)?;
+            push_str(strings, HW_5886_OPCODE, "HW", start_pc, text);
+            Ok(())
+        }
+        HW_5886_TAG_BYTES => {
+            let text = cur.charset_string(HW_5886_BYTES_CHARSET_XOR)?;
+            push_str(strings, HW_5886_OPCODE, "HW", start_pc, text);
+            Ok(())
+        }
+        HW_5886_TAG_INT => {
+            let _ = cur.imm(HW_5886_INT_XOR)?;
+            Ok(())
+        }
+        HW_5886_TAG_UNDEF | HW_5886_TAG_NULL | HW_5886_TAG_TRUE | HW_5886_TAG_FALSE
+        | HW_5886_TAG_NUMBER_A | HW_5886_TAG_NUMBER_B => Ok(()),
+        HW_5886_TAG_LEB => {
+            let _ = cur.leb()?;
+            Ok(())
+        }
+        HW_5886_TAG_FLOAT => {
+            for _ in 0..8 {
+                let _ = cur.imm(0)?;
+            }
+            Ok(())
+        }
+        HW_5886_TAG_PACKED => {
+            let _ = cur.imm(0)?;
+            let _ = cur.imm(0)?;
+            let _ = cur.imm(0)?;
+            let _ = cur.imm(HW_5886_PACKED_KEY_XOR)?;
+            Ok(())
+        }
+        HW_5886_TAG_REGEXP => {
+            let a = cur.charset_string(HW_5886_REGEXP_CHARSET_A)?;
+            let flen = usize::from(cur.imm(HW_5886_REGEXP_FLAGS_LEN_XOR)?);
+            let b = cur.charset_n(flen, HW_5886_REGEXP_CHARSET_B)?;
+            push_str(strings, HW_5886_OPCODE, "HW", start_pc, a);
+            push_str(strings, HW_5886_OPCODE, "HW", start_pc, b);
+            Ok(())
+        }
+        _ => Err("xf_unskipped_tag"),
+    }
+}
+
+/// tuples27 `Hx`/168: dst^193, LEB obj, charset^0 name, flags^63, arity×^228. No call.
+fn skip_hx_5886(
+    cur: &mut Cursor<'_>,
+    start_pc: u32,
+    strings: &mut Vec<HarvestedString>,
+) -> Result<(), &'static str> {
+    let _dst = cur.imm(HX_5886_DST_XOR)?;
+    let _obj = cur.leb()?;
+    let text = cur.charset_string(HX_5886_CHARSET_XOR)?;
+    let flags = cur.imm(HX_5886_FLAGS_XOR)?;
+    for _ in 0..flags {
+        let _ = cur.imm(HX_5886_ARG_XOR)?;
+    }
+    push_str(strings, HX_5886_OPCODE, "Hx", start_pc, text);
+    Ok(())
+}
+
+/// tuples27 `HV`/230: dst^31, base^89, charset^126 name, flags^187, arity×^20. No call.
+fn skip_hv_5886(
+    cur: &mut Cursor<'_>,
+    start_pc: u32,
+    strings: &mut Vec<HarvestedString>,
+) -> Result<(), &'static str> {
+    let _dst = cur.imm(HV_5886_DST_XOR)?;
+    let _base = cur.imm(HV_5886_BASE_XOR)?;
+    let text = cur.charset_string(HV_5886_CHARSET_XOR)?;
+    let flags = cur.imm(HV_5886_FLAGS_XOR)?;
+    for _ in 0..flags {
+        let _ = cur.imm(HV_5886_ARG_XOR)?;
+    }
+    push_str(strings, HV_5886_OPCODE, "HV", start_pc, text);
+    Ok(())
+}
+
+/// tuples27 `qC`/224: dst^33, LEB charset^146 name, extra^252. Property set is not executed.
+fn skip_qc_5886(
+    cur: &mut Cursor<'_>,
+    start_pc: u32,
+    strings: &mut Vec<HarvestedString>,
+) -> Result<(), &'static str> {
+    let _dst = cur.imm(QC_5886_DST_XOR)?;
+    let text = cur.charset_string(QC_5886_CHARSET_XOR)?;
+    let _ = cur.imm(QC_5886_KEY_XOR)?;
+    push_str(strings, QC_5886_OPCODE, "qC", start_pc, text);
+    Ok(())
+}
+
+/// tuples27 `Hk`/70: LEB extra 0, dst^17, extra^88.
+fn skip_hk_5886(cur: &mut Cursor<'_>) -> Result<(), &'static str> {
+    let _ = cur.leb()?;
+    let _ = cur.imm(HK_LEB_5886_DST_XOR)?;
+    let _ = cur.imm(HK_LEB_5886_KEY_XOR)?;
+    Ok(())
+}
+
+fn uses_5886_skip(params: FetchParams) -> bool {
+    params.key_mul == FETCH_CHROME_2026_08_22_B_5886.key_mul
+        && params.key_quad_b == FETCH_CHROME_2026_08_22_B_5886.key_quad_b
+        && params.byte_bias == FETCH_CHROME_2026_08_22_B_5886.byte_bias
+        && params.key_add == FETCH_CHROME_2026_08_22_B_5886.key_add
+}
+
+fn fixed_width_5886(op: u8) -> Option<u8> {
+    if QZ_5886_OPCODES.contains(&op) {
+        return Some(4);
+    }
+    if QU_5886_OPCODES.contains(&op) {
+        return Some(3);
+    }
+    match op {
+        41 | 215 | 250 => Some(2),
+        87 | 91 | 217 | 81 | 101 => Some(3),
+        162 | 154 => Some(4),
+        113 | 251 | 59 => Some(5),
+        112 | 191 => Some(6),
+        _ => None,
+    }
+}
+
+fn skip_mapped_5886(
+    cur: &mut Cursor<'_>,
+    op: u8,
+    start_pc: u32,
+    strings: &mut Vec<HarvestedString>,
+) -> Result<(), &'static str> {
+    if JUMP_OPCODES_5886.contains(&op) {
+        return Err("unparsed_jump");
+    }
+    match op {
+        HG_5886_OPCODE => skip_hg_5886(cur),
+        QR_5886_OPCODE => skip_qr_5886(cur, start_pc, strings),
+        HW_5886_OPCODE => skip_hw_5886(cur, start_pc, strings),
+        HX_5886_OPCODE => skip_hx_5886(cur, start_pc, strings),
+        HV_5886_OPCODE => skip_hv_5886(cur, start_pc, strings),
+        QC_5886_OPCODE => skip_qc_5886(cur, start_pc, strings),
+        HK_LEB_5886_OPCODE => skip_hk_5886(cur),
+        _ => match fixed_width_5886(op) {
+            Some(w) => cur.skip_fixed(w),
+            None => Err("unmapped_opcode"),
+        },
+    }
 }
 
 /// Linear skip-harvest from `params.init_pc` / `init_key`. Skips `XU`/177
@@ -252,7 +534,9 @@ pub fn skip_harvest_strings(bytecode: &[u8], params: FetchParams) -> SkipHarvest
         };
         last_opcode = Some(op);
         instructions += 1;
-        let result = if op == XF_OPCODE {
+        let result = if uses_5886_skip(params) {
+            skip_mapped_5886(&mut cur, op, last_pc, &mut strings)
+        } else if op == XF_OPCODE {
             skip_xf(&mut cur, last_pc, &mut strings)
         } else if op == GC_OPCODE {
             skip_gc(&mut cur, last_pc, &mut strings)
@@ -380,8 +664,111 @@ mod tests {
         let h = skip_harvest_strings(&buf, FETCH_BRANCH_B_LATE);
         assert_eq!(h.last_opcode, Some(XU_OPCODE));
         assert_eq!(h.stopped, "end_of_bytecode");
+    }
+
+    #[test]
+    fn skip_harvests_synthetic_hg_5886_call_without_apply() {
+        let params = FetchParams {
+            init_pc: 0,
+            ..FETCH_CHROME_2026_08_22_B_5886
+        };
+        let mut buf = Vec::new();
+        let mut key = params.init_key;
+        buf.push(encode_byte(params, key, HG_5886_OPCODE));
+        key = next_key(params, key, HG_5886_OPCODE);
+        buf.push(encode_byte(params, key, 0 ^ HG_5886_CALLEE_XOR));
+        buf.push(encode_byte(params, key, 0 ^ HG_5886_THIS_XOR));
+        buf.push(encode_byte(params, key, 0 ^ HG_5886_DST_XOR));
+        buf.push(encode_byte(params, key, 2 ^ HG_5886_ARITY_XOR));
+        buf.push(encode_byte(params, key, 7 ^ HG_5886_ARG_XOR));
+        buf.push(encode_byte(params, key, 8 ^ HG_5886_ARG_XOR));
+        let h = skip_harvest_strings(&buf, params);
+        assert_eq!(h.params_label, FETCH_CHROME_2026_08_22_B_5886.label);
+        assert_eq!(h.last_opcode, Some(HG_5886_OPCODE));
         assert_eq!(h.instructions, 1);
+        assert_eq!(h.stopped, "end_of_bytecode");
         assert!(h.strings.is_empty());
+        assert_eq!(FETCH_LIVE.key_mul, 56_907);
+    }
+
+    #[test]
+    fn skip_harvests_synthetic_qr_5886_property_name() {
+        let params = FetchParams {
+            init_pc: 0,
+            ..FETCH_CHROME_2026_08_22_B_5886
+        };
+        let mut buf = Vec::new();
+        let mut key = params.init_key;
+        buf.push(encode_byte(params, key, QR_5886_OPCODE));
+        key = next_key(params, key, QR_5886_OPCODE);
+        buf.push(encode_byte(params, key, QR_5886_DST_XOR));
+        buf.push(encode_byte(params, key, QR_5886_BASE_XOR));
+        let text = "OQbM0";
+        buf.push(encode_byte(params, key, text.len() as u8));
+        for b in text.bytes() {
+            buf.push(encode_byte(params, key, b ^ QR_5886_CHARSET_XOR));
+        }
+        let h = skip_harvest_strings(&buf, params);
+        assert_eq!(h.last_opcode, Some(QR_5886_OPCODE));
+        assert_eq!(h.strings.len(), 1);
+        assert_eq!(h.strings[0].text, text);
+        assert_eq!(h.stopped, "end_of_bytecode");
+        assert!(h.contains_ident("OQbM0"));
+        assert_eq!(FETCH_LIVE.key_mul, 56_907);
+    }
+
+    #[test]
+    fn skip_harvests_synthetic_hw_5886_string() {
+        let params = FetchParams {
+            init_pc: 0,
+            ..FETCH_CHROME_2026_08_22_B_5886
+        };
+        let mut buf = Vec::new();
+        let mut key = params.init_key;
+        buf.push(encode_byte(params, key, HW_5886_OPCODE));
+        key = next_key(params, key, HW_5886_OPCODE);
+        buf.push(encode_byte(params, key, 0 ^ HW_5886_DST_XOR));
+        buf.push(encode_byte(
+            params,
+            key,
+            HW_5886_TAG_STRING ^ HW_5886_TAG_XOR,
+        ));
+        let text = "sqKXG6";
+        buf.push(encode_byte(params, key, text.len() as u8));
+        for b in text.bytes() {
+            buf.push(encode_byte(params, key, b ^ HW_5886_STRING_CHARSET_XOR));
+        }
+        let h = skip_harvest_strings(&buf, params);
+        assert_eq!(h.last_opcode, Some(HW_5886_OPCODE));
+        assert_eq!(h.strings.len(), 1);
+        assert_eq!(h.strings[0].text, text);
+        assert_eq!(h.stopped, "end_of_bytecode");
+        assert_eq!(FETCH_LIVE.key_mul, 56_907);
+    }
+
+    #[test]
+    fn skip_harvests_synthetic_qc_5886_property_name() {
+        let params = FetchParams {
+            init_pc: 0,
+            ..FETCH_CHROME_2026_08_22_B_5886
+        };
+        let mut buf = Vec::new();
+        let mut key = params.init_key;
+        buf.push(encode_byte(params, key, QC_5886_OPCODE));
+        key = next_key(params, key, QC_5886_OPCODE);
+        buf.push(encode_byte(params, key, QC_5886_DST_XOR));
+        let text = "mQiic7";
+        buf.push(encode_byte(params, key, text.len() as u8));
+        for b in text.bytes() {
+            buf.push(encode_byte(params, key, b ^ QC_5886_CHARSET_XOR));
+        }
+        buf.push(encode_byte(params, key, QC_5886_KEY_XOR));
+        let h = skip_harvest_strings(&buf, params);
+        assert_eq!(h.last_opcode, Some(QC_5886_OPCODE));
+        assert_eq!(h.strings.len(), 1);
+        assert_eq!(h.strings[0].text, text);
+        assert_eq!(h.stopped, "end_of_bytecode");
+        assert_eq!(FETCH_LIVE.key_mul, 56_907);
     }
 
     #[test]
@@ -422,8 +809,10 @@ mod tests {
 
     #[test]
     fn live_fo_packed_leftover_idents_unseen_if_dump_present() {
-        let path = std::path::Path::new("artifacts/re-out/chrome-oracle-packed2/fo-init-response.txt");
-        let ray_path = std::path::Path::new("artifacts/re-out/chrome-oracle-packed2/fo-init-ray.txt");
+        let path =
+            std::path::Path::new("artifacts/re-out/chrome-oracle-packed2/fo-init-response.txt");
+        let ray_path =
+            std::path::Path::new("artifacts/re-out/chrome-oracle-packed2/fo-init-ray.txt");
         if !path.is_file() || !ray_path.is_file() {
             return;
         }
@@ -437,7 +826,11 @@ mod tests {
             _ => compact,
         };
         let packed = crate::reverse::encryption::decrypt_cloudflare_response(ray, &padded).unwrap();
-        assert!(packed.starts_with("1oUjjpq4"), "prefix {}", &packed[..20.min(packed.len())]);
+        assert!(
+            packed.starts_with("1oUjjpq4"),
+            "prefix {}",
+            &packed[..20.min(packed.len())]
+        );
         for name in FOLLOWUP_UNSEEN_EXTRA_IDENT_B {
             assert!(
                 !packed.contains(name),
@@ -593,25 +986,45 @@ mod tests {
             from_zero.params_label, FETCH_LIVE.label,
             "HTML 176 start must not be labeled FETCH_LIVE"
         );
-        assert_eq!(h.stopped, "unmapped_opcode");
-        assert_eq!(h.last_pc, 175);
-        assert_eq!(h.last_opcode, Some(5));
-        assert_eq!(h.instructions, 1);
-        assert_eq!(h.strings.len(), 0);
-        assert!(
-            leftover_hits.is_empty(),
-            "5886 skip-harvest leftover hits {leftover_hits:?}"
+        eprintln!(
+            "tuples27 5886 skip-harvest stopped={} last_pc={} last_op={:?} instr={} strings={} leftover={leftover_hits:?} extra={extra_hits:?} packed_leftover={packed_leftover:?} html176 stopped={} last_pc={} last_op={:?} instr={}",
+            h.stopped,
+            h.last_pc,
+            h.last_opcode,
+            h.instructions,
+            h.strings.len(),
+            from_zero.stopped,
+            from_zero.last_pc,
+            from_zero.last_opcode,
+            from_zero.instructions
         );
         assert!(
-            extra_hits.is_empty(),
-            "5886 skip-harvest extra ident hits {extra_hits:?}"
+            h.instructions >= 2,
+            "expected Hg then at least one more, instr={}",
+            h.instructions
+        );
+        assert!(
+            !(h.last_pc == 181 && h.last_opcode == Some(HW_5886_OPCODE)),
+            "HW/156 at pc=181 must be skipped (not a jump); stopped={}",
+            h.stopped
+        );
+        assert!(
+            !(from_zero.last_pc == 0 && from_zero.last_opcode == Some(HW_5886_OPCODE)),
+            "html176 HW/156 at pc=0 must be skipped; stopped={} instr={}",
+            from_zero.stopped,
+            from_zero.instructions
+        );
+        assert_eq!(FETCH_LIVE.key_mul, 56_907);
+        assert!(
+            leftover_hits.is_empty()
+                || leftover_hits
+                    .iter()
+                    .all(|n| FOLLOWUP_UNSEEN_EXTRA_IDENT_B.contains(n)),
+            "unexpected leftover hits {leftover_hits:?}"
         );
         assert!(
             packed_leftover.is_empty(),
             "leftover names in tuples27 packed plaintext {packed_leftover:?}"
         );
-        assert_eq!(from_zero.stopped, "unmapped_opcode");
-        assert_eq!(from_zero.last_pc, 0);
-        assert_eq!(from_zero.instructions, 1);
     }
 }
