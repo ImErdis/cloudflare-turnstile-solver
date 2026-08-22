@@ -47,7 +47,7 @@ pub fn parse_script_interpreter<'a>(
     let mut vm_bytecode_visitor = ScriptVisitor::default();
     vm_bytecode_visitor.visit_program(program);
     if vm_bytecode_visitor.initial_vm.is_none() {
-        panic!("vm code was not found");
+        anyhow::bail!("vm code was not found");
     }
 
     Ok((

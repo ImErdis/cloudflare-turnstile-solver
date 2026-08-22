@@ -1,0 +1,20 @@
+{
+  "name": "js-re-toolkit",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "fetch-api": "node src/fetch-public-api.mjs",
+    "deobfuscate": "node src/deobfuscate.mjs",
+    "dump-ast": "node src/dump-ast.mjs",
+    "capture-scripts": "node src/capture-scripts.mjs",
+    "pretty": "prettier --write"
+  },
+  "dependencies": {
+    "acorn": "^8.15.0",
+    "deobfuscator": "^2.4.5",
+    "js-beautify": "^1.15.4",
+    "prettier": "^3.6.2",
+    "puppeteer-core": "^24.15.0",
+    "webcrack": "^2.16.0"
+  }
+}

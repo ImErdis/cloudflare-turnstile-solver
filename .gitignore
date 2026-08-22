@@ -5,3 +5,4 @@
 /artifacts
 node_modules
 scripts/node_modules
+/tools/js-re/node_modules

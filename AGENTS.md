@@ -34,6 +34,8 @@ may not fully work end-to-end against live Cloudflare.
 - Naive opcode-fetch walk: `cargo run --locked --bin analyze_run_program -- --decode 16 <packed>`
 - Headed Chrome oracle: `cd scripts && npm install && DISPLAY=:1 node chrome_oracle.mjs`
 - Run the solver against the SolveGate demo: `cargo run --locked --bin solve_test`
+- Analyze a captured JS file with the in-tree oxc pipeline:
+  `cargo run --locked --bin analyze_js -- path/to/script.js --write-deobfuscated artifacts/re-out/deob.js`
 
 ### Live Turnstile protocol (as of 2026-08)
 
@@ -192,6 +194,29 @@ run the opcode handlers as a solver, or hook `TurnstileTask::solve`.
 Static unpack + naive fetch: `cargo run --locked --bin analyze_run_program -- --decode 16 --ray <c_ray> <fo-body>`
 
 Default demo: `https://solvegate.io/demo/invisible` (sitekey `0x4AAAAAAER49t0sMxTcief0`).
+
+### JS reverse-engineering toolkit
+
+This crate *is* a JS reverse: oxc-based deobfuscation, VM disassembly, payload-key extraction.
+A typical JS RE bench for obfuscated browser scripts (webcrack, prettier/js-beautify,
+synchrony, Acorn AST dumps, Chrome CDP capture, mitmproxy) is in `tools/js-re`.
+
+Setup (once per machine): `npm ci --prefix tools/js-re`
+
+| Step | Command |
+| --- | --- |
+| Fetch public Turnstile `api.js` | `node tools/js-re/src/fetch-public-api.mjs` |
+| Beautify + webcrack | `node tools/js-re/src/deobfuscate.mjs artifacts/re-out/api.js` |
+| AST histogram | `node tools/js-re/src/dump-ast.mjs artifacts/re-out/api.js` |
+| Capture JS from a page | `node tools/js-re/src/capture-scripts.mjs <url>` |
+| In-tree VM/opcode probe | `cargo run --locked --bin analyze_js -- <file.js>` |
+| HTTPS intercept | `mitmdump -p 8080` (installed in the Cloud Agent image) then point Chrome at the proxy |
+
+`analyze_js` applies this crate's oxc transformers and the opcode/VM visitors. Live Turnstile no
+longer ships that VM on `/orchestrate/` (see protocol notes above: iframe `/fo/` is packed
+`runProgram`). `analyze_js` on public `api.js` or orchestrate bootstrap is expected to report
+`vm code was not found`; that is a useful negative result. Do not check captured Cloudflare
+scripts into git (`artifacts/` is gitignored).
 
 ### Running the `solve_test` binary
 - `TurnstileSolver::new()` reads a private fingerprint dataset from `./workspace/cloudflare_test.json`

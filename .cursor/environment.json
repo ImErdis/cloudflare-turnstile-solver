@@ -1,0 +1,10 @@
+{
+  "name": "cf turnstile solver",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": ".."
+  },
+  "user": "ubuntu",
+  "install": "./scripts/cloud-agent-install.sh",
+  "chromeExecutablePath": "/usr/bin/google-chrome-stable"
+}
