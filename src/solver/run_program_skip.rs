@@ -8,15 +8,22 @@
 //! (no apply), `HW`/156 tagged load, `qR`/`Hx`/`HV`/`qC` charset names, and
 //! fixed-width ALU/unary handlers. Does not take jumps or invoke callees.
 //! That is a disassembler of immediates, not a VM.
+//!
+//! 40954 (`FETCH_HTML_40954_UNVERIFIED`, leftover1/leftover4 executed JS):
+//! separate table. Linear `*40954+30072`, method-call switch
+//! `fn[call](this)`. Opcode **181** `bg` is the tagged load (tag then dst).
+//! Do not reuse 56907 or 5886 extra-xors or opcode numbers. Does not take
+//! jumps (`bW`/247) or invoke callees.
 
 use crate::solver::run_program_ops::{
-    GE_OPCODE, InstrWidth, XF_DST_XOR, XF_INT_XOR, XF_OPCODE, XF_STRING_CHARSET_XOR, XF_TAG_BYTES,
-    XF_TAG_FALSE, XF_TAG_INT, XF_TAG_LEB, XF_TAG_NULL, XF_TAG_NUMBER_A, XF_TAG_NUMBER_B,
-    XF_TAG_REGEXP, XF_TAG_STRING, XF_TAG_UNDEF, XF_TAG_XOR, jump_roles_for_late, layout_for_late,
-    operand_from_byte,
+    jump_roles_for_late, layout_for_late, operand_from_byte, InstrWidth, GE_OPCODE, XF_DST_XOR,
+    XF_INT_XOR, XF_OPCODE, XF_STRING_CHARSET_XOR, XF_TAG_BYTES, XF_TAG_FALSE, XF_TAG_INT,
+    XF_TAG_LEB, XF_TAG_NULL, XF_TAG_NUMBER_A, XF_TAG_NUMBER_B, XF_TAG_REGEXP, XF_TAG_STRING,
+    XF_TAG_UNDEF, XF_TAG_XOR,
 };
 use crate::solver::run_program_vm::{
-    FETCH_CHROME_2026_08_22_B_5886, FETCH_LIVE, FetchParams, step_fetch,
+    step_fetch, FetchParams, FETCH_CHROME_2026_08_22_B_5886, FETCH_HTML_40954_UNVERIFIED,
+    FETCH_LIVE,
 };
 use serde::Serialize;
 
@@ -168,6 +175,47 @@ pub const SWITCH_OPCODES_5886: &[u8] = &[
 /// Skip-harvest does not take these. `HW`/156 and `qw`/112 are not jumps.
 pub const JUMP_OPCODES_5886: &[u8] = &[7, 13, 52, 89, 129, 135, 176, 213];
 
+/// leftover1/leftover4 fetch switch (`*40954+30072`). Same 69 `case N:` arms
+/// on leftover1-15 and leftover4-15. Not 56907, not 5886.
+pub const SWITCH_OPCODES_40954: &[u8] = &[
+    7, 14, 20, 23, 24, 26, 28, 31, 35, 36, 40, 45, 46, 48, 55, 56, 58, 59, 64, 65, 70, 76, 78, 85,
+    89, 95, 96, 98, 101, 103, 105, 107, 114, 118, 119, 120, 122, 125, 127, 134, 143, 145, 150, 154,
+    156, 157, 160, 162, 163, 167, 171, 179, 180, 181, 185, 193, 197, 202, 216, 221, 226, 230, 239,
+    246, 247, 249, 250, 251, 254,
+];
+
+/// leftover4 `bW` (`case 247:`): three extra-0 bytes assemble a u24, extra
+/// `252` updates the key, then `k[Y]=MU` with `Y=this.j`. Skip-harvest does
+/// not take this. Opcode 181 is **not** a jump.
+pub const JUMP_OPCODES_40954: &[u8] = &[247];
+
+/// leftover4 `bg` (`case 181:`): tagged load. Tag^217.96 then dst^210.
+/// String charset^225.23, bytes^211.24, regexp pattern^51 / flags-len^25.72
+/// / flags^85. Int extra 8. Packed key^252. Not 56907 `Xh`/181.
+pub const BG_40954_OPCODE: u8 = 181;
+pub const BG_40954_TAG_XOR: u8 = 217;
+pub const BG_40954_DST_XOR: u8 = 210;
+pub const BG_40954_INT_XOR: u8 = 8;
+pub const BG_40954_STRING_CHARSET_XOR: u8 = 225;
+pub const BG_40954_BYTES_CHARSET_XOR: u8 = 211;
+pub const BG_40954_PACKED_KEY_XOR: u8 = 252;
+pub const BG_40954_REGEXP_CHARSET_A: u8 = 51;
+pub const BG_40954_REGEXP_FLAGS_LEN_XOR: u8 = 25;
+pub const BG_40954_REGEXP_CHARSET_B: u8 = 85;
+pub const BG_40954_TAG_INT: u8 = 37;
+pub const BG_40954_TAG_UNDEF: u8 = 27;
+pub const BG_40954_TAG_STRING: u8 = 32;
+pub const BG_40954_TAG_LEB: u8 = 88;
+pub const BG_40954_TAG_FLOAT: u8 = 7;
+pub const BG_40954_TAG_NULL: u8 = 195;
+pub const BG_40954_TAG_NUMBER_A: u8 = 120;
+pub const BG_40954_TAG_NUMBER_B: u8 = 182;
+pub const BG_40954_TAG_TRUE: u8 = 80;
+pub const BG_40954_TAG_FALSE: u8 = 251;
+pub const BG_40954_TAG_PACKED: u8 = 220;
+pub const BG_40954_TAG_BYTES: u8 = 39;
+pub const BG_40954_TAG_REGEXP: u8 = 20;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct HarvestedString {
     pub opcode: u8,
@@ -191,6 +239,9 @@ pub struct SkipHarvest {
     /// `HW`/156 tag bytes in walk order (5886 only).
     #[serde(skip)]
     pub hw_tags: Vec<(u32, u8)>,
+    /// `bg`/181 tag bytes in walk order (40954 only).
+    #[serde(skip)]
+    pub bg_tags: Vec<(u32, u8)>,
 }
 
 impl SkipHarvest {
@@ -459,6 +510,66 @@ fn skip_hw_5886(
     }
 }
 
+/// leftover4 `bg`/181: tag^217 then dst^210, then tag payload. No host store.
+fn skip_bg_40954(
+    cur: &mut Cursor<'_>,
+    start_pc: u32,
+    strings: &mut Vec<HarvestedString>,
+    bg_tags: &mut Vec<(u32, u8)>,
+) -> Result<(), &'static str> {
+    let tag = cur.imm(BG_40954_TAG_XOR)?;
+    let _dst = cur.imm(BG_40954_DST_XOR)?;
+    bg_tags.push((start_pc, tag));
+    match tag {
+        BG_40954_TAG_STRING => {
+            let text = cur.charset_string(BG_40954_STRING_CHARSET_XOR)?;
+            push_str(strings, BG_40954_OPCODE, "bg", start_pc, text);
+            Ok(())
+        }
+        BG_40954_TAG_BYTES => {
+            let text = cur.charset_string(BG_40954_BYTES_CHARSET_XOR)?;
+            push_str(strings, BG_40954_OPCODE, "bg", start_pc, text);
+            Ok(())
+        }
+        BG_40954_TAG_INT => {
+            let _ = cur.imm(BG_40954_INT_XOR)?;
+            Ok(())
+        }
+        BG_40954_TAG_UNDEF
+        | BG_40954_TAG_NULL
+        | BG_40954_TAG_TRUE
+        | BG_40954_TAG_FALSE
+        | BG_40954_TAG_NUMBER_A
+        | BG_40954_TAG_NUMBER_B => Ok(()),
+        BG_40954_TAG_LEB => {
+            let _ = cur.leb()?;
+            Ok(())
+        }
+        BG_40954_TAG_FLOAT => {
+            for _ in 0..8 {
+                let _ = cur.imm(0)?;
+            }
+            Ok(())
+        }
+        BG_40954_TAG_PACKED => {
+            let _ = cur.imm(0)?;
+            let _ = cur.imm(0)?;
+            let _ = cur.imm(0)?;
+            let _ = cur.imm(BG_40954_PACKED_KEY_XOR)?;
+            Ok(())
+        }
+        BG_40954_TAG_REGEXP => {
+            let a = cur.charset_string(BG_40954_REGEXP_CHARSET_A)?;
+            let flen = usize::from(cur.imm(BG_40954_REGEXP_FLAGS_LEN_XOR)?);
+            let b = cur.charset_n(flen, BG_40954_REGEXP_CHARSET_B)?;
+            push_str(strings, BG_40954_OPCODE, "bg", start_pc, a);
+            push_str(strings, BG_40954_OPCODE, "bg", start_pc, b);
+            Ok(())
+        }
+        _ => Err("bg_unskipped_tag"),
+    }
+}
+
 /// tuples27 `Hx`/168: dst^193, LEB obj, charset^0 name, flags^63, arity×^228. No call.
 fn skip_hx_5886(
     cur: &mut Cursor<'_>,
@@ -603,6 +714,29 @@ fn uses_5886_skip(params: FetchParams) -> bool {
         && params.key_add == FETCH_CHROME_2026_08_22_B_5886.key_add
 }
 
+fn uses_40954_skip(params: FetchParams) -> bool {
+    params.key_mul == FETCH_HTML_40954_UNVERIFIED.key_mul
+        && params.key_quad_b == FETCH_HTML_40954_UNVERIFIED.key_quad_b
+        && params.byte_bias == FETCH_HTML_40954_UNVERIFIED.byte_bias
+        && params.key_add == FETCH_HTML_40954_UNVERIFIED.key_add
+}
+
+fn skip_mapped_40954(
+    cur: &mut Cursor<'_>,
+    op: u8,
+    start_pc: u32,
+    strings: &mut Vec<HarvestedString>,
+    bg_tags: &mut Vec<(u32, u8)>,
+) -> Result<(), &'static str> {
+    if JUMP_OPCODES_40954.contains(&op) {
+        return Err("unparsed_jump");
+    }
+    match op {
+        BG_40954_OPCODE => skip_bg_40954(cur, start_pc, strings, bg_tags),
+        _ => Err("unmapped_opcode"),
+    }
+}
+
 fn fixed_width_5886(op: u8) -> Option<u8> {
     if QZ_5886_OPCODES.contains(&op) {
         return Some(4);
@@ -666,6 +800,7 @@ pub fn skip_harvest_strings(bytecode: &[u8], params: FetchParams) -> SkipHarvest
     let mut ge_key_imms = Vec::new();
     let mut ops = Vec::new();
     let mut hw_tags = Vec::new();
+    let mut bg_tags = Vec::new();
     let mut instructions = 0usize;
     let mut last_pc = params.init_pc;
     let mut last_opcode = None;
@@ -690,6 +825,8 @@ pub fn skip_harvest_strings(bytecode: &[u8], params: FetchParams) -> SkipHarvest
         instructions += 1;
         let result = if uses_5886_skip(params) {
             skip_mapped_5886(&mut cur, op, last_pc, &mut strings, &mut hw_tags)
+        } else if uses_40954_skip(params) {
+            skip_mapped_40954(&mut cur, op, last_pc, &mut strings, &mut bg_tags)
         } else if op == XF_OPCODE {
             skip_xf(&mut cur, last_pc, &mut strings)
         } else if op == GC_OPCODE {
@@ -715,6 +852,7 @@ pub fn skip_harvest_strings(bytecode: &[u8], params: FetchParams) -> SkipHarvest
                 ("unparsed_jump", _) => "unparsed_jump",
                 ("unparsed_variable", _) => "unparsed_variable",
                 ("xf_unskipped_tag", _) => "xf_unskipped_tag",
+                ("bg_unskipped_tag", _) => "bg_unskipped_tag",
                 other => other.0,
             };
             break;
@@ -731,6 +869,7 @@ pub fn skip_harvest_strings(bytecode: &[u8], params: FetchParams) -> SkipHarvest
         ge_key_imms,
         ops,
         hw_tags,
+        bg_tags,
     }
 }
 
@@ -752,8 +891,8 @@ mod tests {
     use crate::solver::run_program::unpack_packed_run_program;
     use crate::solver::run_program_ops::XF_TAG_XOR;
     use crate::solver::run_program_vm::{
-        FETCH_BRANCH_B_LATE, FETCH_CHROME_2026_08_22_B_5886, FETCH_LIVE, FetchParams, encode_byte,
-        next_key, verify_oracle_tuple,
+        encode_byte, next_key, verify_oracle_tuple, FetchParams, FETCH_BRANCH_B_LATE,
+        FETCH_CHROME_2026_08_22_B_5886, FETCH_HTML_40954_UNVERIFIED, FETCH_LIVE,
     };
 
     fn push_op(buf: &mut Vec<u8>, key: &mut u8, opcode: u8) {
@@ -900,6 +1039,47 @@ mod tests {
         assert_eq!(h.strings[0].text, text);
         assert_eq!(h.stopped, "end_of_bytecode");
         assert_eq!(FETCH_LIVE.key_mul, 56_907);
+    }
+
+    #[test]
+    fn skip_harvests_synthetic_bg_40954_string() {
+        let params = FetchParams {
+            init_pc: 0,
+            ..FETCH_HTML_40954_UNVERIFIED
+        };
+        let mut buf = Vec::new();
+        let mut key = params.init_key;
+        buf.push(encode_byte(params, key, BG_40954_OPCODE));
+        key = next_key(params, key, BG_40954_OPCODE);
+        buf.push(encode_byte(
+            params,
+            key,
+            BG_40954_TAG_STRING ^ BG_40954_TAG_XOR,
+        ));
+        buf.push(encode_byte(params, key, 0 ^ BG_40954_DST_XOR));
+        let text = "window";
+        buf.push(encode_byte(params, key, text.len() as u8));
+        for b in text.bytes() {
+            buf.push(encode_byte(params, key, b ^ BG_40954_STRING_CHARSET_XOR));
+        }
+        let h = skip_harvest_strings(&buf, params);
+        assert_eq!(h.params_label, FETCH_HTML_40954_UNVERIFIED.label);
+        assert_eq!(h.last_opcode, Some(BG_40954_OPCODE));
+        assert_eq!(h.strings.len(), 1);
+        assert_eq!(h.strings[0].text, text);
+        assert_eq!(h.strings[0].handler, "bg");
+        assert_eq!(h.bg_tags, vec![(0, BG_40954_TAG_STRING)]);
+        assert_eq!(h.stopped, "end_of_bytecode");
+        assert_eq!(FETCH_LIVE.key_mul, 56_907);
+        assert_ne!(params.key_mul, FETCH_LIVE.key_mul);
+        assert_ne!(params.key_mul, FETCH_CHROME_2026_08_22_B_5886.key_mul);
+        assert_eq!(BG_40954_TAG_XOR, 217);
+        assert_eq!(BG_40954_DST_XOR, 210);
+        assert_eq!(BG_40954_STRING_CHARSET_XOR, 225);
+        assert_eq!(SWITCH_OPCODES_40954.len(), 69);
+        assert!(SWITCH_OPCODES_40954.contains(&BG_40954_OPCODE));
+        assert!(JUMP_OPCODES_40954.contains(&247));
+        assert!(!JUMP_OPCODES_40954.contains(&BG_40954_OPCODE));
     }
 
     #[test]
@@ -1243,19 +1423,25 @@ mod tests {
         }
         let js = std::fs::read_to_string(js_path).unwrap();
         assert!(js.contains("*40954,30072)&255"), "leftover1 HTML fetch");
-        assert!(js.contains("255+MW[F],255"), "leftover1 (255+byte)&255 bias 1");
-        assert!(!js.contains("function f4("), "compressor is not f4 on leftover1");
+        assert!(
+            js.contains("255+MW[F],255"),
+            "leftover1 (255+byte)&255 bias 1"
+        );
+        assert!(
+            js.contains("case 181:bg["),
+            "leftover1 opcode 181 is bg.call(this)"
+        );
+        assert!(
+            js.contains("^217),MU=") || js.contains("^217.96") || js.contains(",217),"),
+            "leftover1 bg tag extra 217"
+        );
+        assert!(
+            !js.contains("function f4("),
+            "compressor is not f4 on leftover1"
+        );
         assert!(js.contains("Mt=function("), "body encoder Mt");
         assert_eq!(FETCH_LIVE.key_mul, 56_907);
-        let html_fetch = FetchParams {
-            label: "html-candidate-40954-unverified",
-            init_pc: 0,
-            init_key: 62,
-            byte_bias: 1,
-            key_mul: 40_954,
-            key_add: 30_072,
-            key_quad_b: 0,
-        };
+        let html_fetch = FETCH_HTML_40954_UNVERIFIED;
         assert_ne!(html_fetch.key_mul, FETCH_LIVE.key_mul);
         assert_ne!(html_fetch.key_mul, FETCH_CHROME_2026_08_22_B_5886.key_mul);
         let ray = std::fs::read_to_string(ray_path).unwrap();
@@ -1287,15 +1473,22 @@ mod tests {
             .filter(|n| h.contains_ident(n))
             .collect();
         eprintln!(
-            "leftover1 40954 skip-harvest stopped={} last_pc={} last_op={:?} instr={} strings={} leftover={leftover_hits:?} packed_leftover={packed_leftover:?} texts={texts:?} bc_len={}",
+            "leftover1 40954 skip-harvest stopped={} last_pc={} last_op={:?} instr={} strings={} leftover={leftover_hits:?} packed_leftover={packed_leftover:?} texts={texts:?} bg_tags={:?} bc_len={}",
             h.stopped,
             h.last_pc,
             h.last_opcode,
             h.instructions,
             h.strings.len(),
+            h.bg_tags,
             bc.len()
         );
         assert_eq!(h.params_label, html_fetch.label);
+        assert!(
+            texts.contains(&"window"),
+            "leftover1 bg/181 ident-like strings {texts:?}"
+        );
+        assert_eq!(h.stopped, "unmapped_opcode");
+        assert_eq!(h.last_opcode, Some(167));
         assert!(
             leftover_hits.is_empty(),
             "56907 leftover names on 40954 skip-harvest {leftover_hits:?}"
@@ -1304,7 +1497,28 @@ mod tests {
             packed_leftover.is_empty(),
             "56907 leftover names in leftover1 packed plaintext {packed_leftover:?}"
         );
-        assert_eq!(crate::solver::run_program_ops::NEXT_GAP, "handler_semantics");
+        assert!(
+            !(h.last_pc == 0
+                && h.last_opcode == Some(BG_40954_OPCODE)
+                && h.stopped != "end_of_bytecode"
+                && h.instructions == 1
+                && h.bg_tags.is_empty()),
+            "bg/181 at pc=0 must be skipped; stopped={} instr={} tags={:?}",
+            h.stopped,
+            h.instructions,
+            h.bg_tags
+        );
+        assert!(
+            !h.bg_tags.is_empty() || h.instructions > 1,
+            "leftover1 must skip bg/181; stopped={} last_op={:?} instr={}",
+            h.stopped,
+            h.last_opcode,
+            h.instructions
+        );
+        assert_eq!(
+            crate::solver::run_program_ops::NEXT_GAP,
+            "handler_semantics"
+        );
     }
 
     #[test]
@@ -1329,6 +1543,27 @@ mod tests {
                     .collect()
             })
             .unwrap_or_default();
+        let js_path =
+            std::path::Path::new("artifacts/re-out/chrome-oracle-leftover4/executed-fetch-15.js");
+        if js_path.is_file() {
+            let js = std::fs::read_to_string(js_path).unwrap();
+            assert!(
+                js.contains("case 181:bg["),
+                "leftover4 opcode 181 is bg.call(this)"
+            );
+            assert!(
+                js.contains("^217.96") || js.contains("^217)"),
+                "leftover4 bg tag extra 217.96"
+            );
+            assert!(
+                js.contains(",210)") || js.contains("^210"),
+                "leftover4 bg dst extra 210"
+            );
+            assert!(
+                js.contains("^225.23") || js.contains("^225]"),
+                "leftover4 string charset 225"
+            );
+        }
         assert!(
             extra.iter().any(|n| n == "AmbKQ5"),
             "leftover4 extraIdentNow {extra:?}"
@@ -1343,15 +1578,7 @@ mod tests {
             .unwrap_or(0);
         assert_eq!(mul, 40_954);
         assert_ne!(mul, FETCH_LIVE.key_mul as u64);
-        let html_fetch = FetchParams {
-            label: "html-candidate-40954-unverified",
-            init_pc: 0,
-            init_key: 62,
-            byte_bias: 1,
-            key_mul: 40_954,
-            key_add: 30_072,
-            key_quad_b: 0,
-        };
+        let html_fetch = FETCH_HTML_40954_UNVERIFIED;
         let ray = std::fs::read_to_string(ray_path).unwrap();
         let ray = ray.trim();
         let body = std::fs::read_to_string(resp_path).unwrap();
@@ -1375,11 +1602,13 @@ mod tests {
             .filter(|n| packed.contains(*n))
             .collect();
         eprintln!(
-            "leftover4 40954 skip-harvest stopped={} last_pc={} last_op={:?} instr={} extra={extra:?} leftover_hits={leftover_hits:?} packed_hits={packed_hits:?} bc_len={}",
+            "leftover4 40954 skip-harvest stopped={} last_pc={} last_op={:?} instr={} extra={extra:?} leftover_hits={leftover_hits:?} packed_hits={packed_hits:?} texts={:?} bg_tags={:?} bc_len={}",
             h.stopped,
             h.last_pc,
             h.last_opcode,
             h.instructions,
+            h.strings.iter().map(|s| s.text.as_str()).collect::<Vec<_>>(),
+            h.bg_tags,
             bc.len()
         );
         assert!(
@@ -1391,8 +1620,36 @@ mod tests {
             packed_hits.is_empty(),
             "early extraIdentNow in leftover4 packed plaintext {packed_hits:?}"
         );
-        assert_eq!(h.stopped, "unparsed_variable");
-        assert_eq!(h.last_opcode, Some(181));
-        assert_eq!(crate::solver::run_program_ops::NEXT_GAP, "handler_semantics");
+        assert!(
+            h.contains_ident("window"),
+            "leftover4 bg/181 ident-like strings {:?}",
+            h.strings
+                .iter()
+                .map(|s| s.text.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(h.stopped, "unmapped_opcode");
+        assert_eq!(h.last_opcode, Some(167));
+        assert!(
+            !h.bg_tags.is_empty(),
+            "leftover4 bg/181 at pc=0 must be skipped; stopped={} last_op={:?} instr={}",
+            h.stopped,
+            h.last_opcode,
+            h.instructions
+        );
+        assert_eq!(h.bg_tags[0], (0, h.bg_tags[0].1));
+        assert!(
+            !(h.last_pc == 0
+                && h.last_opcode == Some(BG_40954_OPCODE)
+                && h.instructions == 1
+                && matches!(h.stopped, "unparsed_variable")),
+            "bg/181 is no longer 56907 unparsed_variable; stopped={}",
+            h.stopped
+        );
+        assert_eq!(
+            crate::solver::run_program_ops::NEXT_GAP,
+            "handler_semantics"
+        );
+        assert_eq!(FETCH_LIVE.key_mul, 56_907);
     }
 }

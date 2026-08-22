@@ -100,6 +100,19 @@ pub const FETCH_CHROME_2026_08_22_B_5886: FetchParams = FetchParams {
     key_quad_b: 50_261,
 };
 
+/// Leftover1/leftover4 iframe HTML: linear `*40954+30072`, bias 1,
+/// `new M9(M)[…](0,62,[])`. **Not** opcode-tuple verified. **Not** [`FETCH_LIVE`].
+/// Skip-harvest only (`run_program_skip`); do not remap 56907/5886 opcodes here.
+pub const FETCH_HTML_40954_UNVERIFIED: FetchParams = FetchParams {
+    label: "html-candidate-40954-unverified",
+    init_pc: 0,
+    init_key: 62,
+    byte_bias: 1,
+    key_mul: 40_954,
+    key_add: 30_072,
+    key_quad_b: 0,
+};
+
 /// Live entry (Chrome). Historical g-branch used key 100.
 pub const INIT_PC: u32 = FETCH_LIVE.init_pc;
 pub const INIT_KEY: u8 = FETCH_LIVE.init_key;
@@ -416,9 +429,7 @@ pub fn next_key(params: FetchParams, key: u8, opcode: u8) -> u8 {
 }
 
 /// Pick fetch + switch table from a packed-program magic header.
-pub fn params_for_magic(
-    magic: &[u8],
-) -> Option<(FetchParams, &'static [OpcodeDef])> {
+pub fn params_for_magic(magic: &[u8]) -> Option<(FetchParams, &'static [OpcodeDef])> {
     use crate::solver::run_program::{
         RUN_PROGRAM_MAGIC_BYTES, RUN_PROGRAM_MAGIC_BYTES_B, RUN_PROGRAM_MAGIC_BYTES_B_LATE,
     };
@@ -693,8 +704,7 @@ mod tests {
         assert!(stream.fetches[0].mapped);
         assert_eq!(stream.fetches[0].next_key, 197);
         assert_eq!(
-            params_for_magic(&RUN_PROGRAM_MAGIC_BYTES_B_LATE)
-                .map(|(p, _)| p.label),
+            params_for_magic(&RUN_PROGRAM_MAGIC_BYTES_B_LATE).map(|(p, _)| p.label),
             Some(FETCH_BRANCH_B_LATE.label)
         );
     }
@@ -764,6 +774,15 @@ mod tests {
         assert_eq!(next_key(FETCH_CHROME_2026_08_22_B_5886, 166, 5), 48);
         assert!(verify_oracle_tuple(FETCH_LIVE, 175, 166, 94, 5).is_err());
         assert_ne!(FETCH_LIVE.key_mul, FETCH_CHROME_2026_08_22_B_5886.key_mul);
+        assert_eq!(FETCH_HTML_40954_UNVERIFIED.key_mul, 40_954);
+        assert_eq!(FETCH_HTML_40954_UNVERIFIED.key_add, 30_072);
+        assert_eq!(FETCH_HTML_40954_UNVERIFIED.byte_bias, 1);
+        assert_eq!(FETCH_HTML_40954_UNVERIFIED.key_quad_b, 0);
+        assert_ne!(FETCH_LIVE.key_mul, FETCH_HTML_40954_UNVERIFIED.key_mul);
+        assert_ne!(
+            FETCH_CHROME_2026_08_22_B_5886.key_mul,
+            FETCH_HTML_40954_UNVERIFIED.key_mul
+        );
     }
 
     #[test]
@@ -829,10 +848,7 @@ mod tests {
                 late["fetch"]["init_key"].as_u64().unwrap() as u8,
                 p.init_key
             );
-            assert_eq!(
-                late["fetch"]["key_mul"].as_u64().unwrap() as u32,
-                p.key_mul
-            );
+            assert_eq!(late["fetch"]["key_mul"].as_u64().unwrap() as u32, p.key_mul);
             assert_eq!(
                 late["fetch"]["key_quad_b"].as_u64().unwrap() as u32,
                 p.key_quad_b
