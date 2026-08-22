@@ -37,10 +37,11 @@
  *   ORACLE_FETCH_TUPLES set to 1 for a finite fetch-loop harvest. Prefers a logpoint on
  *                    the fetch `switch(...){` (discriminant already holds `op`; condition
  *                    returns false so packed `/fo/` is not stalled). Unique handler `{`
- *                    BPs are fallback only. Skips iframe rewrite unless ORACLE_INJECT_IFRAME=1
- *                    (rewrite can hit the wrong document and 400 the follow-up POST).
- *                    Chrome 148 removed setScriptSource. Always-on fetch-loop pauses stall
- *                    /fo/ because the HTML stub runs first.
+ *                    BPs are the live fallback (Chrome 148 never hits mid-line switch BPs).
+ *                    Opcode comes from the fetch-loop parent discriminant (`s`/`YG`) when
+ *                    that frame is evaluable; otherwise the BP `case N` only if no other
+ *                    unique handler is on the stack. Skips iframe rewrite unless
+ *                    ORACLE_INJECT_IFRAME=1. Chrome 148 removed setScriptSource.
  *   ORACLE_INJECT_IFRAME set to 1 to Fetch.fulfillRequest-inject `__cfOp.push` into the
  *                    first turnstile iframe document (optional; default off).
  */
@@ -1314,6 +1315,53 @@ function pausedUniqueHandler(
     return null;
   }
   return null;
+}
+
+/**
+ * Unique handler on the stack other than the BP's `case N` function.
+ * Chrome 148 often names the callee as the top frame (YX vs Ye).
+ */
+function fetchLoopCalleeOnStack(
+  frameNames,
+  bpName,
+  nameToOp = handlerNameToOp,
+  ambiguous = ambiguousHandlerNames,
+) {
+  for (const n of frameNames || []) {
+    if (!n || String(n).includes("<computed>")) continue;
+    if (ambiguous.has(n)) continue;
+    if (!nameToOp.has(n)) continue;
+    if (bpName && n === bpName) continue;
+    return n;
+  }
+  return null;
+}
+
+function pickSwitchDiscriminant(evals, keySlot, preferOp) {
+  const good = (evals || []).filter((e) => e && typeof e.op === "number");
+  if (!good.length) return null;
+  if (preferOp != null) {
+    const hit = good.filter((e) => e.op === preferOp);
+    if (hit.length) {
+      return (
+        hit.find((e) => typeof e.mix === "number" && e.mix >= 256 && e.mix <= 510) ||
+        hit.find((e) => typeof e.mix === "number" && e.mix !== keySlot) ||
+        hit[0]
+      );
+    }
+  }
+  const withMix = good.filter(
+    (e) => typeof e.mix === "number" && e.mix >= 0 && e.mix <= 510,
+  );
+  const wide = withMix.filter((e) => e.mix >= 256 && e.mix <= 510);
+  const pool = wide.length
+    ? wide
+    : withMix.filter((e) => e.mix !== keySlot).length
+      ? withMix.filter((e) => e.mix !== keySlot)
+      : withMix.length
+        ? withMix
+        : good;
+  return pool.find((e) => e.mix !== keySlot) || pool[0] || null;
 }
 
 function modalPackedBcLen(rows) {
@@ -2638,6 +2686,28 @@ function selfTestInject() {
   );
   const pausedJ = pausedUniqueHandler(["J", "s9"], stackMap, stackAmb);
   const pausedS4 = pausedUniqueHandler(["s4", "sh"], new Map([["s4", 51], ["sh", 1]]), stackAmb);
+  const calleeTop = fetchLoopCalleeOnStack(
+    ["YX", "Yz.<computed>.<computed>"],
+    "Ye",
+    new Map([
+      ["YX", 156],
+      ["Ye", 227],
+    ]),
+    new Set(),
+  );
+  const calleeNone = fetchLoopCalleeOnStack(
+    ["Ye", "Yz.<computed>.<computed>"],
+    "Ye",
+    new Map([["Ye", 227]]),
+    new Set(),
+  );
+  const discWide = pickSwitchDiscriminant(
+    [
+      { op: 147, mix: 247 },
+      { op: 229, mix: 345 },
+    ],
+    134,
+  );
   handlerNameToOp.set("s4", 51);
   const finBpNotStack = finalizeFetchLoopRows([
     {
@@ -2952,6 +3022,11 @@ function selfTestInject() {
       pausedJ == null &&
       pausedS4 &&
       pausedS4.name === "s4" &&
+      calleeTop === "YX" &&
+      calleeNone == null &&
+      discWide &&
+      discWide.op === 229 &&
+      discWide.mix === 345 &&
       finBpNotStack[0] &&
       finBpNotStack[0].op === 33 &&
       finBpNotStack[0].fn === "s0" &&
@@ -3056,6 +3131,7 @@ const compressorScripts = new Set();
 const fetchLoopBreakpoints = new Set();
 const fetchLoopBpRows = [];
 const fetchLoopBpMeta = new Map();
+const scriptSwitchVars = new Map();
 const scriptSources = new Map();
 const scriptNotes = [];
 let iframeRewrites = 0;
@@ -3737,11 +3813,61 @@ async function trySetFetchLoopBp(session, s, scriptSource, loc) {
   return null;
 }
 
+function rememberSwitchVars(scriptId, switchSites) {
+  if (!scriptId || !switchSites || !switchSites.length) return;
+  const vars = [];
+  const seen = new Set();
+  for (const site of switchSites) {
+    const opVar = site.opVar;
+    if (!opVar || !/^[A-Za-z_$][\w$]*$/.test(opVar)) continue;
+    const mixVar =
+      site.mixVar && /^[A-Za-z_$][\w$]*$/.test(site.mixVar) ? site.mixVar : null;
+    const k = `${opVar}:${mixVar || ""}`;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    vars.push({ opVar, mixVar });
+  }
+  if (vars.length) scriptSwitchVars.set(scriptId, vars);
+}
+
+async function evaluateSwitchLocals(session, frame, switchVars) {
+  const out = [];
+  if (!session || !frame?.callFrameId || !switchVars || !switchVars.length) return out;
+  for (const sv of switchVars) {
+    if (!sv.opVar || !/^[A-Za-z_$][\w$]*$/.test(sv.opVar)) continue;
+    const mixVar =
+      sv.mixVar && /^[A-Za-z_$][\w$]*$/.test(sv.mixVar) ? sv.mixVar : null;
+    const expr =
+      `({op:typeof ${sv.opVar}==="number"?(${sv.opVar}&255):null` +
+      (mixVar ? `,mix:typeof ${mixVar}==="number"?${mixVar}:null` : "") +
+      `})`;
+    try {
+      const got = await session.send("Debugger.evaluateOnCallFrame", {
+        callFrameId: frame.callFrameId,
+        expression: expr,
+        returnByValue: true,
+      });
+      const v = got.result?.value;
+      if (v && typeof v.op === "number") {
+        out.push({
+          fn: frame.functionName || "",
+          opVar: sv.opVar,
+          mixVar,
+          op: v.op & 255,
+          mix: typeof v.mix === "number" ? v.mix : null,
+        });
+      }
+    } catch {}
+  }
+  return out;
+}
+
 async function setFetchLoopBreakpointNear(session, s, scriptSource, idx) {
   scriptSources.set(s.scriptId, scriptSource);
   recordAmbiguousHandlerNames(scriptSource, idx);
   if (fetchTuples) {
     const switchSites = fetchLoopSwitchLogSites(scriptSource, idx);
+    rememberSwitchVars(s.scriptId, switchSites);
     note("fetchLoopSwitchSites", {
       n: switchSites.length,
       sites: switchSites.map((x) => ({
@@ -4025,15 +4151,8 @@ async function attachSession(session, targetInfo, waitingForDebugger) {
           const frames = (evt.callFrames || []).slice(0, 6);
           const frameNames = frames.map((f) => f.functionName || "");
           const pausedH = pausedUniqueHandler(frameNames);
-          if (
-            !switchMeta &&
-            frameNames.slice(1).some(
-              (n) => n && handlerNameToOp.has(n) && !ambiguousHandlerNames.has(n),
-            )
-          ) {
-            note("fetchLoopSkipCallee", { fn: fname, caller: frameNames[1] });
-            return;
-          }
+          const bpName = (callMeta && callMeta.name) || (pausedH && pausedH.name);
+          const calleeFn = fetchLoopCalleeOnStack(frameNames, bpName);
           if (!switchMeta && !callMeta && !pausedH) {
             if (fname && ambiguousHandlerNames.has(fname)) {
               note("fetchLoopSkipAmbiguous", { fn: fname });
@@ -4201,12 +4320,79 @@ async function attachSession(session, targetInfo, waitingForDebugger) {
           if ((row.bcLen || 0) <= 10000) {
             return;
           }
+          if (!Number.isFinite(row.pcSlot) || row.pcSlot === 0) {
+            note("fetchLoopSkipUninitPc", {
+              fn: fname,
+              pcSlot: row.pcSlot,
+              keySlot: row.keySlot,
+            });
+            return;
+          }
+          if (!switchMeta) {
+            const switchVars =
+              scriptSwitchVars.get(row.scriptId) ||
+              scriptSwitchVars.get(String(row.scriptId)) ||
+              [];
+            const parentEvals = [];
+            for (const fr of frames) {
+              if (!fr || fr.callFrameId === frame.callFrameId) continue;
+              const frName = fr.functionName || "";
+              if (
+                frName &&
+                !String(frName).includes("<computed>") &&
+                handlerNameToOp.has(frName) &&
+                !ambiguousHandlerNames.has(frName)
+              ) {
+                continue;
+              }
+              const got = await evaluateSwitchLocals(session, fr, switchVars);
+              for (const e of got) parentEvals.push(e);
+            }
+            if (parentEvals.length) row.parentSwitch = parentEvals.slice(0, 8);
+            const disc = pickSwitchDiscriminant(
+              parentEvals,
+              row.keySlot,
+              calleeFn ? null : caseOp,
+            );
+            if (disc && typeof disc.op === "number") {
+              row.bpCaseOp = caseOp;
+              caseOp = disc.op;
+              row.caseOp = disc.op;
+              row.op = disc.op & 255;
+              row.opFrom = "switchParent";
+              if (typeof disc.mix === "number") {
+                row.mixLocal = disc.mix;
+                row.key = (disc.mix - disc.op) & 255;
+              }
+              row.switchFn = disc.fn;
+              row.switchOpVar = disc.opVar;
+            } else if (calleeFn) {
+              note("fetchLoopSkipCallee", {
+                fn: fname,
+                callee: calleeFn,
+                caller: frameNames[1],
+                bpName: bpName || null,
+              });
+              return;
+            }
+          }
+          if (caseOp != null && row.opFrom !== "switchLocal") {
+            row.caseOp = caseOp;
+            row.op = caseOp & 255;
+            if (row.opFrom !== "switchParent") row.opFrom = "caseLabel";
+          }
           if (
             row.opFrom !== "switchLocal" &&
             row.caseOp != null &&
-            liveFetchRaw.some((x) => x.caseOp === row.caseOp && (x.bcLen || 0) > 10000)
+            liveFetchRaw.some(
+              (x) =>
+                x.caseOp === row.caseOp &&
+                (x.bcLen || 0) > 10000 &&
+                x.pcSlot === row.pcSlot,
+            )
           ) {
-            await removeFetchLoopBreakpointsForCaseOp(row.caseOp);
+            const removeOp = row.bpCaseOp != null ? row.bpCaseOp : row.caseOp;
+            await removeFetchLoopBreakpointsForCaseOp(removeOp);
             return;
           }
           const locals = {};
@@ -4226,21 +4412,16 @@ async function attachSession(session, targetInfo, waitingForDebugger) {
             } catch {}
           }
           row.locals = locals;
-          const mixHit = Object.values(locals).find((v) => v >= 256 && v <= 510);
-          if (typeof mixHit === "number") {
-            row.mixLocal = mixHit;
-            if (
-              row.caseOp != null &&
-              Number.isFinite(row.keySlot) &&
-              ((mixHit - row.caseOp) & 255) !== (row.keySlot & 255)
-            ) {
-              row.key = (mixHit - row.caseOp) & 255;
-            }
-          }
           if (Number.isFinite(row.keySlot)) row.nextKey = row.keySlot & 255;
           liveFetchRaw.push(row);
-          if (row.caseOp != null) {
-            await removeFetchLoopBreakpointsForCaseOp(row.caseOp);
+          const removeOp =
+            row.bpCaseOp != null
+              ? row.bpCaseOp
+              : callMeta && callMeta.caseOp != null
+                ? callMeta.caseOp
+                : row.caseOp;
+          if (removeOp != null) {
+            await removeFetchLoopBreakpointsForCaseOp(removeOp);
           }
           if (liveFetchRaw.length === 1 || liveFetchRaw.length >= fetchTupleCap) {
             note("fetchLoopTuple", {

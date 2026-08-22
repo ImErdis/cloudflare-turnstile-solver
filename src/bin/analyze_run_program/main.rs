@@ -219,8 +219,8 @@ fn row_has_next_key(f: &Value) -> bool {
         .is_some()
 }
 
-/// Prefer inject `{pc,op,key,byte}` over case-label `{pc,op,byte,nextKey}`.
-/// Empty `fetchLoopTuples` must not hide `opcodeFetches`.
+/// All harvest rows with `op`+`byte` and either fetch `key` or `nextKey`.
+/// A single complete `{pc,op,key,byte}` row must not hide nextKey-only rows.
 fn harvest_tuple_rows(v: &Value) -> Vec<Value> {
     let loop_rows = v
         .get("fetchLoopTuples")
@@ -238,21 +238,40 @@ fn harvest_tuple_rows(v: &Value) -> Vec<Value> {
         .filter(|f| row_has_op_byte(f) && row_has_fetch_key(f))
         .cloned()
         .collect();
-    if !complete.is_empty() {
-        return dedup_tuple_rows(complete);
-    }
-    let from_loop: Vec<Value> = loop_rows
+    let rest: Vec<Value> = op_rows
         .iter()
-        .filter(|f| row_has_op_byte(f) && row_has_next_key(f))
+        .chain(loop_rows.iter())
+        .filter(|f| row_has_op_byte(f) && row_has_next_key(f) && !row_has_fetch_key(f))
         .cloned()
         .collect();
-    if !from_loop.is_empty() {
-        return from_loop;
+    let mut out = dedup_tuple_rows(complete);
+    let mut seen: std::collections::HashSet<(u64, u64, u64)> = out
+        .iter()
+        .map(|f| {
+            (
+                f.get("pc").and_then(|x| x.as_u64()).unwrap_or(0),
+                f.get("op")
+                    .or_else(|| f.get("caseOp"))
+                    .and_then(|x| x.as_u64())
+                    .unwrap_or(0),
+                f.get("byte").and_then(|x| x.as_u64()).unwrap_or(0),
+            )
+        })
+        .collect();
+    for f in rest {
+        let pc = f.get("pc").and_then(|x| x.as_u64()).unwrap_or(0);
+        let op = f
+            .get("op")
+            .or_else(|| f.get("caseOp"))
+            .and_then(|x| x.as_u64())
+            .unwrap_or(0);
+        let byte = f.get("byte").and_then(|x| x.as_u64()).unwrap_or(0);
+        if !seen.insert((pc, op, byte)) {
+            continue;
+        }
+        out.push(f);
     }
-    op_rows
-        .into_iter()
-        .filter(|f| row_has_op_byte(f) && row_has_next_key(f))
-        .collect()
+    out
 }
 
 fn dedup_tuple_rows(rows: Vec<Value>) -> Vec<Value> {
@@ -365,15 +384,26 @@ fn verify_case_tuples_file(path: &PathBuf) -> Result<Value> {
             }
         }
         let mut chain_fail = Vec::new();
-        if rows.iter().all(row_has_fetch_key) && rows.len() >= 2 {
+        if rows.len() >= 2 {
             for w in rows.windows(2) {
-                let k0 = w[0].get("key").and_then(|x| x.as_u64()).unwrap() as u8;
+                let k0 = w[0].get("key").and_then(|x| x.as_u64()).map(|n| n as u8);
+                let nk0 = w[0]
+                    .get("nextKey")
+                    .or_else(|| w[0].get("next_key"))
+                    .and_then(|x| x.as_u64())
+                    .map(|n| n as u8);
+                let k1 = w[1].get("key").and_then(|x| x.as_u64()).map(|n| n as u8);
+                let (Some(k0), Some(nk0), Some(k1)) = (k0, nk0, k1) else {
+                    continue;
+                };
+                if nk0 != k1 {
+                    continue;
+                }
                 let op0 = w[0]
                     .get("op")
                     .or_else(|| w[0].get("caseOp"))
                     .and_then(|x| x.as_u64())
                     .unwrap_or(0) as u8;
-                let k1 = w[1].get("key").and_then(|x| x.as_u64()).unwrap() as u8;
                 let got = next_key(params, k0, op0);
                 if got != k1 {
                     chain_fail.push(json!({
