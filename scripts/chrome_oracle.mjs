@@ -3017,6 +3017,14 @@ async function attachSession(session, targetInfo, waitingForDebugger) {
             note("fetchLoopSkipAmbiguous", { fn: fname });
             return;
           }
+          if (fname && String(fname).includes("<computed>")) {
+            note("fetchLoopSkipComputed", { fn: fname });
+            return;
+          }
+          if (!fname || !handlerNameToOp.has(fname)) {
+            note("fetchLoopSkipNonUniqueFn", { fn: fname || "" });
+            return;
+          }
           const row = { via: "fetchLoop", fn: fname };
           const frames = (evt.callFrames || []).slice(0, 6);
           row.frameNames = frames.map((f) => f.functionName || "");
@@ -3035,30 +3043,14 @@ async function attachSession(session, targetInfo, waitingForDebugger) {
               break;
             }
           }
-          if (caseOp == null && fname && handlerNameToOp.has(fname)) {
-            caseOp = handlerNameToOp.get(fname);
+          const uniqueOp = handlerNameToOp.get(fname);
+          if (caseOp != null && caseOp !== uniqueOp) {
+            row.bpCaseOp = caseOp;
+            row.bpWhy = "pausedFn";
+          } else {
             row.bpWhy = row.bpWhy || "handlerFn";
           }
-          // Hit-BP caseOp is the handler we bound; the paused frame may be a
-          // callee. Prefer the unique paused function's case when it disagrees.
-          if (fname && handlerNameToOp.has(fname) && handlerNameToOp.get(fname) !== caseOp) {
-            row.bpCaseOp = caseOp;
-            caseOp = handlerNameToOp.get(fname);
-            row.bpWhy = "pausedFn";
-          }
-          if (caseOp == null && frame.location) {
-            const src =
-              scriptSources.get(frame.location.scriptId) ||
-              (frame.location.scriptId && scriptSources.get(String(frame.location.scriptId)));
-            if (src) {
-              const srcIdx = indexFromLineCol(
-                src,
-                frame.location.lineNumber,
-                frame.location.columnNumber,
-              );
-              caseOp = caseOpAt(src, srcIdx);
-            }
-          }
+          caseOp = uniqueOp;
           if (caseOp != null) {
             row.caseOp = caseOp;
             row.op = caseOp & 255;
