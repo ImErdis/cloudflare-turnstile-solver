@@ -2164,7 +2164,7 @@ function caseOpAt(src, idx) {
 }
 
 function isPerfLogger(scriptSource, brace) {
-  const head = String(scriptSource).slice(brace, brace + 360);
+  const head = String(scriptSource).slice(brace, brace + 800);
   return /performance\[/.test(head);
 }
 
@@ -2204,8 +2204,37 @@ function sendHelperBreakpointAt(scriptSource) {
   return { ...sourceLineCol(scriptSource, brace), pat, idx, name };
 }
 
-/** Body encoder after `runProgram` (`Mt(X)` on the 40954 iframe). Not the `wZ` perf logger. */
+/** Body encoder after `runProgram` (`Mt=function` on the 40954 iframe). Not the `wZ` perf logger. */
 function encoderBreakpointAt(scriptSource) {
+  const cs = String(scriptSource).match(/(\w+)=`([A-Za-z0-9$+\-]{65})`/);
+  if (cs) {
+    const varName = cs[1];
+    const re = /(?:function (\w+)\(|(\w+)=function\()/g;
+    let m;
+    let last = null;
+    while ((m = re.exec(scriptSource))) {
+      const name = m[1] || m[2];
+      if (!name) continue;
+      const brace = scriptSource.indexOf("{", m.index);
+      if (brace < 0) continue;
+      if (isPerfLogger(scriptSource, brace)) continue;
+      const end = braceEnd(scriptSource, brace);
+      const body =
+        end > brace
+          ? scriptSource.slice(brace, end)
+          : scriptSource.slice(brace, brace + 4000);
+      if (body.includes(`${varName}[`) && /&63/.test(body)) {
+        last = {
+          ...sourceLineCol(scriptSource, brace),
+          pat: m[1] ? `function ${name}(` : `${name}=function(`,
+          idx: m.index,
+          name,
+          role: "encoder",
+        };
+      }
+    }
+    if (last) return last;
+  }
   const send = sendHelperBreakpointAt(scriptSource);
   if (!send) return null;
   const bodyStart = scriptSource.indexOf("{", send.idx);
@@ -2620,6 +2649,11 @@ function selfTestInject() {
   const encSrc =
     "MO(setTimeout,c,100,k,MS);function c(M,X){typeof Mq===k&&Mq(X,c);return Mt(X)}Mt=function(X){return X}";
   const encBp = encoderBreakpointAt(encSrc);
+  const encCharsetSrc =
+    "Mb=`" +
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+$-" +
+    "`;function Ms(X){return Mb[0]}Mt=function(X){X[0]=Mb[Mg&63];return X}MO(setTimeout,c,100,k,MS);function c(M,X){return I4(MS)}";
+  const encCharsetBp = encoderBreakpointAt(encCharsetSrc);
   const lin40954Src =
     "F=MS[Mg]^MO[Yd(Zr.MW)](255+MW[F],255),MS[Mg]=MO[Yd(Zr.Mp)](MO[Yd(Zr.Mq)](MO[Yd(Zr.V)](MS[Mg]+F,40954),30072),255),F){case 247:bW[Yd(Zr.MT)](this);break;}*40954,30072)&255,MQ){case 247:x();new M9(M)[YG(ZJ.M)](0,62,[])";
   const lin40954F = extractFetchLinear(lin40954Src);
@@ -3022,6 +3056,9 @@ function selfTestInject() {
       encBp.role === "encoder" &&
       encBp.name === "Mt" &&
       encBp.pat === "Mt=function(" &&
+      encCharsetBp &&
+      encCharsetBp.name === "Mt" &&
+      encCharsetBp.pat === "Mt=function(" &&
       lin40954F &&
       lin40954F.keyMul === 40954 &&
       lin40954F.keyAdd === 30072 &&
@@ -5145,6 +5182,7 @@ const followUpShape = foFollowUpShape(foNet, xhr);
 const initJson = extractInitJsonKeys(iframeHtml);
 function fetchScheduleFromCapture(iframeHtml) {
   const fromIframe = extractFetchSchedule(iframeHtml);
+  let bestLinear = fromIframe && fromIframe.keyMul ? fromIframe : null;
   try {
     for (const n of fs.readdirSync(outDir)) {
       if (!n.startsWith("executed-fetch-") || !n.endsWith(".js")) continue;
@@ -5152,9 +5190,10 @@ function fetchScheduleFromCapture(iframeHtml) {
         fs.readFileSync(path.join(outDir, n), "utf8"),
       );
       if (s && s.keyMul && s.keyQuadB) return s;
+      if (s && s.keyMul && !bestLinear) bestLinear = s;
     }
   } catch {}
-  return fromIframe;
+  return bestLinear || fromIframe;
 }
 const fetchSchedule = fetchScheduleFromCapture(iframeHtml);
 const followUpJson = pickFollowUpShape(foShapes, initJson?.keys || []);
