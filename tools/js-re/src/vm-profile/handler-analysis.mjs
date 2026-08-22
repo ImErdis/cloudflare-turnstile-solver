@@ -18,20 +18,14 @@ function numericPropertyMap(object) {
 }
 
 function helperObject(object) {
-  if (
-    object?.type !== "ObjectExpression" ||
-    !object.properties.length ||
-    !object.properties.every(
-      (property) =>
-        property.type === "Property" &&
-        ["FunctionExpression", "ArrowFunctionExpression"].includes(property.value?.type),
-    )
-  ) {
-    return null;
-  }
-  return new Map(
-    object.properties.map((property) => [propertyName(property.key), property.value]),
+  if (object?.type !== "ObjectExpression") return null;
+  const helpers = object.properties.filter(
+    (property) =>
+      property.type === "Property" &&
+      ["FunctionExpression", "ArrowFunctionExpression"].includes(property.value?.type),
   );
+  if (!helpers.length) return null;
+  return new Map(helpers.map((property) => [propertyName(property.key), property.value]));
 }
 
 function returnedExpression(fn) {
@@ -178,6 +172,14 @@ function semantic(node, context, environment = new Map(), depth = 0) {
         argument: semantic(node.argument, context, environment, depth + 1),
       };
     case "AssignmentExpression":
+      if (node.operator !== "=") {
+        return {
+          type: "binary",
+          operator: node.operator.slice(0, -1),
+          left: semantic(node.left, context, environment, depth + 1),
+          right: semantic(node.right, context, environment, depth + 1),
+        };
+      }
       return semantic(node.right, context, environment, depth + 1);
     case "SequenceExpression":
       return {
@@ -242,6 +244,18 @@ function semanticContains(node, predicate) {
 }
 
 function flattenBinary(node, operator, out = []) {
+  if (
+    node?.type === "binary" &&
+    node.operator === "&" &&
+    ((node.left?.type === "literal" && toInt32(node.left.value) === 255) ||
+      (node.right?.type === "literal" && toInt32(node.right.value) === 255))
+  ) {
+    const unmasked =
+      node.left.type === "literal" && toInt32(node.left.value) === 255
+        ? node.right
+        : node.left;
+    return flattenBinary(unmasked, operator, out);
+  }
   if (node?.type === "binary" && node.operator === operator) {
     flattenBinary(node.left, operator, out);
     flattenBinary(node.right, operator, out);
@@ -322,13 +336,14 @@ function dominantReadPair(fn) {
 
 function readDecode(read, context) {
   let current = read;
+  let best = null;
   for (let depth = 0; current && depth < 16; depth += 1) {
     const expanded = semantic(current, context);
     const candidate = decodeCandidate(expanded, read.start);
-    if (candidate) return candidate;
+    if (candidate) best = candidate;
     current = context.parents.get(current);
   }
-  return null;
+  return best;
 }
 
 function assignmentForRead(read, context) {
@@ -399,6 +414,26 @@ function branchReadExtras(node, pair, context) {
     .filter((extra) => extra != null);
 }
 
+function charsetReadExtras(node, pair, context) {
+  const extras = [];
+  for (const member of collect(
+    node,
+    (candidate) =>
+      candidate.type === "MemberExpression" &&
+      candidate.computed &&
+      candidate.object.type === "Identifier" &&
+      candidate.object.name !== pair.buffer,
+  )) {
+    for (const read of pair.reads) {
+      if (read.start >= member.property.start && read.end <= member.property.end) {
+        const extra = readDecode(read, context)?.extra;
+        if (extra != null) extras.push(extra);
+      }
+    }
+  }
+  return extras;
+}
+
 function hasIdentifier(node, name) {
   return contains(node, (candidate) => candidate.type === "Identifier" && candidate.name === name);
 }
@@ -413,22 +448,30 @@ function inferTaggedPayload(tag, branch, pair, context) {
   const loops = collect(branch, (node) =>
     ["ForStatement", "WhileStatement", "DoWhileStatement"].includes(node.type),
   );
-  const hasCharsetIndex = collect(branch, (node) => node.type === "MemberExpression").some(
-    (member) =>
-      pair.reads.some(
-        (read) => read.start >= member.start && read.end <= member.end,
-      ) && member.object.type === "Identifier" && member.object.name !== pair.buffer,
+  const charsetExtras = charsetReadExtras(branch, pair, context);
+  const hasCharsetIndex = charsetExtras.length > 0;
+  const hasPush = contains(
+    branch,
+    (node) =>
+      node.type === "CallExpression" &&
+      node.callee.type === "MemberExpression" &&
+      (propertyName(node.callee.property) === "push" ||
+        (node.callee.computed &&
+          resolveDecodedKey(node.callee.property, context) === "push")),
   );
 
   if (hasRegexp) {
-    const nonzero = extras.filter((extra) => extra !== 0);
-    if (nonzero.length < 3) return null;
+    if (charsetExtras.length !== 2) return null;
+    const flagsLength = extras.find(
+      (extra) => extra !== 0 && !charsetExtras.includes(extra),
+    );
+    if (flagsLength == null) return null;
     return {
       kind: "regexp",
       pattern_length_byte_xor: 0,
-      pattern_char_xor: nonzero[0],
-      flags_length_xor: nonzero[1],
-      flags_char_xor: nonzero.at(-1),
+      pattern_char_xor: charsetExtras[0],
+      flags_length_xor: flagsLength,
+      flags_char_xor: charsetExtras[1],
     };
   }
   if (hasMath) {
@@ -442,7 +485,7 @@ function inferTaggedPayload(tag, branch, pair, context) {
   if (arrays.some((array) => array.elements.length >= 4) && extras.length >= 4) {
     return { kind: "fixed_reads", extra_xors: extras.slice(0, 4) };
   }
-  if (arrays.some((array) => array.elements.length === 0) && loops.length && hasCharsetIndex) {
+  if (arrays.some((array) => array.elements.length === 0) && loops.length && hasPush) {
     const charXor = extras.findLast((extra) => extra !== 0);
     if (charXor == null) return null;
     return { kind: "bytes", length_byte_xor: 0, char_xor: charXor };
@@ -482,8 +525,10 @@ export function recognizeTaggedLoad(fn, analysis) {
       ? [{ read, index, assignment, comparisons }]
       : [];
   });
-  if (candidates.length !== 1) return null;
-  const tag = candidates[0];
+  if (!candidates.length) return null;
+  const tagIdentifiers = new Set(candidates.map((candidate) => candidate.assignment.left.name));
+  if (tagIdentifiers.size !== 1) return null;
+  const tag = candidates.sort((a, b) => a.index - b.index)[0];
   const other = pair.reads
     .slice(0, 4)
     .map((read, index) => ({ read, index, assignment: assignmentForRead(read, context) }))
