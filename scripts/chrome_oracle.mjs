@@ -1474,7 +1474,7 @@ function sendHelperBreakpointAt(scriptSource) {
   return { ...sourceLineCol(scriptSource, brace), pat, idx, name };
 }
 
-const TUPLE_HARVEST_EXPR = `(() => {
+const TUPLE_HARVEST_EXPR = `(function() {
   const g = this && this.g;
   const thisNums = {};
   if (this) {
@@ -1512,6 +1512,8 @@ const TUPLE_HARVEST_EXPR = `(() => {
   }
   return {
     via: "fetchLoop",
+    thisType: typeof this,
+    hasG: !!(g),
     pcSlot: typeof pcSlot === "number" ? pcSlot : undefined,
     keySlot: typeof keySlot === "number" ? (keySlot & 255) : undefined,
     gLen: g && g.length,
@@ -1521,7 +1523,7 @@ const TUPLE_HARVEST_EXPR = `(() => {
     thisNums: thisNums,
     gNums: gNums
   };
-})()`;
+}).call(this)`;
 
 const FO_SHAPE_EXPR = `(() => {
   function kind(v) {
@@ -2551,33 +2553,50 @@ async function attachSession(session, targetInfo, waitingForDebugger) {
         }
         const fetchHit = hit.some((id) => fetchLoopBreakpoints.has(id));
         if (fetchHit && frame && liveFetchRaw.length < fetchTupleCap) {
-          const row = { via: "fetchLoop" };
-          try {
-            const got = await session.send("Debugger.evaluateOnCallFrame", {
-              callFrameId: frame.callFrameId,
-              expression: TUPLE_HARVEST_EXPR,
-              returnByValue: true,
-            });
-            const v = got.result?.value;
-            if (v && typeof v === "object") Object.assign(row, v);
-          } catch (e) {
-            row.evalErr = String(e).slice(0, 120);
+          const row = { via: "fetchLoop", fn: fname };
+          const frames = (evt.callFrames || []).slice(0, 6);
+          row.frameNames = frames.map((f) => f.functionName || "");
+          for (const fr of frames) {
+            try {
+              const got = await session.send("Debugger.evaluateOnCallFrame", {
+                callFrameId: fr.callFrameId,
+                expression: TUPLE_HARVEST_EXPR,
+                returnByValue: true,
+              });
+              if (got.exceptionDetails) {
+                row.evalEx = String(got.exceptionDetails.text || "").slice(0, 120);
+                continue;
+              }
+              const v = got.result?.value;
+              if (v && typeof v === "object" && (v.hasG || v.gLen || v.pcSlot != null)) {
+                Object.assign(row, v);
+                row.fn = fr.functionName || row.fn;
+                break;
+              }
+              if (v && typeof v === "object" && row.thisType == null) {
+                Object.assign(row, v);
+              }
+            } catch (e) {
+              row.evalErr = String(e).slice(0, 120);
+            }
           }
           const locals = {};
-          try {
-            const local = frame.scopeChain?.find((sc) => sc.type === "local");
-            if (local?.object?.objectId) {
-              const got = await session.send("Runtime.getProperties", {
-                objectId: local.object.objectId,
-                ownProperties: true,
-              });
-              for (const p of got.result || []) {
-                if (p.value?.type === "number" && typeof p.value.value === "number") {
-                  locals[p.name] = p.value.value;
+          for (const fr of frames) {
+            for (const sc of fr.scopeChain || []) {
+              if (!sc.object?.objectId) continue;
+              try {
+                const got = await session.send("Runtime.getProperties", {
+                  objectId: sc.object.objectId,
+                  ownProperties: true,
+                });
+                for (const p of got.result || []) {
+                  if (p.value?.type === "number" && typeof p.value.value === "number") {
+                    locals[p.name] = p.value.value;
+                  }
                 }
-              }
+              } catch {}
             }
-          } catch {}
+          }
           row.locals = locals;
           const mixHit = Object.values(locals).find((v) => v > 255 && v < 4096);
           const opCands = Object.values(locals).filter(
@@ -2598,11 +2617,15 @@ async function attachSession(session, targetInfo, waitingForDebugger) {
           if (liveFetchRaw.length === 1 || liveFetchRaw.length === fetchTupleCap) {
             note("fetchLoopTuple", {
               n: liveFetchRaw.length,
+              fn: row.fn,
+              thisType: row.thisType,
+              hasG: row.hasG,
               pcSlot: row.pcSlot,
               op: row.op,
               key: row.key,
               bcLen: row.bcLen,
               byteAtPcMinus1: row.byteAtPcMinus1,
+              localCount: Object.keys(row.locals || locals || {}).length,
             });
           }
           if (liveFetchRaw.length >= fetchTupleCap) {
