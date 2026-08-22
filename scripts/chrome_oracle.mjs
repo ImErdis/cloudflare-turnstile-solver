@@ -4414,6 +4414,9 @@ async function attachSession(session, targetInfo, waitingForDebugger) {
               pcSlot: row.pcSlot,
               keySlot: row.keySlot,
             });
+            if (callMeta && callMeta.caseOp != null) {
+              await removeFetchLoopBreakpointsForCaseOp(callMeta.caseOp);
+            }
             return;
           }
           if (!switchMeta) {
@@ -4471,6 +4474,9 @@ async function attachSession(session, targetInfo, waitingForDebugger) {
                 bias,
                 parentOps: parentEvals.map((e) => e.op).slice(0, 8),
               });
+              if (callMeta && callMeta.caseOp != null) {
+                await removeFetchLoopBreakpointsForCaseOp(callMeta.caseOp);
+              }
               return;
             } else if (calleeFn) {
               note("fetchLoopSkipCallee", {
@@ -4479,6 +4485,9 @@ async function attachSession(session, targetInfo, waitingForDebugger) {
                 caller: frameNames[1],
                 bpName: bpName || null,
               });
+              if (callMeta && callMeta.caseOp != null) {
+                await removeFetchLoopBreakpointsForCaseOp(callMeta.caseOp);
+              }
               return;
             }
           }
