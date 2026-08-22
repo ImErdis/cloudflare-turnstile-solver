@@ -16,14 +16,17 @@
 //! jumps (`bW`/247) or invoke callees.
 
 use crate::solver::run_program_ops::{
-    jump_roles_for_late, layout_for_late, operand_from_byte, InstrWidth, GE_OPCODE, XF_DST_XOR,
-    XF_INT_XOR, XF_OPCODE, XF_STRING_CHARSET_XOR, XF_TAG_BYTES, XF_TAG_FALSE, XF_TAG_INT,
-    XF_TAG_LEB, XF_TAG_NULL, XF_TAG_NUMBER_A, XF_TAG_NUMBER_B, XF_TAG_REGEXP, XF_TAG_STRING,
-    XF_TAG_UNDEF, XF_TAG_XOR,
+    GE_OPCODE, InstrWidth, XF_DST_XOR, XF_INT_XOR, XF_OPCODE, XF_STRING_CHARSET_XOR, XF_TAG_BYTES,
+    XF_TAG_FALSE, XF_TAG_INT, XF_TAG_LEB, XF_TAG_NULL, XF_TAG_NUMBER_A, XF_TAG_NUMBER_B,
+    XF_TAG_REGEXP, XF_TAG_STRING, XF_TAG_UNDEF, XF_TAG_XOR, jump_roles_for_late, layout_for_late,
+    operand_from_byte,
+};
+use crate::solver::run_program_profile::{
+    VmHandlerProfile, VmSkipProfile, VmSkipSpec, VmTagPayload, VmTaggedOperandOrder,
 };
 use crate::solver::run_program_vm::{
-    step_fetch, FetchParams, FETCH_CHROME_2026_08_22_B_5886, FETCH_HTML_40954_UNVERIFIED,
-    FETCH_LIVE,
+    FETCH_CHROME_2026_08_22_B_5886, FETCH_HTML_40954_UNVERIFIED, FETCH_LIVE, FetchParams,
+    step_fetch,
 };
 use serde::Serialize;
 
@@ -219,7 +222,7 @@ pub const BG_40954_TAG_REGEXP: u8 = 20;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct HarvestedString {
     pub opcode: u8,
-    pub handler: &'static str,
+    pub handler: String,
     pub pc: u32,
     pub text: String,
 }
@@ -239,9 +242,12 @@ pub struct SkipHarvest {
     /// `HW`/156 tag bytes in walk order (5886 only).
     #[serde(skip)]
     pub hw_tags: Vec<(u32, u8)>,
-    /// `bg`/181 tag bytes in walk order (40954 only).
+    /// Tagged-load tag bytes emitted by an explicit dynamic profile.
     #[serde(skip)]
-    pub bg_tags: Vec<(u32, u8)>,
+    pub profile_tags: Vec<(u32, u8)>,
+    /// Validation detail when `stopped == "profile_mismatch"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile_error: Option<String>,
 }
 
 impl SkipHarvest {
@@ -285,14 +291,18 @@ impl<'a> Cursor<'a> {
     }
 
     fn leb(&mut self) -> Result<u32, &'static str> {
-        let mut x = self.imm(0)?;
+        self.leb_with_extra(0)
+    }
+
+    fn leb_with_extra(&mut self, extra: u8) -> Result<u32, &'static str> {
+        let mut x = self.imm(extra)?;
         let mut n = u32::from(x & 127);
         let mut shift = 7;
         while x & 128 != 0 {
             if shift >= 21 {
                 return Err("leb_too_long");
             }
-            x = self.imm(0)?;
+            x = self.imm(extra)?;
             n |= u32::from(x & 127) << shift;
             shift += 7;
         }
@@ -300,8 +310,16 @@ impl<'a> Cursor<'a> {
     }
 
     fn charset_string(&mut self, extra: u8) -> Result<String, &'static str> {
-        let len = self.leb()? as usize;
-        self.charset_n(len, extra)
+        self.charset_string_with(0, extra)
+    }
+
+    fn charset_string_with(
+        &mut self,
+        length_extra: u8,
+        char_extra: u8,
+    ) -> Result<String, &'static str> {
+        let len = self.leb_with_extra(length_extra)? as usize;
+        self.charset_n(len, char_extra)
     }
 
     fn charset_n(&mut self, len: usize, extra: u8) -> Result<String, &'static str> {
@@ -328,13 +346,13 @@ impl<'a> Cursor<'a> {
 fn push_str(
     out: &mut Vec<HarvestedString>,
     opcode: u8,
-    handler: &'static str,
+    handler: impl Into<String>,
     pc: u32,
     text: String,
 ) {
     out.push(HarvestedString {
         opcode,
-        handler,
+        handler: handler.into(),
         pc,
         text,
     });
@@ -510,66 +528,6 @@ fn skip_hw_5886(
     }
 }
 
-/// leftover4 `bg`/181: tag^217 then dst^210, then tag payload. No host store.
-fn skip_bg_40954(
-    cur: &mut Cursor<'_>,
-    start_pc: u32,
-    strings: &mut Vec<HarvestedString>,
-    bg_tags: &mut Vec<(u32, u8)>,
-) -> Result<(), &'static str> {
-    let tag = cur.imm(BG_40954_TAG_XOR)?;
-    let _dst = cur.imm(BG_40954_DST_XOR)?;
-    bg_tags.push((start_pc, tag));
-    match tag {
-        BG_40954_TAG_STRING => {
-            let text = cur.charset_string(BG_40954_STRING_CHARSET_XOR)?;
-            push_str(strings, BG_40954_OPCODE, "bg", start_pc, text);
-            Ok(())
-        }
-        BG_40954_TAG_BYTES => {
-            let text = cur.charset_string(BG_40954_BYTES_CHARSET_XOR)?;
-            push_str(strings, BG_40954_OPCODE, "bg", start_pc, text);
-            Ok(())
-        }
-        BG_40954_TAG_INT => {
-            let _ = cur.imm(BG_40954_INT_XOR)?;
-            Ok(())
-        }
-        BG_40954_TAG_UNDEF
-        | BG_40954_TAG_NULL
-        | BG_40954_TAG_TRUE
-        | BG_40954_TAG_FALSE
-        | BG_40954_TAG_NUMBER_A
-        | BG_40954_TAG_NUMBER_B => Ok(()),
-        BG_40954_TAG_LEB => {
-            let _ = cur.leb()?;
-            Ok(())
-        }
-        BG_40954_TAG_FLOAT => {
-            for _ in 0..8 {
-                let _ = cur.imm(0)?;
-            }
-            Ok(())
-        }
-        BG_40954_TAG_PACKED => {
-            let _ = cur.imm(0)?;
-            let _ = cur.imm(0)?;
-            let _ = cur.imm(0)?;
-            let _ = cur.imm(BG_40954_PACKED_KEY_XOR)?;
-            Ok(())
-        }
-        BG_40954_TAG_REGEXP => {
-            let a = cur.charset_string(BG_40954_REGEXP_CHARSET_A)?;
-            let flen = usize::from(cur.imm(BG_40954_REGEXP_FLAGS_LEN_XOR)?);
-            let b = cur.charset_n(flen, BG_40954_REGEXP_CHARSET_B)?;
-            push_str(strings, BG_40954_OPCODE, "bg", start_pc, a);
-            push_str(strings, BG_40954_OPCODE, "bg", start_pc, b);
-            Ok(())
-        }
-        _ => Err("bg_unskipped_tag"),
-    }
-}
-
 /// tuples27 `Hx`/168: dst^193, LEB obj, charset^0 name, flags^63, arity×^228. No call.
 fn skip_hx_5886(
     cur: &mut Cursor<'_>,
@@ -714,26 +672,145 @@ fn uses_5886_skip(params: FetchParams) -> bool {
         && params.key_add == FETCH_CHROME_2026_08_22_B_5886.key_add
 }
 
-fn uses_40954_skip(params: FetchParams) -> bool {
+fn is_40954_fetch(params: FetchParams) -> bool {
     params.key_mul == FETCH_HTML_40954_UNVERIFIED.key_mul
         && params.key_quad_b == FETCH_HTML_40954_UNVERIFIED.key_quad_b
         && params.byte_bias == FETCH_HTML_40954_UNVERIFIED.byte_bias
         && params.key_add == FETCH_HTML_40954_UNVERIFIED.key_add
 }
 
-fn skip_mapped_40954(
+fn skip_profile_handler(
     cur: &mut Cursor<'_>,
-    op: u8,
+    handler: &VmHandlerProfile,
     start_pc: u32,
     strings: &mut Vec<HarvestedString>,
-    bg_tags: &mut Vec<(u32, u8)>,
+    profile_tags: &mut Vec<(u32, u8)>,
 ) -> Result<(), &'static str> {
-    if JUMP_OPCODES_40954.contains(&op) {
-        return Err("unparsed_jump");
-    }
-    match op {
-        BG_40954_OPCODE => skip_bg_40954(cur, start_pc, strings, bg_tags),
-        _ => Err("unmapped_opcode"),
+    let opcode = handler.opcode;
+    match &handler.spec {
+        VmSkipSpec::FixedReads { extra_xors } => {
+            for extra in extra_xors {
+                let _ = cur.imm(*extra)?;
+            }
+            Ok(())
+        }
+        VmSkipSpec::Leb { byte_xor } => {
+            let _ = cur.leb_with_extra(*byte_xor)?;
+            Ok(())
+        }
+        VmSkipSpec::LebTable {
+            count_byte_xor,
+            index_byte_xor,
+            max_count,
+        } => {
+            let count = cur.leb_with_extra(*count_byte_xor)?;
+            if count > *max_count {
+                return Err("profile_count_too_large");
+            }
+            for _ in 0..count {
+                let _ = cur.leb_with_extra(*index_byte_xor)?;
+            }
+            Ok(())
+        }
+        VmSkipSpec::TaggedLoad {
+            operand_order,
+            tag_xor,
+            dst_xor,
+            tags,
+        } => {
+            let tag = match operand_order {
+                VmTaggedOperandOrder::TagThenDst => {
+                    let tag = cur.imm(*tag_xor)?;
+                    let _dst = cur.imm(*dst_xor)?;
+                    tag
+                }
+                VmTaggedOperandOrder::DstThenTag => {
+                    let _dst = cur.imm(*dst_xor)?;
+                    cur.imm(*tag_xor)?
+                }
+            };
+            profile_tags.push((start_pc, tag));
+            let Some(tag_profile) = tags.iter().find(|candidate| candidate.tag == tag) else {
+                return Err("profile_tag_unknown");
+            };
+            match &tag_profile.payload {
+                VmTagPayload::None => Ok(()),
+                VmTagPayload::FixedReads { extra_xors } => {
+                    for extra in extra_xors {
+                        let _ = cur.imm(*extra)?;
+                    }
+                    Ok(())
+                }
+                VmTagPayload::Leb { byte_xor } => {
+                    let _ = cur.leb_with_extra(*byte_xor)?;
+                    Ok(())
+                }
+                VmTagPayload::String {
+                    length_byte_xor,
+                    char_xor,
+                }
+                | VmTagPayload::Bytes {
+                    length_byte_xor,
+                    char_xor,
+                } => {
+                    let text = cur.charset_string_with(*length_byte_xor, *char_xor)?;
+                    push_str(
+                        strings,
+                        opcode,
+                        handler.handler_label.clone(),
+                        start_pc,
+                        text,
+                    );
+                    Ok(())
+                }
+                VmTagPayload::Regexp {
+                    pattern_length_byte_xor,
+                    pattern_char_xor,
+                    flags_length_xor,
+                    flags_char_xor,
+                } => {
+                    let pattern =
+                        cur.charset_string_with(*pattern_length_byte_xor, *pattern_char_xor)?;
+                    let flags_len = usize::from(cur.imm(*flags_length_xor)?);
+                    let flags = cur.charset_n(flags_len, *flags_char_xor)?;
+                    push_str(
+                        strings,
+                        opcode,
+                        handler.handler_label.clone(),
+                        start_pc,
+                        pattern,
+                    );
+                    push_str(
+                        strings,
+                        opcode,
+                        handler.handler_label.clone(),
+                        start_pc,
+                        flags,
+                    );
+                    Ok(())
+                }
+            }
+        }
+        VmSkipSpec::StringLoad {
+            prefix_xors,
+            length_byte_xor,
+            char_xor,
+        } => {
+            for extra in prefix_xors {
+                let _ = cur.imm(*extra)?;
+            }
+            let text = cur.charset_string_with(*length_byte_xor, *char_xor)?;
+            push_str(
+                strings,
+                opcode,
+                handler.handler_label.clone(),
+                start_pc,
+                text,
+            );
+            Ok(())
+        }
+        VmSkipSpec::JumpStop { .. } => Err("jump_stop"),
+        VmSkipSpec::Unknown { .. } => Err("unknown_handler"),
     }
 }
 
@@ -786,10 +863,64 @@ fn skip_mapped_5886(
     }
 }
 
-/// Linear skip-harvest from `params.init_pc` / `init_key`. Skips `XU`/177
-/// immediates without apply. Does not take jumps or invoke callees. Stops at
-/// the first unskipped jump / Variable handler.
+fn empty_harvest(
+    params: FetchParams,
+    stopped: &'static str,
+    profile_error: Option<String>,
+) -> SkipHarvest {
+    SkipHarvest {
+        params_label: params.label,
+        instructions: 0,
+        last_pc: params.init_pc,
+        last_opcode: None,
+        stopped,
+        strings: Vec::new(),
+        ge_key_imms: Vec::new(),
+        ops: Vec::new(),
+        hw_tags: Vec::new(),
+        profile_tags: Vec::new(),
+        profile_error,
+    }
+}
+
+/// Linear skip-harvest using an explicitly bound, statically extracted profile.
+///
+/// Validation occurs before the first opcode byte is consumed. A profile cannot
+/// be selected by fetch constants alone: callers must supply the SHA-256 of the
+/// current executed script separately from the profile JSON.
+pub fn skip_harvest_with_profile(
+    bytecode: &[u8],
+    params: FetchParams,
+    profile: &VmSkipProfile,
+    observed_source_sha256: &str,
+) -> SkipHarvest {
+    if let Err(error) = profile.validate_for(params, observed_source_sha256) {
+        return empty_harvest(params, "profile_mismatch", Some(error.reason));
+    }
+    skip_harvest_impl(bytecode, params, Some(profile))
+}
+
+/// Linear skip-harvest from `params.init_pc` / `init_key` using historical
+/// built-in snapshots. Skips immediates without apply and never takes jumps.
+///
+/// The 40954 HTML candidate deliberately has no implicit built-in selection;
+/// it requires [`skip_harvest_with_profile`].
 pub fn skip_harvest_strings(bytecode: &[u8], params: FetchParams) -> SkipHarvest {
+    if is_40954_fetch(params) {
+        return empty_harvest(
+            params,
+            "profile_required",
+            Some("40954 semantics require an explicit source-bound profile".into()),
+        );
+    }
+    skip_harvest_impl(bytecode, params, None)
+}
+
+fn skip_harvest_impl(
+    bytecode: &[u8],
+    params: FetchParams,
+    profile: Option<&VmSkipProfile>,
+) -> SkipHarvest {
     let mut cur = Cursor {
         bytecode,
         params,
@@ -800,7 +931,7 @@ pub fn skip_harvest_strings(bytecode: &[u8], params: FetchParams) -> SkipHarvest
     let mut ge_key_imms = Vec::new();
     let mut ops = Vec::new();
     let mut hw_tags = Vec::new();
-    let mut bg_tags = Vec::new();
+    let mut profile_tags = Vec::new();
     let mut instructions = 0usize;
     let mut last_pc = params.init_pc;
     let mut last_opcode = None;
@@ -823,10 +954,19 @@ pub fn skip_harvest_strings(bytecode: &[u8], params: FetchParams) -> SkipHarvest
         last_opcode = Some(op);
         ops.push((last_pc, op));
         instructions += 1;
-        let result = if uses_5886_skip(params) {
+        let result = if let Some(profile) = profile {
+            match profile.handler(op) {
+                Some(handler) => skip_profile_handler(
+                    &mut cur,
+                    handler,
+                    last_pc,
+                    &mut strings,
+                    &mut profile_tags,
+                ),
+                None => Err("unknown_handler"),
+            }
+        } else if uses_5886_skip(params) {
             skip_mapped_5886(&mut cur, op, last_pc, &mut strings, &mut hw_tags)
-        } else if uses_40954_skip(params) {
-            skip_mapped_40954(&mut cur, op, last_pc, &mut strings, &mut bg_tags)
         } else if op == XF_OPCODE {
             skip_xf(&mut cur, last_pc, &mut strings)
         } else if op == GC_OPCODE {
@@ -852,7 +992,6 @@ pub fn skip_harvest_strings(bytecode: &[u8], params: FetchParams) -> SkipHarvest
                 ("unparsed_jump", _) => "unparsed_jump",
                 ("unparsed_variable", _) => "unparsed_variable",
                 ("xf_unskipped_tag", _) => "xf_unskipped_tag",
-                ("bg_unskipped_tag", _) => "bg_unskipped_tag",
                 other => other.0,
             };
             break;
@@ -869,7 +1008,8 @@ pub fn skip_harvest_strings(bytecode: &[u8], params: FetchParams) -> SkipHarvest
         ge_key_imms,
         ops,
         hw_tags,
-        bg_tags,
+        profile_tags,
+        profile_error: None,
     }
 }
 
@@ -890,9 +1030,13 @@ mod tests {
     use crate::solver::fo_followup_json::{FOLLOWUP_EXTRA_IDENT_B, FOLLOWUP_UNSEEN_EXTRA_IDENT_B};
     use crate::solver::run_program::unpack_packed_run_program;
     use crate::solver::run_program_ops::XF_TAG_XOR;
+    use crate::solver::run_program_profile::{
+        VM_SKIP_PROFILE_SCHEMA_VERSION, VmHandlerProfile, VmProfileFetch, VmSkipProfile,
+        VmSkipSpec, VmTagPayload, VmTagProfile, VmTaggedOperandOrder, source_sha256_hex,
+    };
     use crate::solver::run_program_vm::{
-        encode_byte, next_key, verify_oracle_tuple, FetchParams, FETCH_BRANCH_B_LATE,
-        FETCH_CHROME_2026_08_22_B_5886, FETCH_HTML_40954_UNVERIFIED, FETCH_LIVE,
+        FETCH_BRANCH_B_LATE, FETCH_CHROME_2026_08_22_B_5886, FETCH_HTML_40954_UNVERIFIED,
+        FETCH_LIVE, FetchParams, encode_byte, next_key, verify_oracle_tuple,
     };
 
     fn push_op(buf: &mut Vec<u8>, key: &mut u8, opcode: u8) {
@@ -910,6 +1054,116 @@ mod tests {
         for b in text.bytes() {
             push_imm(buf, key, extra, b);
         }
+    }
+
+    fn bg_40954_tagged_spec() -> VmSkipSpec {
+        let none = |tag| VmTagProfile {
+            tag,
+            payload: VmTagPayload::None,
+        };
+        VmSkipSpec::TaggedLoad {
+            operand_order: VmTaggedOperandOrder::TagThenDst,
+            tag_xor: BG_40954_TAG_XOR,
+            dst_xor: BG_40954_DST_XOR,
+            tags: vec![
+                VmTagProfile {
+                    tag: BG_40954_TAG_FLOAT,
+                    payload: VmTagPayload::FixedReads {
+                        extra_xors: vec![0; 8],
+                    },
+                },
+                VmTagProfile {
+                    tag: BG_40954_TAG_REGEXP,
+                    payload: VmTagPayload::Regexp {
+                        pattern_length_byte_xor: 0,
+                        pattern_char_xor: BG_40954_REGEXP_CHARSET_A,
+                        flags_length_xor: BG_40954_REGEXP_FLAGS_LEN_XOR,
+                        flags_char_xor: BG_40954_REGEXP_CHARSET_B,
+                    },
+                },
+                none(BG_40954_TAG_UNDEF),
+                VmTagProfile {
+                    tag: BG_40954_TAG_STRING,
+                    payload: VmTagPayload::String {
+                        length_byte_xor: 0,
+                        char_xor: BG_40954_STRING_CHARSET_XOR,
+                    },
+                },
+                VmTagProfile {
+                    tag: BG_40954_TAG_INT,
+                    payload: VmTagPayload::FixedReads {
+                        extra_xors: vec![BG_40954_INT_XOR],
+                    },
+                },
+                VmTagProfile {
+                    tag: BG_40954_TAG_BYTES,
+                    payload: VmTagPayload::Bytes {
+                        length_byte_xor: 0,
+                        char_xor: BG_40954_BYTES_CHARSET_XOR,
+                    },
+                },
+                none(BG_40954_TAG_TRUE),
+                VmTagProfile {
+                    tag: BG_40954_TAG_LEB,
+                    payload: VmTagPayload::Leb { byte_xor: 0 },
+                },
+                none(BG_40954_TAG_NUMBER_A),
+                none(BG_40954_TAG_NUMBER_B),
+                none(BG_40954_TAG_NULL),
+                VmTagProfile {
+                    tag: BG_40954_TAG_PACKED,
+                    payload: VmTagPayload::FixedReads {
+                        extra_xors: vec![0, 0, 0, BG_40954_PACKED_KEY_XOR],
+                    },
+                },
+                none(BG_40954_TAG_FALSE),
+            ],
+        }
+    }
+
+    fn test_40954_profile(source: &[u8], include_leb_table: bool) -> VmSkipProfile {
+        let source_sha256 = source_sha256_hex(source);
+        let handlers = SWITCH_OPCODES_40954
+            .iter()
+            .copied()
+            .map(|opcode| {
+                let spec = if opcode == BG_40954_OPCODE {
+                    bg_40954_tagged_spec()
+                } else if opcode == 167 && include_leb_table {
+                    VmSkipSpec::LebTable {
+                        count_byte_xor: 0,
+                        index_byte_xor: 0,
+                        max_count: 1_048_576,
+                    }
+                } else if JUMP_OPCODES_40954.contains(&opcode) {
+                    VmSkipSpec::JumpStop {
+                        reason: "current handler writes the program counter".into(),
+                    }
+                } else {
+                    VmSkipSpec::Unknown {
+                        reason: "test profile has no proven recognizer".into(),
+                    }
+                };
+                VmHandlerProfile {
+                    opcode,
+                    handler_label: format!("handler_{opcode}"),
+                    handler_fingerprint: source_sha256_hex(
+                        format!("normalized-handler-{opcode}-{spec:?}").as_bytes(),
+                    ),
+                    spec,
+                }
+            })
+            .collect();
+        let mut profile = VmSkipProfile {
+            schema_version: VM_SKIP_PROFILE_SCHEMA_VERSION,
+            source_sha256,
+            semantic_fingerprint: "0".repeat(64),
+            fetch: VmProfileFetch::from_params(FETCH_HTML_40954_UNVERIFIED),
+            switch_opcodes: SWITCH_OPCODES_40954.to_vec(),
+            handlers,
+        };
+        profile.semantic_fingerprint = profile.computed_semantic_fingerprint().unwrap();
+        profile
     }
 
     #[test]
@@ -1047,6 +1301,8 @@ mod tests {
             init_pc: 0,
             ..FETCH_HTML_40954_UNVERIFIED
         };
+        let source = b"synthetic 40954 executed JS";
+        let profile = test_40954_profile(source, false);
         let mut buf = Vec::new();
         let mut key = params.init_key;
         buf.push(encode_byte(params, key, BG_40954_OPCODE));
@@ -1062,13 +1318,24 @@ mod tests {
         for b in text.bytes() {
             buf.push(encode_byte(params, key, b ^ BG_40954_STRING_CHARSET_XOR));
         }
-        let h = skip_harvest_strings(&buf, params);
+        let implicit = skip_harvest_strings(&buf, params);
+        assert_eq!(implicit.stopped, "profile_required");
+        assert_eq!(implicit.instructions, 0);
+        assert_eq!(implicit.last_opcode, None);
+
+        let mismatched =
+            skip_harvest_with_profile(&buf, params, &profile, &source_sha256_hex(b"other JS"));
+        assert_eq!(mismatched.stopped, "profile_mismatch");
+        assert_eq!(mismatched.instructions, 0);
+        assert_eq!(mismatched.last_opcode, None);
+
+        let h = skip_harvest_with_profile(&buf, params, &profile, &source_sha256_hex(source));
         assert_eq!(h.params_label, FETCH_HTML_40954_UNVERIFIED.label);
         assert_eq!(h.last_opcode, Some(BG_40954_OPCODE));
         assert_eq!(h.strings.len(), 1);
         assert_eq!(h.strings[0].text, text);
-        assert_eq!(h.strings[0].handler, "bg");
-        assert_eq!(h.bg_tags, vec![(0, BG_40954_TAG_STRING)]);
+        assert_eq!(h.strings[0].handler, "handler_181");
+        assert_eq!(h.profile_tags, vec![(0, BG_40954_TAG_STRING)]);
         assert_eq!(h.stopped, "end_of_bytecode");
         assert_eq!(FETCH_LIVE.key_mul, 56_907);
         assert_ne!(params.key_mul, FETCH_LIVE.key_mul);
@@ -1444,6 +1711,7 @@ mod tests {
         let html_fetch = FETCH_HTML_40954_UNVERIFIED;
         assert_ne!(html_fetch.key_mul, FETCH_LIVE.key_mul);
         assert_ne!(html_fetch.key_mul, FETCH_CHROME_2026_08_22_B_5886.key_mul);
+        let profile = test_40954_profile(js.as_bytes(), false);
         let ray = std::fs::read_to_string(ray_path).unwrap();
         let ray = ray.trim();
         let body = std::fs::read_to_string(resp_path).unwrap();
@@ -1465,7 +1733,11 @@ mod tests {
             .copied()
             .filter(|n| packed.contains(n))
             .collect();
-        let h = skip_harvest_strings(&bc, html_fetch);
+        let implicit = skip_harvest_strings(&bc, html_fetch);
+        assert_eq!(implicit.stopped, "profile_required");
+        assert_eq!(implicit.instructions, 0);
+        let h =
+            skip_harvest_with_profile(&bc, html_fetch, &profile, &source_sha256_hex(js.as_bytes()));
         let texts: Vec<&str> = h.strings.iter().map(|s| s.text.as_str()).collect();
         let leftover_hits: Vec<&str> = FOLLOWUP_UNSEEN_EXTRA_IDENT_B
             .iter()
@@ -1473,13 +1745,13 @@ mod tests {
             .filter(|n| h.contains_ident(n))
             .collect();
         eprintln!(
-            "leftover1 40954 skip-harvest stopped={} last_pc={} last_op={:?} instr={} strings={} leftover={leftover_hits:?} packed_leftover={packed_leftover:?} texts={texts:?} bg_tags={:?} bc_len={}",
+            "leftover1 40954 skip-harvest stopped={} last_pc={} last_op={:?} instr={} strings={} leftover={leftover_hits:?} packed_leftover={packed_leftover:?} texts={texts:?} profile_tags={:?} bc_len={}",
             h.stopped,
             h.last_pc,
             h.last_opcode,
             h.instructions,
             h.strings.len(),
-            h.bg_tags,
+            h.profile_tags,
             bc.len()
         );
         assert_eq!(h.params_label, html_fetch.label);
@@ -1487,7 +1759,7 @@ mod tests {
             texts.contains(&"window"),
             "leftover1 bg/181 ident-like strings {texts:?}"
         );
-        assert_eq!(h.stopped, "unmapped_opcode");
+        assert_eq!(h.stopped, "unknown_handler");
         assert_eq!(h.last_opcode, Some(167));
         assert!(
             leftover_hits.is_empty(),
@@ -1502,14 +1774,14 @@ mod tests {
                 && h.last_opcode == Some(BG_40954_OPCODE)
                 && h.stopped != "end_of_bytecode"
                 && h.instructions == 1
-                && h.bg_tags.is_empty()),
+                && h.profile_tags.is_empty()),
             "bg/181 at pc=0 must be skipped; stopped={} instr={} tags={:?}",
             h.stopped,
             h.instructions,
-            h.bg_tags
+            h.profile_tags
         );
         assert!(
-            !h.bg_tags.is_empty() || h.instructions > 1,
+            !h.profile_tags.is_empty() || h.instructions > 1,
             "leftover1 must skip bg/181; stopped={} last_op={:?} instr={}",
             h.stopped,
             h.last_opcode,
@@ -1529,7 +1801,13 @@ mod tests {
             std::path::Path::new("artifacts/re-out/chrome-oracle-leftover4/fo-init-response.txt");
         let ray_path =
             std::path::Path::new("artifacts/re-out/chrome-oracle-leftover4/fo-init-ray.txt");
-        if !oracle_path.is_file() || !resp_path.is_file() || !ray_path.is_file() {
+        let js_path =
+            std::path::Path::new("artifacts/re-out/chrome-oracle-leftover4/executed-fetch-15.js");
+        if !oracle_path.is_file()
+            || !resp_path.is_file()
+            || !ray_path.is_file()
+            || !js_path.is_file()
+        {
             return;
         }
         let oracle: serde_json::Value =
@@ -1543,27 +1821,23 @@ mod tests {
                     .collect()
             })
             .unwrap_or_default();
-        let js_path =
-            std::path::Path::new("artifacts/re-out/chrome-oracle-leftover4/executed-fetch-15.js");
-        if js_path.is_file() {
-            let js = std::fs::read_to_string(js_path).unwrap();
-            assert!(
-                js.contains("case 181:bg["),
-                "leftover4 opcode 181 is bg.call(this)"
-            );
-            assert!(
-                js.contains("^217.96") || js.contains("^217)"),
-                "leftover4 bg tag extra 217.96"
-            );
-            assert!(
-                js.contains(",210)") || js.contains("^210"),
-                "leftover4 bg dst extra 210"
-            );
-            assert!(
-                js.contains("^225.23") || js.contains("^225]"),
-                "leftover4 string charset 225"
-            );
-        }
+        let js = std::fs::read_to_string(js_path).unwrap();
+        assert!(
+            js.contains("case 181:bg["),
+            "leftover4 opcode 181 is bg.call(this)"
+        );
+        assert!(
+            js.contains("^217.96") || js.contains("^217)"),
+            "leftover4 bg tag extra 217.96"
+        );
+        assert!(
+            js.contains(",210)") || js.contains("^210"),
+            "leftover4 bg dst extra 210"
+        );
+        assert!(
+            js.contains("^225.23") || js.contains("^225]"),
+            "leftover4 string charset 225"
+        );
         assert!(
             extra.iter().any(|n| n == "AmbKQ5"),
             "leftover4 extraIdentNow {extra:?}"
@@ -1579,6 +1853,7 @@ mod tests {
         assert_eq!(mul, 40_954);
         assert_ne!(mul, FETCH_LIVE.key_mul as u64);
         let html_fetch = FETCH_HTML_40954_UNVERIFIED;
+        let profile = test_40954_profile(js.as_bytes(), false);
         let ray = std::fs::read_to_string(ray_path).unwrap();
         let ray = ray.trim();
         let body = std::fs::read_to_string(resp_path).unwrap();
@@ -1590,7 +1865,11 @@ mod tests {
         };
         let packed = crate::reverse::encryption::decrypt_cloudflare_response(ray, &padded).unwrap();
         let bc = unpack_packed_run_program(&packed).unwrap();
-        let h = skip_harvest_strings(&bc, html_fetch);
+        let implicit = skip_harvest_strings(&bc, html_fetch);
+        assert_eq!(implicit.stopped, "profile_required");
+        assert_eq!(implicit.instructions, 0);
+        let h =
+            skip_harvest_with_profile(&bc, html_fetch, &profile, &source_sha256_hex(js.as_bytes()));
         let leftover_hits: Vec<&str> = extra
             .iter()
             .map(String::as_str)
@@ -1602,13 +1881,16 @@ mod tests {
             .filter(|n| packed.contains(*n))
             .collect();
         eprintln!(
-            "leftover4 40954 skip-harvest stopped={} last_pc={} last_op={:?} instr={} extra={extra:?} leftover_hits={leftover_hits:?} packed_hits={packed_hits:?} texts={:?} bg_tags={:?} bc_len={}",
+            "leftover4 40954 skip-harvest stopped={} last_pc={} last_op={:?} instr={} extra={extra:?} leftover_hits={leftover_hits:?} packed_hits={packed_hits:?} texts={:?} profile_tags={:?} bc_len={}",
             h.stopped,
             h.last_pc,
             h.last_opcode,
             h.instructions,
-            h.strings.iter().map(|s| s.text.as_str()).collect::<Vec<_>>(),
-            h.bg_tags,
+            h.strings
+                .iter()
+                .map(|s| s.text.as_str())
+                .collect::<Vec<_>>(),
+            h.profile_tags,
             bc.len()
         );
         assert!(
@@ -1628,16 +1910,16 @@ mod tests {
                 .map(|s| s.text.as_str())
                 .collect::<Vec<_>>()
         );
-        assert_eq!(h.stopped, "unmapped_opcode");
+        assert_eq!(h.stopped, "unknown_handler");
         assert_eq!(h.last_opcode, Some(167));
         assert!(
-            !h.bg_tags.is_empty(),
+            !h.profile_tags.is_empty(),
             "leftover4 bg/181 at pc=0 must be skipped; stopped={} last_op={:?} instr={}",
             h.stopped,
             h.last_opcode,
             h.instructions
         );
-        assert_eq!(h.bg_tags[0], (0, h.bg_tags[0].1));
+        assert_eq!(h.profile_tags[0], (0, h.profile_tags[0].1));
         assert!(
             !(h.last_pc == 0
                 && h.last_opcode == Some(BG_40954_OPCODE)

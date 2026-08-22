@@ -9,14 +9,24 @@
 //! cargo run --locked --bin analyze_run_program -- --ray <c_ray> path/to/fo_body.js
 //! cargo run --locked --bin analyze_run_program -- --decode 16 packed.txt
 //! cargo run --locked --bin analyze_run_program -- --skip-harvest packed.txt
+//! cargo run --locked --bin analyze_run_program -- --skip-harvest --skip-profile profile.json --executed-js executed-fetch.js packed.txt
 //! cargo run --locked --bin analyze_run_program -- --oracle scripts/fixtures/headed_chrome_oracle.json
 //! cargo run --locked --bin analyze_run_program -- --verify-case-tuples artifacts/re-out/chrome-oracle-tuples6/oracle.json
 //! ```
 
 use anyhow::{Context, Result, bail};
 use cf::reverse::encryption::decrypt_cloudflare_response;
+use cf::solver::fo_body::{
+    CHARSET_BRANCH_B, body_chars_in_charset, charset_is_well_formed, classify_fo_body_len,
+};
+use cf::solver::fo_followup::{
+    BODY_ENCODER_LIVE_NAME, DEBUG_LOGGER_LIVE_NAME, FoResponseLenBand, LIVE_FO_FOLLOWUP,
+    LIVE_RUN_PROGRAM_RETURN, SEND_HELPER_LIVE_NAME, classify_fo_response_len,
+};
+use cf::solver::fo_init_json::{
+    INIT_JSON_KEY_COUNT, INIT_JSON_KEYS_B, LIVE_FO_INIT_JSON, keys_match_snapshot,
+};
 use cf::solver::run_program::unpack_packed_run_program;
-use cf::solver::run_program_skip::skip_harvest_live;
 use cf::solver::run_program_ops::{
     CALL_IMM_ROLES_B_LATE, DN_OPCODE, DN_TAG_STRING, HANDLER_LAYOUT_B_LATE, JUMP_IMM_ROLES_B_LATE,
     LATE_DIRECT_HANDLER_COUNT, LEB_OBJECT_ROLES_B_LATE, PROPERTY_IMM_ROLES_B_LATE, S1_CASES_B_LATE,
@@ -24,23 +34,14 @@ use cf::solver::run_program_ops::{
     XF_TAG_STRING, XI_TYPE_CASES, XP_TAG_CASES, classify_pc_delta, classify_pc_delta_late,
     first_dn_tag_b, first_xf_tag_late, operand_from_byte,
 };
+use cf::solver::run_program_profile::{VmSkipProfile, source_sha256_hex};
+use cf::solver::run_program_skip::{skip_harvest_live, skip_harvest_with_profile};
 use cf::solver::run_program_vm::{
-    FETCH_BRANCH_B, FETCH_LIVE, FetchParams, naive_one_byte_fetches, opcode_def_in,
-    next_key, params_for_magic, params_from_oracle_fetch, verify_oracle_tuple,
-    verify_oracle_tuple_next_key,
-};
-use cf::solver::fo_body::{
-    CHARSET_BRANCH_B, body_chars_in_charset, charset_is_well_formed, classify_fo_body_len,
-};
-use cf::solver::fo_followup::{
-    BODY_ENCODER_LIVE_NAME, DEBUG_LOGGER_LIVE_NAME, LIVE_FO_FOLLOWUP, LIVE_RUN_PROGRAM_RETURN,
-    SEND_HELPER_LIVE_NAME, classify_fo_response_len, FoResponseLenBand,
-};
-use cf::solver::fo_init_json::{
-    INIT_JSON_KEY_COUNT, INIT_JSON_KEYS_B, LIVE_FO_INIT_JSON, keys_match_snapshot,
+    FETCH_BRANCH_B, FETCH_LIVE, FetchParams, naive_one_byte_fetches, next_key, opcode_def_in,
+    params_for_magic, params_from_oracle_fetch, verify_oracle_tuple, verify_oracle_tuple_next_key,
 };
 use cf::{
-    analyze_fo_body, analyze_packed_run_program, compare_chrome_and_crate_fo_post, LIVE_FO_WRAPPER,
+    LIVE_FO_WRAPPER, analyze_fo_body, analyze_packed_run_program, compare_chrome_and_crate_fo_post,
 };
 use serde_json::{Value, json};
 use std::env;
@@ -67,6 +68,8 @@ fn run() -> Result<Value> {
     let mut oracle: Option<PathBuf> = None;
     let mut case_tuples: Option<PathBuf> = None;
     let mut skip_harvest = false;
+    let mut skip_profile: Option<PathBuf> = None;
+    let mut executed_js: Option<PathBuf> = None;
     let mut files = Vec::<PathBuf>::new();
     let mut args = env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -81,10 +84,21 @@ fn run() -> Result<Value> {
             ));
         } else if arg == "--verify-case-tuples" {
             case_tuples = Some(PathBuf::from(
-                args.next().context("--verify-case-tuples needs an oracle.json path")?,
+                args.next()
+                    .context("--verify-case-tuples needs an oracle.json path")?,
             ));
         } else if arg == "--skip-harvest" {
             skip_harvest = true;
+        } else if arg == "--skip-profile" {
+            skip_profile = Some(PathBuf::from(
+                args.next()
+                    .context("--skip-profile needs a profile.json path")?,
+            ));
+        } else if arg == "--executed-js" {
+            executed_js = Some(PathBuf::from(
+                args.next()
+                    .context("--executed-js needs a captured script path")?,
+            ));
         } else if arg.starts_with('-') {
             bail!("unknown flag {arg}");
         } else {
@@ -99,9 +113,27 @@ fn run() -> Result<Value> {
         return verify_case_tuples_file(&path);
     }
 
-        if files.is_empty() {
-        bail!("usage: analyze_run_program [--ray <c_ray>] [--decode N] [--skip-harvest] [--oracle json] [--verify-case-tuples oracle.json] <file>...");
+    if files.is_empty() {
+        bail!(
+            "usage: analyze_run_program [--ray <c_ray>] [--decode N] [--skip-harvest [--skip-profile profile.json --executed-js executed.js]] [--oracle json] [--verify-case-tuples oracle.json] <file>..."
+        );
     }
+
+    let profile_binding = match (skip_profile, executed_js) {
+        (Some(profile_path), Some(js_path)) => {
+            if !skip_harvest {
+                bail!("--skip-profile requires --skip-harvest");
+            }
+            let raw = fs::read_to_string(&profile_path)
+                .with_context(|| profile_path.display().to_string())?;
+            let profile =
+                VmSkipProfile::from_json_str(&raw).map_err(|e| anyhow::anyhow!(e.to_string()))?;
+            let source = fs::read(&js_path).with_context(|| js_path.display().to_string())?;
+            Some((profile, source_sha256_hex(&source), js_path))
+        }
+        (None, None) => None,
+        _ => bail!("--skip-profile and --executed-js must be provided together"),
+    };
 
     let mut reports = Vec::new();
     for path in files {
@@ -129,7 +161,16 @@ fn run() -> Result<Value> {
         });
         if skip_harvest && analysis.decode_ok {
             let bytecode = unpack_packed_run_program(&packed)?;
-            let h = skip_harvest_live(&bytecode);
+            let h = if let Some((profile, source_sha256, _)) = &profile_binding {
+                skip_harvest_with_profile(
+                    &bytecode,
+                    profile.fetch.to_params("dynamic-vm-profile"),
+                    profile,
+                    source_sha256,
+                )
+            } else {
+                skip_harvest_live(&bytecode)
+            };
             let extra: Vec<&str> = cf::FOLLOWUP_EXTRA_IDENT_B
                 .iter()
                 .copied()
@@ -151,11 +192,21 @@ fn run() -> Result<Value> {
                 "geKeyImm1to39": h.ge_key_imms.iter().any(|k| (1..=39).contains(k)),
                 "extraIdentHits": extra,
                 "unseenIdentHits": unseen,
+                "profileError": h.profile_error,
             });
+            if let Some((profile, _, js_path)) = &profile_binding {
+                row["skipHarvest"]["profile"] = json!({
+                    "executedJs": js_path.display().to_string(),
+                    "sourceSha256": profile.source_sha256,
+                    "semanticFingerprint": profile.semantic_fingerprint,
+                    "switchCaseCount": profile.switch_opcodes.len(),
+                });
+            }
         }
         if decode_n > 0 && analysis.decode_ok {
             let bytecode = unpack_packed_run_program(&packed)?;
-            let (params, table) = params_for_magic(&bytecode).unwrap_or((FETCH_LIVE, cf::solver::run_program_vm::OPCODE_TABLE));
+            let (params, table) = params_for_magic(&bytecode)
+                .unwrap_or((FETCH_LIVE, cf::solver::run_program_vm::OPCODE_TABLE));
             let stream = naive_one_byte_fetches(&bytecode, params, table, decode_n);
             let fetches: Vec<Value> = stream
                 .fetches
@@ -203,7 +254,10 @@ const HTML_CANDIDATE_23196: FetchParams = FetchParams {
 };
 
 fn row_has_op_byte(f: &Value) -> bool {
-    let op = f.get("op").or_else(|| f.get("caseOp")).and_then(|x| x.as_u64());
+    let op = f
+        .get("op")
+        .or_else(|| f.get("caseOp"))
+        .and_then(|x| x.as_u64());
     let byte = f.get("byte").and_then(|x| x.as_u64());
     op.is_some() && byte.is_some()
 }
@@ -477,12 +531,18 @@ fn verify_oracle_file(path: &PathBuf) -> Result<Value> {
     if let Some(late) = v.get("laterSameDay") {
         let late_fetch = late.get("fetch").cloned().unwrap_or(late.clone());
         if let Some(lp) = params_from_oracle_fetch(
-            late_fetch.get("init_key").and_then(|x| x.as_u64()).unwrap_or(0) as u8,
+            late_fetch
+                .get("init_key")
+                .and_then(|x| x.as_u64())
+                .unwrap_or(0) as u8,
             late_fetch
                 .get("byte_bias")
                 .and_then(|x| x.as_u64())
                 .unwrap_or(0) as u8,
-            late_fetch.get("key_mul").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
+            late_fetch
+                .get("key_mul")
+                .and_then(|x| x.as_u64())
+                .unwrap_or(0) as u32,
         ) {
             let lf = late
                 .get("fetches")
@@ -519,11 +579,15 @@ fn verify_oracle_file(path: &PathBuf) -> Result<Value> {
                 ];
                 for (key, op, width) in checks {
                     if widths.get(key).and_then(|x| x.as_i64()) != Some(i64::from(width)) {
-                        errors.push(format!("laterSameDay.chromeStableWidths.{key} should be {width}"));
+                        errors.push(format!(
+                            "laterSameDay.chromeStableWidths.{key} should be {width}"
+                        ));
                     }
                     let row = classify_pc_delta_late(op, width);
                     if row.matches_fixed != Some(true) {
-                        errors.push(format!("late opcode {op} width {width} does not match layout"));
+                        errors.push(format!(
+                            "late opcode {op} width {width} does not match layout"
+                        ));
                     }
                 }
             }
@@ -690,7 +754,10 @@ fn verify_oracle_file(path: &PathBuf) -> Result<Value> {
                 if fu.get("plaintextKind").and_then(|x| x.as_str())
                     != Some("compressed_blob_after_runProgram")
                 {
-                    errors.push("foFollowUp.plaintextKind should be compressed_blob_after_runProgram".into());
+                    errors.push(
+                        "foFollowUp.plaintextKind should be compressed_blob_after_runProgram"
+                            .into(),
+                    );
                 }
                 if fu.get("notPackedProgram") != Some(&Value::Bool(true)) {
                     errors.push("foFollowUp.notPackedProgram should be true".into());
@@ -713,13 +780,18 @@ fn verify_oracle_file(path: &PathBuf) -> Result<Value> {
                     errors.push("foFollowUp.invokeIfFn mismatch".into());
                 }
                 if LIVE_FO_FOLLOWUP.send_helper != SEND_HELPER_LIVE_NAME {
-                    errors.push("LIVE_FO_FOLLOWUP.send_helper should match SEND_HELPER_LIVE_NAME".into());
+                    errors.push(
+                        "LIVE_FO_FOLLOWUP.send_helper should match SEND_HELPER_LIVE_NAME".into(),
+                    );
                 }
                 if let Some(lens) = fu.get("chromeLens").and_then(|x| x.as_array()) {
                     for (i, n) in lens.iter().enumerate() {
                         let len = n.as_u64().unwrap_or(0) as usize;
-                        if classify_fo_body_len(len) != cf::solver::fo_body::FoBodyLenBand::FollowUp {
-                            errors.push(format!("foFollowUp.chromeLens[{i}]={len} not follow-up band"));
+                        if classify_fo_body_len(len) != cf::solver::fo_body::FoBodyLenBand::FollowUp
+                        {
+                            errors.push(format!(
+                                "foFollowUp.chromeLens[{i}]={len} not follow-up band"
+                            ));
                         }
                     }
                 }
@@ -727,7 +799,8 @@ fn verify_oracle_file(path: &PathBuf) -> Result<Value> {
                     for (i, n) in lens.iter().enumerate() {
                         let len = n.as_u64().unwrap_or(0) as usize;
                         if classify_fo_response_len(len) != FoResponseLenBand::FollowUpAck {
-                            errors.push(format!("foFollowUp.chromeRespLens[{i}]={len} not ack band"));
+                            errors
+                                .push(format!("foFollowUp.chromeRespLens[{i}]={len} not ack band"));
                         }
                     }
                 }
@@ -777,7 +850,10 @@ fn verify_oracle_file(path: &PathBuf) -> Result<Value> {
                         if row.get("name").and_then(|x| x.as_str()) != Some(src.name)
                             || row.get("html").and_then(|x| x.as_str()) != Some(src.html)
                         {
-                            errors.push(format!("foFollowUpJson.extraIdentHtml.{} mismatch", src.name));
+                            errors.push(format!(
+                                "foFollowUpJson.extraIdentHtml.{} mismatch",
+                                src.name
+                            ));
                         }
                     }
                 }
@@ -809,7 +885,9 @@ fn verify_oracle_file(path: &PathBuf) -> Result<Value> {
                 }
                 if fj.get("numericSlotKind").and_then(|x| x.as_str()) == Some("object") {
                     if fj.get("numericSlotKeyCountMin").and_then(|x| x.as_u64())
-                        != Some(u64::from(cf::solver::fo_followup_json::FOLLOWUP_NUMERIC_SLOT_KEYCOUNT_MIN_B))
+                        != Some(u64::from(
+                            cf::solver::fo_followup_json::FOLLOWUP_NUMERIC_SLOT_KEYCOUNT_MIN_B,
+                        ))
                     {
                         errors.push("foFollowUpJson.numericSlotKeyCountMin mismatch".into());
                     }
@@ -837,7 +915,10 @@ fn verify_oracle_file(path: &PathBuf) -> Result<Value> {
                     {
                         errors.push("packedHarvest.packedPrefix mismatch".into());
                     }
-                    if ph.get("unseenIdentHits").and_then(|x| x.as_array()).map(|a| a.len())
+                    if ph
+                        .get("unseenIdentHits")
+                        .and_then(|x| x.as_array())
+                        .map(|a| a.len())
                         != Some(0)
                     {
                         errors.push("packedHarvest.unseenIdentHits should be empty".into());
@@ -848,7 +929,10 @@ fn verify_oracle_file(path: &PathBuf) -> Result<Value> {
                         .iter()
                         .filter_map(|x| x.as_str().map(str::to_string))
                         .collect();
-                    let numeric = fj.get("numericKeyCount").and_then(|x| x.as_u64()).unwrap_or(0) as usize;
+                    let numeric = fj
+                        .get("numericKeyCount")
+                        .and_then(|x| x.as_u64())
+                        .unwrap_or(0) as usize;
                     if names.len() >= 40
                         && cf::solver::fo_followup_json::classify_fo_plaintext(
                             &names,
@@ -856,7 +940,8 @@ fn verify_oracle_file(path: &PathBuf) -> Result<Value> {
                             INIT_JSON_KEYS_B,
                         ) != cf::solver::fo_followup_json::FoPlaintextKind::FollowUp
                     {
-                        errors.push("foFollowUpJson.identKeys did not classify as follow-up".into());
+                        errors
+                            .push("foFollowUpJson.identKeys did not classify as follow-up".into());
                     }
                 }
             }
