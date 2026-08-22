@@ -66,6 +66,7 @@ const PREAMBLE = `(() => {
   globalThis.__cfFo = globalThis.__cfFo || [];
   globalThis.__cfWrites = globalThis.__cfWrites || [];
   const __cfDefProp = Object.defineProperty;
+  const __cfWatched = typeof WeakSet === "function" ? new WeakSet() : { add: function () {}, has: function () { return false; } };
   const __cfLeftover = {
     OQbM0:1, UjLjP6:1, YfDjo7:1, Iqrc9:1, OZgbm6:1, pFyv1:1, SfUI1:1,
     sqKXG6:1, HUDi4:1, DTBF3:1, mQiic7:1, gNcr3:1
@@ -108,41 +109,59 @@ const PREAMBLE = `(() => {
       });
     } catch (e) {}
   }
-  function __cfWatchInit(initObj) {
+  function __cfInstallWatch(obj) {
+    if (!obj || typeof obj !== "object") return;
+    try {
+      if (__cfWatched.has(obj)) return;
+      __cfWatched.add(obj);
+    } catch (e) { return; }
+    for (const name in __cfLeftover) {
+      if (Object.prototype.hasOwnProperty.call(obj, name)) continue;
+      (function (n) {
+        let cur;
+        try {
+          __cfDefProp(obj, n, {
+            configurable: true,
+            enumerable: true,
+            get: function () { return cur; },
+            set: function (v) {
+              __cfLogWrite(n, v, "set");
+              cur = v;
+              try {
+                __cfDefProp(obj, n, {
+                  configurable: true,
+                  enumerable: true,
+                  writable: true,
+                  value: v
+                });
+              } catch (e2) {}
+            }
+          });
+        } catch (e) {}
+      })(name);
+    }
     const baseline = Object.create(null);
     try {
-      const keys = Object.keys(initObj || {});
+      const keys = Object.keys(obj);
       for (let i = 0; i < keys.length; i++) baseline[keys[i]] = 1;
     } catch (e) {}
-    function interesting(k) {
-      const s = String(k);
-      if (__cfLeftover[s] || s === "MaOkK2") return true;
-      if (/^\\d+$/.test(s)) return true;
-      return !baseline[s];
-    }
-    function log(k, v, via) {
-      if (!interesting(k)) return;
-      __cfLogWrite(k, v, via);
-    }
-    let proxy = initObj;
-    try {
-      proxy = new Proxy(initObj, {
-        set: function (t, p, v) {
-          log(p, v, "set");
-          t[p] = v;
-          return true;
-        },
-        defineProperty: function (t, p, desc) {
-          log(p, desc && ("value" in desc) ? desc.value : undefined, "defineProperty");
-          return __cfDefProp(t, p, desc);
-        },
-        deleteProperty: function (t, p) {
-          log(p, undefined, "delete");
-          return delete t[p];
+    const start = Date.now();
+    const poll = setInterval(function () {
+      try {
+        const keys = Object.keys(obj);
+        for (let i = 0; i < keys.length; i++) {
+          const k = keys[i];
+          if (__cfLeftover[k] || /^\\d+$/.test(k) || !baseline[k]) {
+            __cfLogWrite(k, obj[k], "poll");
+            baseline[k] = 1;
+          }
         }
-      });
-    } catch (e) {}
-    return { proxy: proxy, baseline: baseline, log: log, interesting: interesting };
+        if (baseline["MaOkK2"] && !Object.prototype.hasOwnProperty.call(obj, "MaOkK2")) {
+          __cfLogWrite("MaOkK2", undefined, "delete");
+        }
+        if (Date.now() - start > 12000) clearInterval(poll);
+      } catch (e) { clearInterval(poll); }
+    }, 5);
   }
   function __cfShape(obj, via) {
     if (!obj || typeof obj !== "object" || Array.isArray(obj)) return null;
@@ -233,6 +252,13 @@ const PREAMBLE = `(() => {
             const s = __cfShape(arguments[i], "setTimeout");
             if (s && globalThis.__cfFo.length < 12) globalThis.__cfFo.push(s);
           }
+          const orig = fn;
+          fn = function () {
+            const obj = arguments.length > 1 ? arguments[1] : undefined;
+            const r = orig.apply(this, arguments);
+            try { if (obj && typeof obj === "object") __cfInstallWatch(obj); } catch (e) {}
+            return r;
+          };
         }
       } catch {}
       return st.apply(this, arguments);
@@ -261,23 +287,14 @@ const PREAMBLE = `(() => {
         const ret = v.apply(this, arguments);
         if (typeof ret === "function") {
           return function (initObj, sendFn) {
-            let watched = { proxy: initObj, baseline: {}, log: function () {}, interesting: function () { return false; } };
-            try { watched = __cfWatchInit(initObj); } catch (e) {}
             try {
               const s0 = __cfShape(initObj, "rpReturn");
               if (s0 && globalThis.__cfFo.length < 12) globalThis.__cfFo.push(s0);
+              try { __cfInstallWatch(initObj); } catch (e) {}
               let last = s0 && s0.keyCount;
               const start = Date.now();
               const poll = setInterval(function () {
                 try {
-                  const keys = Object.keys(initObj || {});
-                  for (let i = 0; i < keys.length; i++) {
-                    const k = keys[i];
-                    if (watched.interesting(k)) watched.log(k, initObj[k], "poll");
-                  }
-                  if (watched.baseline["MaOkK2"] && !Object.prototype.hasOwnProperty.call(initObj, "MaOkK2")) {
-                    watched.log("MaOkK2", undefined, "delete");
-                  }
                   const s = __cfShape(initObj, "rpMutate");
                   if (s && s.keyCount !== last && (s.numericKeyCount > 0 || s.keyCount > (last || 0))) {
                     last = s.keyCount;
@@ -289,25 +306,7 @@ const PREAMBLE = `(() => {
                 }
               }, 25);
             } catch {}
-            let defOk = false;
-            try {
-              Object.defineProperty = function (obj, prop, desc) {
-                try {
-                  if (obj === initObj || obj === watched.proxy) {
-                    watched.log(prop, desc && ("value" in desc) ? desc.value : undefined, "defineProperty");
-                  }
-                } catch (e) {}
-                return __cfDefProp.apply(this, arguments);
-              };
-              defOk = true;
-            } catch (e) {}
-            try {
-              return ret.call(this, watched.proxy, sendFn);
-            } finally {
-              if (defOk) {
-                try { Object.defineProperty = __cfDefProp; } catch (e) {}
-              }
-            }
+            return ret.apply(this, arguments);
           };
         }
         return ret;
@@ -345,6 +344,7 @@ function fetchSnippet(html) {
     "I*I*8904",
     "*8904,",
     "14792",
+    "39695",
     "56907",
     "36163)+38392",
     "19663)+36376",
@@ -368,19 +368,52 @@ function extractFetchQuadratic(html) {
   const sq = window.match(
     /(\w+)\*\1\*(\d{4,5}),[\s\S]{0,96}?\(\1,(\d{4,5})\)\)\+(\d{4,5}),255/,
   );
+  const sqPlus = window.match(
+    /(\w+)\*\1\*(\d{4,5})\+[\s\S]{0,96}?\(\1,(\d{4,5})\)\+(\d{4,5}),255/,
+  );
   const alt = window.match(
     /(\d{4,5})\*\((\w+)\*\2\)\+[\s\S]{0,96}?\(\2,(\d{4,5})\),(\d{4,5})\)&255/,
   );
+  const mulStar = window.match(
+    /(\d{4,5})\*\((\w+)\*\2\),(\2)\*(\d{4,5})\)\+(\d{4,5}),255/,
+  );
   const biasM = window.match(/\]-(\d{2,3}),256\)&255/);
+  const biasAdd = window.match(/\[(\w+)\],(\d{2,3})\)\+256/);
   const caseM = window.match(/\{case (\d+):/);
-  if (!sq && !alt) return null;
+  const hit = sq || sqPlus || alt || mulStar;
+  if (!hit) return null;
+  let keyMul;
+  let keyQuadB;
+  let keyAdd;
+  let spelling;
+  if (sq) {
+    keyMul = Number(sq[2]);
+    keyQuadB = Number(sq[3]);
+    keyAdd = Number(sq[4]);
+    spelling = "mix*mix*mul";
+  } else if (sqPlus) {
+    keyMul = Number(sqPlus[2]);
+    keyQuadB = Number(sqPlus[3]);
+    keyAdd = Number(sqPlus[4]);
+    spelling = "mix*mix*mul+";
+  } else if (mulStar) {
+    keyMul = Number(mulStar[1]);
+    keyQuadB = Number(mulStar[4]);
+    keyAdd = Number(mulStar[5]);
+    spelling = "mul*(mix*mix),mix*b";
+  } else {
+    keyMul = Number(alt[1]);
+    keyQuadB = Number(alt[3]);
+    keyAdd = Number(alt[4]);
+    spelling = "mul*(mix*mix)";
+  }
   return {
-    keyMul: sq ? Number(sq[2]) : Number(alt[1]),
-    keyQuadB: sq ? Number(sq[3]) : Number(alt[3]),
-    keyAdd: sq ? Number(sq[4]) : Number(alt[4]),
-    byteBias: biasM ? Number(biasM[1]) : null,
+    keyMul,
+    keyQuadB,
+    keyAdd,
+    byteBias: biasM ? Number(biasM[1]) : biasAdd ? Number(biasAdd[2]) : null,
     firstSwitchCase: caseM ? Number(caseM[1]) : null,
-    spelling: sq ? "mix*mix*mul" : "mul*(mix*mix)",
+    spelling,
     note: "HTML formula only; init_key needs opcode tuples. Not FETCH_LIVE.",
   };
 }
@@ -466,6 +499,22 @@ function injectOpcodeLog(html) {
     (_full, op, st, keySlot, rest, arr) => {
       n++;
       return `${op}=(globalThis.__cfT&&(globalThis.__cfT.key=${st}[${keySlot}]&255,globalThis.__cfT.byte=${arr}[${op}]&255),${st}[${keySlot}])^${rest}`;
+    },
+  );
+  // 39695 try: oF=st[key]^helper(arr[pc],133)+256&255 (pc kept in a second local)
+  out = out.replace(
+    /(\w+)=(\w+)\[(\w+)\]\^([\s\S]{0,96}?\((\w+)\[(\w+)\],(\d{2,3})\)\+256&255)/g,
+    (_full, op, st, keySlot, rest, arr, pcVar) => {
+      n++;
+      return `${op}=(globalThis.__cfT&&(globalThis.__cfT.key=${st}[${keySlot}]&255,globalThis.__cfT.byte=${arr}[${pcVar}]&255),${st}[${keySlot}])^${rest}`;
+    },
+  );
+  // 39695 catch: xor(st[key], and(add(arr[op],133)+256,255))
+  out = out.replace(
+    /(\w+)=(\w+\[[^\]]{0,80}\])\((\w+)\[(\w+)\],(\w+\[[^\]]{0,80}\])\((\w+\[[^\]]{0,80}\])\((\w+)\[\1\],(\d{2,3})\)\+256,255\)\)/g,
+    (_full, op, xorCallee, st, keySlot, andCallee, addCallee, arr, bias) => {
+      n++;
+      return `${op}=(globalThis.__cfT&&(globalThis.__cfT.key=${st}[${keySlot}]&255,globalThis.__cfT.byte=${arr}[${op}]&255),${xorCallee}(${st}[${keySlot}],${andCallee}(${addCallee}(${arr}[${op}],${bias})+256,255)))`;
     },
   );
   // Helper xor: D=xor(st[key], add(arr[D],113)+256&255)
@@ -624,6 +673,29 @@ function injectOpcodeLog(html) {
       n++;
       return logAfterKeyUpdate(
         `${mul}*(${mixVar}*${mixVar})+${mid}(${mixVar},${quadB}),${add})&255`,
+        opVar,
+      );
+    },
+  );
+
+  // 39695 try: mix*mix*39695+helper(mix,3159)+64171,255), op
+  out = out.replace(
+    /(\w+)\*\1\*(\d{4,5})\+([\s\S]{0,120}?)\(\1,(\d{4,5})\)\+(\d{4,5}),255\),(\w+)\)/g,
+    (_full, mixVar, mul, mid, quadB, add, opVar) => {
+      n++;
+      return logAfterKeyUpdate(
+        `${mixVar}*${mixVar}*${mul}+${mid}(${mixVar},${quadB})+${add},255`,
+        opVar,
+      );
+    },
+  );
+  // 39695 catch: 39695*(mix*mix),mix*3159)+64171,255), op
+  out = out.replace(
+    /(\d{4,5})\*\((\w+)\*\2\),(\2)\*(\d{4,5})\)\+(\d{4,5}),255\),(\w+)\)/g,
+    (_full, mul, mixVar, _mix2, quadB, add, opVar) => {
+      n++;
+      return logAfterKeyUpdate(
+        `${mul}*(${mixVar}*${mixVar}),${mixVar}*${quadB})+${add},255`,
         opVar,
       );
     },
@@ -1115,14 +1187,24 @@ const FO_SHAPE_EXPR = `(() => {
     if (typeof arguments !== "undefined") {
       for (let i = 0; i < Math.min(arguments.length, 4); i++) {
         const s = shape(arguments[i], "f4");
-        if (s) return s;
+        if (s) {
+          try {
+            s.writes = (globalThis.__cfWrites || []).slice(0, 80);
+          } catch (e2) {}
+          return s;
+        }
       }
     }
   } catch (e) {}
   try {
     if (typeof a !== "undefined") {
       const s = shape(a, "f4");
-      if (s) return s;
+      if (s) {
+        try {
+          s.writes = (globalThis.__cfWrites || []).slice(0, 80);
+        } catch (e2) {}
+        return s;
+      }
     }
   } catch (e) {}
   return null;
@@ -1223,6 +1305,10 @@ function selfTestInject() {
     "if(QK=Qg[QO],QK!==QK)return Qg[QV];switch(Qg[QO]=Qs[m1(pj.QZ)](QK,1),Qv=Qs[m1(pj.Qx)](Qg[QZ],Qs[m1(pj.jW)](Qs[m1(pj.m)](Qy[QK]-113,256),255)),Qg[QZ]=Qs[m1(pj.jd)](Qs[m1(pj.QU)](Qg[QZ]+Qv,31579),59205)&255.46,Qv){case 104:Yb[m1(pj.Qo)](this);break;}";
   const happyLin31579Plus =
     "if(D=Qg[QO],D!==D)return Qg[QV];switch(Qg[QO]=Qs[m0(pO.m)](D,1),D=Qg[QZ]^Qs[m0(pO.a)](Qs[m0(pO.QO)](Qy[D],113)+256,255),Qg[QZ]=Qs[m0(pO.D)](Qs[m0(pO.I)](Qg[QZ],D),31579)+59205&255.37,D){case 104:Yb[m0(pO.QZ)](this);break;}";
+  const happy39695 =
+    "if(oR=od[oq],oV[UP(Wd.hv)](oR,oR))return od[oj];switch(od[oq]=oR+1,oF=od[oQ]^oV[UP(Wd.oj)](oy[oR],133)+256&255,ok=od[oQ]+oF,od[oQ]=oV[UP(Wd.hc)](ok*ok*39695+oV[UP(Wd.hH)](ok,3159)+64171,255),oF){case 79:f9(this);break;}";
+  const catch39695 =
+    "if(H=od[oq],H!==H)return od[oj];switch(od[oq]=H+1,H=oV[UP(Wd.om)](od[oQ],oV[UP(Wd.ou)](oV[UP(Wd.oj)](oy[H],133)+256,255)),C=od[oQ]+H,od[oQ]=oV[UP(Wd.oG)](oV[UP(Wd.oV)](39695*(C*C),C*3159)+64171,255),H){case 79:f9(this);break;}";
   const a = injectOpcodeLog(happyOld);
   const b = injectOpcodeLog(happyLive);
   const c = injectOpcodeLog(catchLive);
@@ -1238,6 +1324,10 @@ function selfTestInject() {
   const lin31579F = extractFetchLinear(happyLin31579);
   const lin31579Plus = injectOpcodeLog(happyLin31579Plus);
   const lin31579PlusF = extractFetchLinear(happyLin31579Plus);
+  const q39695H = injectOpcodeLog(happy39695);
+  const q39695C = injectOpcodeLog(catch39695);
+  const q39695F = extractFetchQuadratic(happy39695);
+  const q39695Fc = extractFetchQuadratic(catch39695);
   const eveFormula = extractFetchQuadratic(happyEve8904);
   let liveEveOk = true;
   let liveEve = null;
@@ -1403,6 +1493,14 @@ function selfTestInject() {
       lin31579PlusF.keyMul === 31579 &&
       lin31579PlusF.keyAdd === 59205 &&
       lin31579PlusF.spelling === "mul)+add&255" &&
+      q39695H.html.includes("__cfOp.push") &&
+      q39695C.html.includes("__cfOp.push") &&
+      q39695F &&
+      q39695F.keyMul === 39695 &&
+      q39695F.keyQuadB === 3159 &&
+      q39695F.keyAdd === 64171 &&
+      q39695Fc &&
+      q39695Fc.keyMul === 39695 &&
       liveEveOk &&
       liveLinOk &&
       extracted === CHARSET_BRANCH_B &&
@@ -1435,7 +1533,7 @@ function selfTestInject() {
       PREAMBLE.includes("rpMutate") &&
       PREAMBLE.includes("setTimeout") &&
       PREAMBLE.includes("__cfWrites") &&
-      PREAMBLE.includes("__cfWatchInit") &&
+      PREAMBLE.includes("__cfInstallWatch") &&
       leftoverHit.leftoverHitCount === 1 &&
       leftoverHit.leftoverHits[0].writePath === "property_set" &&
       leftoverHit.leftoverHits[0].opcode === 227 &&
@@ -1567,7 +1665,7 @@ async function onFetchPaused(session, evt) {
         has19663: text.includes("19663"),
         has36163: text.includes("36163"),
         has56907: text.includes("56907"),
-        has8904: text.includes("8904"),
+        has8904: /(?<!\d)8904(?!\d)/.test(text),
         has232: text.includes("-232"),
         fetchSchedule: extractFetchSchedule(text),
         has36376: text.includes("36376"),
@@ -1673,6 +1771,7 @@ async function attachSession(session, targetInfo, waitingForDebugger) {
           : scriptSource.indexOf("*8904,");
         const idx31579 = scriptSource.indexOf("31579");
         const idx59205 = scriptSource.indexOf("59205");
+        const idx39695 = scriptSource.indexOf("39695");
         const schedule = extractFetchSchedule(scriptSource);
         const hasFetch =
           idxQ >= 0 ||
@@ -1682,6 +1781,7 @@ async function attachSession(session, targetInfo, waitingForDebugger) {
           idxEveQ >= 0 ||
           idx31579 >= 0 ||
           idx59205 >= 0 ||
+          idx39695 >= 0 ||
           !!schedule;
         const compressor = compressorBreakpointAt(scriptSource);
         const sendHelper = sendHelperBreakpointAt(scriptSource);
@@ -1689,7 +1789,9 @@ async function attachSession(session, targetInfo, waitingForDebugger) {
         const hasInject = scriptSource.includes("__cfOp.push");
         if (hasFetch) {
           const marker =
-            idx31579 >= 0
+            idx39695 >= 0
+              ? "39695"
+              : idx31579 >= 0
               ? "31579"
               : idx59205 >= 0
                 ? "59205"
@@ -1763,6 +1865,16 @@ async function attachSession(session, targetInfo, waitingForDebugger) {
             const v = got.result?.value;
             if (v && v.keyCount >= 20) {
               liveFo.push(v);
+              if (Array.isArray(v.writes)) {
+                for (const w of v.writes) {
+                  if (
+                    liveWrites.length < 80 &&
+                    !liveWrites.some((x) => x.key === w.key && x.via === w.via)
+                  ) {
+                    liveWrites.push(w);
+                  }
+                }
+              }
               note("foShape", {
                 via: v.via,
                 keyCount: v.keyCount,
