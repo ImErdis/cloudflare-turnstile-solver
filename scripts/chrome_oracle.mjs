@@ -423,11 +423,14 @@ function extractFetchQuadratic(html) {
   const starMix = window.match(
     /\((\w+),\1\)\*(\d{4,5})\+\1\*(\d{4,5})\+(\d{4,5}),255/,
   );
+  const mulTimesSq = window.match(
+    /(\d{4,5})\*\((\w+)\*\2\)\+[\s\S]{0,96}?\(\2,(\d{4,5})\)\+(\d{4,5})&255/,
+  );
   const biasM = window.match(/\]-(\d{2,3}),256\)&255/);
   const biasAdd = window.match(/\[(\w+)\],(\d{2,3})\)\+256/);
   const biasPlus = window.match(/\((\d{2,3})\+\w+\[\w+\],255\)/);
   const caseM = window.match(/\{case (\d+):/);
-  const hit = sq || sqPlus || sqAmp || nestMul || starMix || alt || mulStar;
+  const hit = sq || sqPlus || sqAmp || nestMul || starMix || mulTimesSq || alt || mulStar;
   if (!hit) return null;
   let keyMul;
   let keyQuadB;
@@ -458,6 +461,11 @@ function extractFetchQuadratic(html) {
     keyQuadB = Number(starMix[3]);
     keyAdd = Number(starMix[4]);
     spelling = "(mix,mix)*mul+mix*b";
+  } else if (mulTimesSq) {
+    keyMul = Number(mulTimesSq[1]);
+    keyQuadB = Number(mulTimesSq[3]);
+    keyAdd = Number(mulTimesSq[4]);
+    spelling = "mul*(mix*mix)+helper&255";
   } else if (mulStar) {
     keyMul = Number(mulStar[1]);
     keyQuadB = Number(mulStar[4]);
@@ -849,6 +857,17 @@ function injectOpcodeLog(html, opts = {}) {
       n++;
       return logAfterKeyUpdate(
         `(${mixVar},${mixVar})*${mul}+${mixVar}*${quadB}+${add},255`,
+        opVar,
+      );
+    },
+  );
+
+  out = out.replace(
+    /(\d{4,5})\*\((\w+)\*\2\)\+([\s\S]{0,96}?)\(\2,(\d{4,5})\)\+(\d{4,5})&255(?:\.\d+)?,(\w+)\)/g,
+    (_full, mul, mixVar, mid, quadB, add, opVar) => {
+      n++;
+      return logAfterKeyUpdate(
+        `${mul}*(${mixVar}*${mixVar})+${mid}(${mixVar},${quadB})+${add}&255`,
         opVar,
       );
     },
@@ -1816,6 +1835,14 @@ function selfTestInject() {
   const live23196F = extractFetchQuadratic(live23196Happy);
   const live23196Fc = extractFetchQuadratic(live23196Catch);
   const live23196Entry = extractVmEntryKey("new PD(Y)[EP(pC.Y)](0,63,[])");
+  const live23196MulSq =
+    "if(V=Yh[YU],V!==V)return Yh[YX];switch(Yh[YU]=M[HJ(uz.V)](V,1),V=M[HJ(uz.YF)](Yh[YA],M[HJ(uz.YL)](Ym[V]-217,256)&255),H=Yh[YA]+V,Yh[YA]=23196*(H*H)+M[HJ(uz.YX)](H,32619)+19372&255.87,V){case 220:Jj(this);break;}";
+  const live23196MulSqF = extractFetchQuadratic(live23196MulSq);
+  const live23196MulSqI = injectOpcodeLog(live23196MulSq, { jsOnly: true });
+  const live23196Sites = fetchLoopBreakpointSites(
+    live23196MulSq,
+    live23196MulSq.indexOf("23196"),
+  );
   const packed2Snippet =
     "new HC(H)(0,63,[]);if(Q=zD[K],Q!==Q)return zD[R];switch(zD[K]=Q+1,Q=zD[k]^xx(zD[Q],217)+256&255,M=zD[k]+Q,zD[k]=M*M*23196+yy(M,32619)+19372&255,Q){case 220:fn(this);break;}";
   const packed2Mark = fetchMarkerInSource(packed2Snippet);
@@ -1965,7 +1992,14 @@ function selfTestInject() {
       live23196F.byteBias === 217 &&
       live23196Fc &&
       live23196Fc.keyMul === 23196 &&
-      live23196Entry === 63 &&
+      live23196MulSqF &&
+      live23196MulSqF.keyMul === 23196 &&
+      live23196MulSqF.keyQuadB === 32619 &&
+      live23196MulSqF.keyAdd === 19372 &&
+      live23196MulSqF.byteBias === 217 &&
+      live23196MulSqI.html.includes("__cfOp.push") &&
+      live23196Sites.some((x) => x.why === "case") &&
+      live23196Sites.some((x) => x.why === "switch") &&
       svg8904 == null &&
       fin[0] &&
       fin[0].pc === 0 &&
@@ -2293,80 +2327,84 @@ async function patchExecutedFetchScript(session, s, scriptSource) {
   }
 }
 
-async function setFetchLoopBreakpointNear(session, s, scriptSource, idx) {
-  const { lineNumber, columnNumber } = sourceLineCol(scriptSource, idx);
-  let locations = [];
-  try {
-    const got = await session.send("Debugger.getPossibleBreakpoints", {
-      start: {
-        scriptId: s.scriptId,
-        lineNumber,
-        columnNumber: Math.max(0, columnNumber - 60),
-      },
-      end: {
-        scriptId: s.scriptId,
-        lineNumber,
-        columnNumber: columnNumber + 120,
-      },
-    });
-    locations = got.locations || [];
-    note("possibleBp", { n: locations.length, lineNumber, columnNumber });
-  } catch (e) {
-    note("possibleBpErr", { error: String(e).slice(0, 160) });
+function fetchLoopBreakpointSites(src, markerIdx) {
+  if (!src || markerIdx == null || markerIdx < 0) return [];
+  const sites = [];
+  const seen = new Set();
+  const add = (idx, why) => {
+    if (idx == null || idx < 0 || seen.has(idx)) return;
+    seen.add(idx);
+    sites.push({ idx, why, ...sourceLineCol(src, idx) });
+  };
+  const window = src.slice(Math.max(0, markerIdx - 400), markerIdx + 8000);
+  const winStart = Math.max(0, markerIdx - 400);
+  const sw = window.lastIndexOf("switch(", markerIdx - winStart);
+  if (sw >= 0) add(winStart + sw, "switch");
+  const iff = window.lastIndexOf("if(", markerIdx - winStart);
+  if (iff >= 0) add(winStart + iff, "if");
+  let from = 0;
+  let n = 0;
+  while (n < 48) {
+    const i = window.indexOf("{case ", from);
+    if (i < 0) break;
+    add(winStart + i, "case");
+    from = i + 6;
+    n++;
   }
-  const tries = locations.length
-    ? locations.slice(0, 8).map((loc) => ({
-        scriptId: loc.scriptId || s.scriptId,
-        lineNumber: loc.lineNumber,
-        columnNumber: loc.columnNumber,
-      }))
-    : [{ scriptId: s.scriptId, lineNumber, columnNumber }];
+  return sites;
+}
+
+async function setFetchLoopBreakpointNear(session, s, scriptSource, idx) {
+  const sites = fetchLoopBreakpointSites(scriptSource, idx);
+  const { lineNumber, columnNumber } = sourceLineCol(scriptSource, idx);
+  const tries = [
+    ...sites.map((site) => ({
+      scriptId: s.scriptId,
+      lineNumber: site.lineNumber,
+      columnNumber: site.columnNumber,
+      why: site.why,
+    })),
+    { scriptId: s.scriptId, lineNumber, columnNumber, why: "marker" },
+  ];
+  note("fetchLoopSites", {
+    n: sites.length,
+    whys: sites.map((x) => x.why).slice(0, 8),
+    firstCaseCol: sites.find((x) => x.why === "case")?.columnNumber ?? null,
+  });
+  let placed = 0;
   for (const loc of tries) {
+    if (placed >= 12) break;
     try {
       const bp = await session.send("Debugger.setBreakpoint", {
-        location: loc,
+        location: {
+          scriptId: loc.scriptId,
+          lineNumber: loc.lineNumber,
+          columnNumber: loc.columnNumber,
+        },
         condition: FETCH_LOOP_BP_CONDITION,
       });
       if (bp?.breakpointId) {
         fetchLoopBreakpoints.add(bp.breakpointId);
         fetchLoopBpRows.push({ session, breakpointId: bp.breakpointId });
+        placed++;
         note("fetchLoopBp", {
           url: (s.url || "").slice(0, 140),
+          why: loc.why,
           lineNumber: loc.lineNumber,
           columnNumber: loc.columnNumber,
           breakpointId: bp.breakpointId,
         });
-        return true;
       }
     } catch (e) {
       note("bpErr", {
         error: String(e).slice(0, 180),
+        why: loc.why,
         lineNumber: loc.lineNumber,
         columnNumber: loc.columnNumber,
       });
     }
   }
-  try {
-    const bp = await session.send("Debugger.setBreakpointByUrl", {
-      lineNumber,
-      columnNumber,
-      urlRegex: "challenges\\.cloudflare\\.com",
-      condition: FETCH_LOOP_BP_CONDITION,
-    });
-    if (bp?.breakpointId) {
-      fetchLoopBreakpoints.add(bp.breakpointId);
-      fetchLoopBpRows.push({ session, breakpointId: bp.breakpointId });
-      note("fetchLoopBpUrl", {
-        breakpointId: bp.breakpointId,
-        lineNumber,
-        columnNumber,
-      });
-      return true;
-    }
-  } catch (e) {
-    note("bpUrlErr", { error: String(e).slice(0, 180) });
-  }
-  return false;
+  return placed > 0;
 }
 
 async function attachSession(session, targetInfo, waitingForDebugger) {
