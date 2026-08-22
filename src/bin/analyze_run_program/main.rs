@@ -362,12 +362,11 @@ fn verify_oracle_file(path: &PathBuf) -> Result<Value> {
                     }
                 }
             }
-            if let Some(xd) = late.get("xdMix") {
-                if xd.get("seed").and_then(|x| x.as_u64()) != Some(u64::from(XD_MIX_SEED))
-                    || xd.get("slotXor").and_then(|x| x.as_u64()) != Some(u64::from(XD_SLOT_XOR))
-                {
-                    errors.push("laterSameDay.xdMix mismatch".into());
-                }
+            if let Some(xd) = late.get("xdMix")
+                && (xd.get("seed").and_then(|x| x.as_u64()) != Some(u64::from(XD_MIX_SEED))
+                    || xd.get("slotXor").and_then(|x| x.as_u64()) != Some(u64::from(XD_SLOT_XOR)))
+            {
+                errors.push("laterSameDay.xdMix mismatch".into());
             }
             if let Some(s1) = late.get("s1Cases").and_then(|x| x.as_array()) {
                 if s1.len() != S1_CASES_B_LATE.len() {
