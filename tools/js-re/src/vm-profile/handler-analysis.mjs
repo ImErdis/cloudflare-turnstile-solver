@@ -684,6 +684,92 @@ export function recognizeFixedReads(fn, analysis) {
   };
 }
 
+export function recognizeStaticStateMachineReads(fn, analysis) {
+  const context = indexFunction(fn, analysis);
+  const pair = dominantReadPair(fn);
+  if (!pair || !pair.reads.length || collect(fn, semanticRead).length !== pair.reads.length) {
+    return null;
+  }
+  const orderStrings = [
+    ...new Set(
+      collect(
+        fn,
+        (node) =>
+          node.type === "CallExpression" &&
+          node.callee.type === "Identifier" &&
+          context.decoderAliases.has(node.callee.name),
+      )
+        .map((call) => resolveDecodedKey(call, context))
+        .filter((value) => /^\d+(?:\|\d+)+$/.test(value ?? "")),
+    ),
+  ];
+  if (orderStrings.length !== 1) return null;
+  const order = orderStrings[0].split("|").map(Number);
+  const switches = collect(
+    fn,
+    (node) =>
+      node.type === "SwitchStatement" &&
+      node.cases.length === order.length &&
+      node.cases.every(
+        (switchCase) =>
+          switchCase.test?.type === "Literal" &&
+          typeof switchCase.test.value === "string" &&
+          /^\d+$/.test(switchCase.test.value),
+      ),
+  );
+  if (switches.length !== 1) return null;
+  const switchStatement = switches[0];
+  if (
+    contains(switchStatement, (node) =>
+      [
+        "IfStatement",
+        "ForStatement",
+        "ForInStatement",
+        "ForOfStatement",
+        "WhileStatement",
+        "DoWhileStatement",
+        "ConditionalExpression",
+        "TryStatement",
+      ].includes(node.type),
+    )
+  ) {
+    return null;
+  }
+  const byCase = new Map();
+  for (const switchCase of switchStatement.cases) {
+    const label = Number(switchCase.test.value);
+    const reads = pair.reads.filter(
+      (read) =>
+        switchCase.consequent.some(
+          (statement) => read.start >= statement.start && read.end <= statement.end,
+        ),
+    );
+    const decodes = reads.map((read) => readDecode(read, context));
+    if (decodes.some((decode) => !decode)) return null;
+    byCase.set(label, decodes.map((decode) => decode.extra));
+  }
+  if (
+    new Set(order).size !== order.length ||
+    order.some((label) => !byCase.has(label)) ||
+    [...byCase.values()].reduce((count, reads) => count + reads.length, 0) !==
+      pair.reads.length
+  ) {
+    return null;
+  }
+  const extraXors = order.flatMap((label) => byCase.get(label));
+  const keyIdentifiers = new Set(
+    pair.reads.map((read) => readDecode(read, context)?.keyIdentifier),
+  );
+  if (keyIdentifiers.size !== 1) return null;
+  const spec = { kind: "fixed_reads", extra_xors: extraXors };
+  const evidence = { kind: "static_state_machine_reads", spec };
+  return {
+    spec,
+    handlerFingerprint: sha256Hex(canonicalJson(evidence)),
+    evidence,
+  };
+}
+
 export function recognizeJumpStop(fn, analysis) {
   const context = indexFunction(fn, analysis);
   const pair = dominantReadPair(fn);

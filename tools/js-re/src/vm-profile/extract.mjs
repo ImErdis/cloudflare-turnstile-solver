@@ -6,6 +6,7 @@ import {
   recognizeFixedReads,
   recognizeJumpStop,
   recognizeLebTable,
+  recognizeStaticStateMachineReads,
   recognizeTaggedLoad,
   structuralUnknownFingerprint,
 } from "./handler-analysis.mjs";
@@ -249,6 +250,7 @@ function recognizedHandler(fn, analysis) {
     recognizeTaggedLoad(fn, analysis) ??
     recognizeLebTable(fn, analysis) ??
     recognizeJumpStop(fn, analysis) ??
+    recognizeStaticStateMachineReads(fn, analysis) ??
     recognizeFixedReads(fn, analysis)
   );
 }
