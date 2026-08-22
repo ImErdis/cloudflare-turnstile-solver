@@ -81,6 +81,9 @@ if (!selfTest) {
   fs.mkdirSync(outDir, { recursive: true });
 }
 
+const handlerNameToOp = new Map();
+const ambiguousHandlerNames = new Set();
+
 const PREAMBLE = `(() => {
   if (globalThis.__cfOracleHook) return;
   globalThis.__cfOracleHook = true;
@@ -1062,11 +1065,42 @@ function inferPcSlotFromGNums(rows) {
   return null;
 }
 
+function uniqueOpFromFrameNames(
+  frameNames,
+  nameToOp = handlerNameToOp,
+  ambiguous = ambiguousHandlerNames,
+) {
+  for (const n of frameNames || []) {
+    if (!n || ambiguous.has(n)) continue;
+    if (nameToOp.has(n)) return { name: n, op: nameToOp.get(n) };
+  }
+  return null;
+}
+
+function modalPackedBcLen(rows) {
+  const counts = new Map();
+  for (const r of rows || []) {
+    const n = r && r.bcLen;
+    if ((n || 0) > 10000) counts.set(n, (counts.get(n) || 0) + 1);
+  }
+  let best = null;
+  let bestN = 0;
+  for (const [k, v] of counts) {
+    if (v > bestN) {
+      best = k;
+      bestN = v;
+    }
+  }
+  return best;
+}
+
 /** 56907 Chrome: pause at the mul is after `pc+=1` (first observed pcSlot 1). */
 function finalizeFetchLoopRows(rows) {
   const fl = (rows || []).filter((r) => r && r.via === "fetchLoop");
   if (!fl.length) return [];
-  const use = fl.filter((r) => (r.bcLen || 0) > 10000);
+  const packed = fl.filter((r) => (r.bcLen || 0) > 10000);
+  const modal = modalPackedBcLen(packed);
+  const use = modal != null ? packed.filter((r) => r.bcLen === modal) : packed;
   const { opKey, mixKey } = inferLocalOpMix(use);
   const pcFromG = inferPcSlotFromGNums(use);
   const out = [];
@@ -1078,8 +1112,31 @@ function finalizeFetchLoopRows(rows) {
     }
     const adjust = Number.isFinite(pcSlot) && pcSlot >= 1;
     const pc = Number.isFinite(pcSlot) ? (adjust ? pcSlot - 1 : pcSlot) : r.pc;
-    const fromCase = r.opFrom === "caseLabel" || Number.isFinite(r.caseOp);
-    let op = fromCase && Number.isFinite(r.caseOp) ? r.caseOp : r.op;
+    const stackH = uniqueOpFromFrameNames(r.frameNames);
+    const fromCase = r.opFrom === "caseLabel" || Number.isFinite(r.caseOp) || !!stackH;
+    let op = stackH
+      ? stackH.op
+      : fromCase && Number.isFinite(r.caseOp)
+        ? r.caseOp
+        : r.op;
+    const fn = stackH ? stackH.name : r.fn;
+    const opFrom = stackH
+      ? stackH.name !== r.fn
+        ? "pausedFn"
+        : r.opFrom === "caseLabel" || Number.isFinite(r.caseOp)
+          ? "caseLabel"
+          : "pausedFn"
+      : r.bpWhy === "pausedFn"
+        ? "pausedFn"
+        : fromCase
+          ? "caseLabel"
+          : r.opFrom;
+    const bpCaseOp =
+      stackH && Number.isFinite(r.caseOp) && (r.caseOp & 255) !== stackH.op
+        ? r.caseOp & 255
+        : Number.isFinite(r.bpCaseOp)
+          ? r.bpCaseOp & 255
+          : undefined;
     let mix = r.mixLocal != null ? r.mixLocal : r.mix;
     let key = r.key;
     let nextKey = Number.isFinite(r.nextKey)
@@ -1129,16 +1186,11 @@ function finalizeFetchLoopRows(rows) {
       mix: Number.isFinite(mix) && mix >= 256 && mix <= 510 ? mix : undefined,
       bcLen: r.bcLen,
       pcSlot,
-      caseOp: Number.isFinite(r.caseOp) ? r.caseOp & 255 : undefined,
-      opFrom:
-        r.bpWhy === "pausedFn"
-          ? "pausedFn"
-          : fromCase
-            ? "caseLabel"
-            : r.opFrom,
-      fn: r.fn,
-      bpWhy: r.bpWhy,
-      bpCaseOp: Number.isFinite(r.bpCaseOp) ? r.bpCaseOp & 255 : undefined,
+      caseOp: Number.isFinite(op) ? op & 255 : Number.isFinite(r.caseOp) ? r.caseOp & 255 : undefined,
+      opFrom,
+      fn,
+      bpWhy: stackH && stackH.name !== r.fn ? "pausedFn" : r.bpWhy,
+      bpCaseOp,
       vmFrom: r.vmFrom,
       byteVia: Number.isFinite(byte) ? "vm" : undefined,
     };
@@ -2121,6 +2173,19 @@ function selfTestInject() {
     handlerThisGSrc.indexOf("switch"),
   );
   const braceSites = fetchLoopUniqueBraceSites(handlerThisGSrc, handlerThisGSrc.indexOf("switch"));
+  const stackMap = new Map([
+    ["W", 58],
+    ["s9", 205],
+    ["sl", 24],
+  ]);
+  const stackAmb = new Set(["J"]);
+  const stackSl = uniqueOpFromFrameNames(
+    ["x.<computed>", "sl", "sz"],
+    stackMap,
+    stackAmb,
+  );
+  const stackW = uniqueOpFromFrameNames(["W", "s9"], stackMap, stackAmb);
+  const stackJ = uniqueOpFromFrameNames(["J", "sz"], stackMap, stackAmb);
   return {
     ok:
       a.injected &&
@@ -2312,6 +2377,12 @@ function selfTestInject() {
           x.name === "Jj" &&
           handlerThisGSrc.slice(x.idx, x.idx + 6) === "this.g",
       ) &&
+      stackSl &&
+      stackSl.op === 24 &&
+      stackSl.name === "sl" &&
+      stackW &&
+      stackW.name === "W" &&
+      stackJ == null &&
       svg8904 == null &&
       fin[0] &&
       fin[0].pc === 0 &&
@@ -2413,8 +2484,6 @@ const compressorScripts = new Set();
 const fetchLoopBreakpoints = new Set();
 const fetchLoopBpRows = [];
 const fetchLoopBpMeta = new Map();
-const handlerNameToOp = new Map();
-const ambiguousHandlerNames = new Set();
 const scriptSources = new Map();
 const scriptNotes = [];
 let iframeRewrites = 0;
@@ -3151,9 +3220,14 @@ async function attachSession(session, targetInfo, waitingForDebugger) {
                 fetchSchedule: hit.schedule,
               });
               if (wantFetchLoopBp && !hasInject) {
-                const patched = await patchExecutedFetchScript(session, s, scriptSource);
-                if (!patched) {
-                  await setFetchLoopBreakpointNear(session, s, scriptSource, hit.idx);
+                const packedHits = liveFetchRaw.filter((r) => (r.bcLen || 0) > 10000).length;
+                if (packedHits >= fetchTupleCap) {
+                  note("fetchLoopSkipNewScript", { reason: "cap", packedHits });
+                } else {
+                  const patched = await patchExecutedFetchScript(session, s, scriptSource);
+                  if (!patched) {
+                    await setFetchLoopBreakpointNear(session, s, scriptSource, hit.idx);
+                  }
                 }
               }
             }
@@ -3240,7 +3314,10 @@ async function attachSession(session, targetInfo, waitingForDebugger) {
               break;
             }
           }
-          if (!callMeta) {
+          const frames = (evt.callFrames || []).slice(0, 6);
+          const frameNames = frames.map((f) => f.functionName || "");
+          const stackH = uniqueOpFromFrameNames(frameNames);
+          if (!callMeta && !stackH) {
             if (fname && ambiguousHandlerNames.has(fname)) {
               note("fetchLoopSkipAmbiguous", { fn: fname });
               return;
@@ -3280,10 +3357,17 @@ async function attachSession(session, targetInfo, waitingForDebugger) {
               }
             }
           }
-          const harvestName = (callMeta && callMeta.name) || fname;
+          if (!stackH) {
+            const topNamed = frameNames.find((n) => n && !String(n).includes("<computed>"));
+            if (topNamed && ambiguousHandlerNames.has(topNamed)) {
+              note("fetchLoopSkipAmbiguous", { fn: topNamed, bp: callMeta && callMeta.name });
+              return;
+            }
+          }
+          const harvestName =
+            (stackH && stackH.name) || (callMeta && callMeta.name) || fname;
           const row = { via: "fetchLoop", fn: harvestName };
-          const frames = (evt.callFrames || []).slice(0, 6);
-          row.frameNames = frames.map((f) => f.functionName || "");
+          row.frameNames = frameNames;
           row.hitBreakpoints = hit;
           if (frame.location) {
             row.lineNumber = frame.location.lineNumber;
@@ -3291,9 +3375,24 @@ async function attachSession(session, targetInfo, waitingForDebugger) {
             row.scriptId = frame.location.scriptId;
           }
           let caseOp;
-          if (callMeta && callMeta.caseOp != null) {
+          if (stackH) {
+            caseOp = stackH.op;
+            row.bpWhy =
+              callMeta && callMeta.name === stackH.name
+                ? callMeta.why || "handlerFn"
+                : "pausedFn";
+            if (
+              callMeta &&
+              callMeta.caseOp != null &&
+              callMeta.caseOp !== stackH.op
+            ) {
+              row.bpCaseOp = callMeta.caseOp;
+            }
+            row.opFrom = "pausedFn";
+          } else if (callMeta && callMeta.caseOp != null) {
             caseOp = callMeta.caseOp;
             row.bpWhy = callMeta.why;
+            row.opFrom = "caseLabel";
           } else {
             for (const id of hit) {
               const meta = fetchLoopBpMeta.get(id);
@@ -3311,11 +3410,12 @@ async function attachSession(session, targetInfo, waitingForDebugger) {
               row.bpWhy = row.bpWhy || "handlerFn";
             }
             caseOp = uniqueOp != null ? uniqueOp : caseOp;
+            if (caseOp != null) row.opFrom = "caseLabel";
           }
           if (caseOp != null) {
             row.caseOp = caseOp;
             row.op = caseOp & 255;
-            row.opFrom = "caseLabel";
+            row.opFrom = row.opFrom || "caseLabel";
           }
           const harvestFrames = [
             frame,
