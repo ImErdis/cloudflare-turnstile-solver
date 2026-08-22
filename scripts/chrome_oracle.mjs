@@ -53,9 +53,9 @@ const isolateIframes = process.env.ORACLE_SITE_ISOLATION === "1";
 const skipIframeRewrite =
   process.env.ORACLE_SKIP_IFRAME_REWRITE === "1" || fetchTuples;
 const fetchTupleCap = Number(process.env.ORACLE_FETCH_TUPLE_CAP || 24);
-/** Skip the HTML-embedded stub (~5k packed). Live `/fo/` packed is ~600k+. */
+/** Skip the HTML-embedded stub (~7k packed). Live `/fo/` packed is ~600k+. */
 const FETCH_LOOP_BP_CONDITION =
-  '(function(){try{var g=this&&this.g;if(!g)return false;if(typeof this.l==="number"&&g[this.l]&&g[this.l].length>10000)return true;for(var i=0;i<Math.min(g.length||0,48);i++){var v=g[i];if(v&&v.length>10000)return true;}return false;}catch(e){return false;}})()';
+  '(function(){try{if(globalThis.__cfPackedMeta&&globalThis.__cfPackedMeta.packedLen>10000)return true;var g=this&&this.g;if(!g)return false;if(typeof this.l==="number"&&g[this.l]&&g[this.l].length>10000)return true;for(var i=0;i<Math.min(g.length||0,48);i++){var v=g[i];if(v&&v.length>10000)return true;}return false;}catch(e){return false;}})()';
 
 const CHROME_ARGS = [
   "--no-sandbox",
@@ -2336,7 +2336,7 @@ function fetchLoopBreakpointSites(src, markerIdx) {
     seen.add(idx);
     sites.push({ idx, why, ...sourceLineCol(src, idx) });
   };
-  const window = src.slice(Math.max(0, markerIdx - 400), markerIdx + 8000);
+  const window = src.slice(Math.max(0, markerIdx - 400), markerIdx + 25000);
   const winStart = Math.max(0, markerIdx - 400);
   const sw = window.lastIndexOf("switch(", markerIdx - winStart);
   if (sw >= 0) add(winStart + sw, "switch");
@@ -2344,12 +2344,14 @@ function fetchLoopBreakpointSites(src, markerIdx) {
   if (iff >= 0) add(winStart + iff, "if");
   let from = 0;
   let n = 0;
-  while (n < 48) {
-    const i = window.indexOf("{case ", from);
+  while (n < 80) {
+    const i = window.indexOf("case ", from);
     if (i < 0) break;
-    add(winStart + i, "case");
-    from = i + 6;
-    n++;
+    if (/^case \d+:/.test(window.slice(i, i + 12))) {
+      add(winStart + i, "case");
+      n++;
+    }
+    from = i + 5;
   }
   return sites;
 }
@@ -2373,7 +2375,7 @@ async function setFetchLoopBreakpointNear(session, s, scriptSource, idx) {
   });
   let placed = 0;
   for (const loc of tries) {
-    if (placed >= 12) break;
+    if (placed >= 32) break;
     try {
       const bp = await session.send("Debugger.setBreakpoint", {
         location: {
