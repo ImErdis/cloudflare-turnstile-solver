@@ -3,10 +3,12 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "test": "node --test test/*.test.mjs",
     "fetch-api": "node src/fetch-public-api.mjs",
     "deobfuscate": "node src/deobfuscate.mjs",
     "dump-ast": "node src/dump-ast.mjs",
     "capture-scripts": "node src/capture-scripts.mjs",
+    "extract-vm-profile": "node src/extract-vm-profile.mjs",
     "pretty": "prettier --write"
   },
   "dependencies": {
