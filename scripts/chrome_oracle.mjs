@@ -1544,23 +1544,40 @@ function sendHelperBreakpointAt(scriptSource) {
   return { ...sourceLineCol(scriptSource, brace), pat, idx, name };
 }
 
-const TUPLE_HARVEST_EXPR = `(function() {
-  const g = this && this.g;
+const TUPLE_HARVEST_EXPR = `(function(args) {
+  function pick(obj) {
+    if (!obj || !obj.g) return null;
+    const g = obj.g;
+    if (typeof obj.j !== "number" && typeof obj.i !== "number") return null;
+    return obj;
+  }
+  let vm = pick(this);
+  let vmFrom = vm ? "this" : undefined;
+  if (!vm && args && args.length) {
+    for (let i = 0; i < Math.min(args.length, 16); i++) {
+      vm = pick(args[i]);
+      if (vm) {
+        vmFrom = "arg" + i;
+        break;
+      }
+    }
+  }
+  const g = vm && vm.g;
   const thisNums = {};
-  if (this) {
+  if (vm) {
     const names = ["i","j","l","h","o","u","n","m","k","p"];
     for (let n = 0; n < names.length; n++) {
       const k = names[n];
-      if (typeof this[k] === "number") thisNums[k] = this[k];
+      if (typeof vm[k] === "number") thisNums[k] = vm[k];
     }
   }
   let pcSlot;
   let keySlot;
   let bc;
-  if (g && typeof this.j === "number") pcSlot = g[this.j];
-  if (g && typeof this.i === "number") keySlot = g[this.i];
-  if (g && typeof this.l === "number" && g[this.l] && typeof g[this.l].length === "number") {
-    bc = g[this.l];
+  if (g && typeof vm.j === "number") pcSlot = g[vm.j];
+  if (g && typeof vm.i === "number") keySlot = g[vm.i];
+  if (g && typeof vm.l === "number" && g[vm.l] && typeof g[vm.l].length === "number") {
+    bc = g[vm.l];
   }
   if (!bc && g) {
     for (let i = 0; i < Math.min(g.length || 0, 64); i++) {
@@ -1583,6 +1600,7 @@ const TUPLE_HARVEST_EXPR = `(function() {
   return {
     via: "fetchLoop",
     thisType: typeof this,
+    vmFrom: vmFrom,
     hasG: !!(g),
     pcSlot: typeof pcSlot === "number" ? pcSlot : undefined,
     keySlot: typeof keySlot === "number" ? (keySlot & 255) : undefined,
@@ -1593,7 +1611,9 @@ const TUPLE_HARVEST_EXPR = `(function() {
     thisNums: thisNums,
     gNums: gNums
   };
-}).call(this)`;
+}).call(this, (function (a) {
+  try { return Array.prototype.slice.call(a); } catch (e) { return []; }
+})(typeof arguments !== "undefined" ? arguments : []))`;
 
 const FO_SHAPE_EXPR = `(() => {
   function kind(v) {
@@ -2897,7 +2917,19 @@ async function attachSession(session, targetInfo, waitingForDebugger) {
             row.op = caseOp & 255;
             row.opFrom = "caseLabel";
           }
-          for (const fr of frames) {
+          const harvestFrames = [
+            frame,
+            ...frames.filter((fr) => fr && fr.callFrameId !== frame.callFrameId),
+          ];
+          for (const fr of harvestFrames) {
+            const frName = fr.functionName || "";
+            if (
+              fr.callFrameId !== frame.callFrameId &&
+              handlerNameToOp.has(frName) &&
+              frName !== fname
+            ) {
+              continue;
+            }
             try {
               const got = await session.send("Debugger.evaluateOnCallFrame", {
                 callFrameId: fr.callFrameId,
@@ -2911,7 +2943,7 @@ async function attachSession(session, targetInfo, waitingForDebugger) {
               const v = got.result?.value;
               if (v && typeof v === "object" && (v.hasG || v.gLen || v.pcSlot != null)) {
                 Object.assign(row, v);
-                row.fn = fr.functionName || row.fn;
+                row.fn = fname || frName || row.fn;
                 break;
               }
               if (v && typeof v === "object" && row.thisType == null) {
