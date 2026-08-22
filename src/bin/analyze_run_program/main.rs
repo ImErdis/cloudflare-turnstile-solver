@@ -239,14 +239,39 @@ fn harvest_tuple_rows(v: &Value) -> Vec<Value> {
         .cloned()
         .collect();
     if !complete.is_empty() {
-        return complete;
+        return dedup_tuple_rows(complete);
     }
-    loop_rows
+    let from_loop: Vec<Value> = loop_rows
         .iter()
-        .chain(op_rows.iter())
         .filter(|f| row_has_op_byte(f) && row_has_next_key(f))
         .cloned()
+        .collect();
+    if !from_loop.is_empty() {
+        return from_loop;
+    }
+    op_rows
+        .into_iter()
+        .filter(|f| row_has_op_byte(f) && row_has_next_key(f))
         .collect()
+}
+
+fn dedup_tuple_rows(rows: Vec<Value>) -> Vec<Value> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for f in rows {
+        let pc = f.get("pc").and_then(|x| x.as_u64()).unwrap_or(0);
+        let op = f
+            .get("op")
+            .or_else(|| f.get("caseOp"))
+            .and_then(|x| x.as_u64())
+            .unwrap_or(0);
+        let byte = f.get("byte").and_then(|x| x.as_u64()).unwrap_or(0);
+        let key = f.get("key").and_then(|x| x.as_u64()).unwrap_or(0);
+        if seen.insert((pc, op, byte, key)) {
+            out.push(f);
+        }
+    }
+    out
 }
 
 fn html_candidate_from_oracle(v: &Value) -> Option<FetchParams> {

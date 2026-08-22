@@ -1018,6 +1018,36 @@ function injectOpcodeLog(html, opts = {}) {
       );
     },
   );
+  // 54260 plus: helper(54260*(L*L)+43539*L+20295,255),x)
+  out = out.replace(
+    /(\d{4,5})\*\((\w+)\*\2\)\+(\d{4,5})\*\2\+(\d{4,5}),255\),(\w+)\)/g,
+    (_full, mul, mixVar, quadB, add, opVar) => {
+      n++;
+      return logAfterKeyUpdate(
+        `${mul}*(${mixVar}*${mixVar})+${quadB}*${mixVar}+${add},255`,
+        opVar,
+      );
+    },
+  );
+  // 54260 catch: helper(helper(mix,mix),mul)+b*mix+add,255),op
+  out = out.replace(
+    /\((\w+),\1\),(\d{4,5})\)\+(\d{4,5})\*\1\+(\d{4,5}),255\),(\w+)\)/g,
+    (_full, mixVar, mul, quadB, add, opVar) => {
+      n++;
+      return logAfterKeyUpdate(
+        `(${mixVar},${mixVar}),${mul})+${quadB}*${mixVar}+${add},255`,
+        opVar,
+      );
+    },
+  );
+  // 54260 catch decode: xor(st[key], helper(arr[pc],160)+256&255)
+  out = out.replace(
+    /(\w+)=(\w+\[[^\]]{0,80}\])\((\w+)\[(\w+)\],(\w+\[[^\]]{0,80}\])\((\w+)\[(\w+)\],(\d{2,3})\)\+256&255\)/g,
+    (_full, op, xorCallee, st, keySlot, addCallee, arr, pcVar, bias) => {
+      n++;
+      return `${op}=(globalThis.__cfT&&(globalThis.__cfT.key=${st}[${keySlot}]&255,globalThis.__cfT.byte=${arr}[${pcVar}]&255),${xorCallee}(${st}[${keySlot}],${addCallee}(${arr}[${pcVar}],${bias})+256&255))`;
+    },
+  );
 
   if (jsOnly) {
     if (n > 0 && !out.includes("__cfOracleHook")) {
@@ -2177,6 +2207,13 @@ function selfTestInject() {
   const live54260Mark = fetchMarkerInSource(live54260Happy);
   const live54260H = injectOpcodeLog(live54260Happy, { jsOnly: true });
   const live54260C = injectOpcodeLog(live54260Catch, { jsOnly: true });
+  const live54260PlusHappy =
+    "if(x=pv[pq],x!==x)return pv[pb];switch(pv[pq]=x+1,x=pv[pB]^pa[ey(ID.pB)](pF[x]-160,256)&255.77,L=pv[pB]+x,pv[pB]=pa[ey(ID.e)](54260*(L*L)+43539*L+20295,255),x){case 191:s7[ey(ID.pQ)](this);break;} new sz(p)[eP(c0.p)](0,166,[])";
+  const live54260PlusCatch =
+    "if(pD=pv[pq],pa[ey(ID.kE)](pD,pD))return pv[pb];switch(pv[pq]=pa[ey(ID.x)](pD,1),pH=pa[ey(ID.L)](pv[pB],pa[ey(ID.kY)](pF[pD],160)+256&255),py=pv[pB]+pH,pv[pB]=pa[ey(ID.e)](pa[ey(ID.kl)](pa[ey(ID.pv)](py,py),54260)+43539*py+20295,255),pH){case 191:s7[ey(ID.kr)](this);break;}";
+  const live54260PlusF = extractFetchQuadratic(live54260PlusHappy);
+  const live54260PlusH = injectOpcodeLog(live54260PlusHappy, { jsOnly: true });
+  const live54260PlusC = injectOpcodeLog(live54260PlusCatch, { jsOnly: true });
   const falseLinFirst =
     "x=8696)+44379&255,j){case 143:zz();}" + live55067Bmix;
   const falseLinFirstF = extractFetchQuadratic(falseLinFirst);
@@ -2448,6 +2485,17 @@ function selfTestInject() {
       live54260C.injected &&
       live54260C.html.includes("__cfOp.push") &&
       live54260C.html.includes("pc:pD") &&
+      live54260PlusF &&
+      live54260PlusF.keyMul === 54260 &&
+      live54260PlusF.keyQuadB === 43539 &&
+      live54260PlusF.keyAdd === 20295 &&
+      live54260PlusF.byteBias === 160 &&
+      live54260PlusH.injected &&
+      live54260PlusH.html.includes("__cfOp.push") &&
+      live54260PlusH.html.includes("pc:x") &&
+      live54260PlusC.injected &&
+      live54260PlusC.html.includes("__cfOp.push") &&
+      live54260PlusC.html.includes("pc:pD") &&
       falseLinFirstF &&
       falseLinFirstF.keyMul === 55067 &&
       falseLinFirstS &&
