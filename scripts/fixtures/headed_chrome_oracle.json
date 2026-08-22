@@ -388,7 +388,35 @@
       "via": "f4",
       "keyCount": 99,
       "identCount": 60,
-      "note": "Last f4 snapshot (SolveGate invisible, 2026-08-21). 46 of 47 init keys (MaOkK2 dropped), numeric 1..39, 14 extra ident names. Early f4 was init+xBCsP4 with no numeric slots — picker prefers numeric. Kinds only; JSON.stringify would omit function/undefined extras. Do not fill values or POST."
+      "note": "Last f4 snapshot (SolveGate invisible, 2026-08-21). 46 of 47 init keys (MaOkK2 dropped), numeric 1..39, 14 extra ident names. Early f4 was init+xBCsP4 with no numeric slots — picker prefers numeric. Kinds only; JSON.stringify would omit function/undefined extras. Do not fill values or POST.",
+      "writes": [
+        { "name": "SMrTl9", "source": "chl_opt", "writePath": "host_copy", "opcode": null },
+        { "name": "OQbM0", "source": "absent", "writePath": "unseen_in_dumps", "opcode": null },
+        { "name": "xBCsP4", "source": "chl_opt", "writePath": "host_copy", "opcode": null },
+        { "name": "UjLjP6", "source": "absent", "writePath": "unseen_in_dumps", "opcode": null },
+        { "name": "YfDjo7", "source": "absent", "writePath": "unseen_in_dumps", "opcode": null },
+        { "name": "Iqrc9", "source": "absent", "writePath": "unseen_in_dumps", "opcode": null },
+        { "name": "OZgbm6", "source": "absent", "writePath": "unseen_in_dumps", "opcode": null },
+        { "name": "pFyv1", "source": "absent", "writePath": "unseen_in_dumps", "opcode": null },
+        { "name": "SfUI1", "source": "absent", "writePath": "unseen_in_dumps", "opcode": null },
+        { "name": "sqKXG6", "source": "other_object", "writePath": "unseen_in_dumps", "opcode": null },
+        { "name": "HUDi4", "source": "absent", "writePath": "unseen_in_dumps", "opcode": null },
+        { "name": "DTBF3", "source": "absent", "writePath": "unseen_in_dumps", "opcode": null },
+        { "name": "mQiic7", "source": "string_table", "writePath": "unseen_in_dumps", "opcode": null },
+        { "name": "gNcr3", "source": "absent", "writePath": "unseen_in_dumps", "opcode": null },
+        { "name": "MaOkK2", "source": "init_obj", "writePath": "glue", "opcode": null },
+        { "name": "1..39", "source": "numeric_family", "writePath": "vm_entry_index", "opcode": null }
+      ],
+      "inlinePackedHarvest": {
+        "source": "runProgram(`71GxwDch…`) 5k stub in 56907 iframe HTML, not the 822k /fo/ init response",
+        "stopped": "unparsed_op_177_XU",
+        "lastOpcode": 177,
+        "hasWindow": true,
+        "hasQuerySelectorAll": true,
+        "extraIdentInStub": false,
+        "geKeyImm1to39": false,
+        "note": "Skip-harvest only. Live 822k packed body was not saved. Do not execute handlers."
+      }
     },
     "eveningLinear": {
       "source": "headed Chrome iframe HTML, same SolveGate day after 56907 and 8904",

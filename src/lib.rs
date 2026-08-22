@@ -20,8 +20,8 @@ pub use solver::fo_followup::{
     LIVE_FO_FOLLOWUP, classify_fo_response_len, NEXT_AFTER_FOLLOWUP_SHAPE,
 };
 pub use solver::fo_followup_json::{
-    FOLLOWUP_COPIED_COUNT_B, FOLLOWUP_DROPPED_INIT_B, FOLLOWUP_EXTRA_IDENT_B, LIVE_FO_FOLLOWUP_JSON,
-    classify_fo_plaintext, NEXT_AFTER_FOLLOWUP_JSON,
+    FOLLOWUP_COPIED_COUNT_B, FOLLOWUP_DROPPED_INIT_B, FOLLOWUP_EXTRA_IDENT_B, FOLLOWUP_FIELD_WRITE_B,
+    LIVE_FO_FOLLOWUP_JSON, classify_fo_plaintext, NEXT_AFTER_FOLLOWUP_JSON,
 };
 pub use solver::protocol::{
     DEMO_HREF, DEMO_SITE_KEY, PUBLIC_API_JS, extract_fo_session, parse_turnstile_api_js_url,

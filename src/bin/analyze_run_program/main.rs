@@ -497,6 +497,30 @@ fn verify_oracle_file(path: &PathBuf) -> Result<Value> {
                 if fj.get("numericKeysInHtml") == Some(&Value::Bool(true)) {
                     errors.push("foFollowUpJson.numericKeysInHtml should be false".into());
                 }
+                if let Some(writes) = fj.get("writes").and_then(|x| x.as_array()) {
+                    if writes.len() != cf::FOLLOWUP_FIELD_WRITE_B.len() {
+                        errors.push("foFollowUpJson.writes length mismatch".into());
+                    }
+                    for (row, got) in cf::FOLLOWUP_FIELD_WRITE_B.iter().zip(writes) {
+                        if got.get("name").and_then(|x| x.as_str()) != Some(row.name)
+                            || got.get("source").and_then(|x| x.as_str()) != Some(row.source)
+                            || got.get("writePath").and_then(|x| x.as_str()) != Some(row.write_path)
+                        {
+                            errors.push(format!("foFollowUpJson.writes.{} mismatch", row.name));
+                        }
+                    }
+                }
+                if let Some(hv) = fj.get("inlinePackedHarvest") {
+                    if hv.get("stopped").and_then(|x| x.as_str()) != Some("unparsed_op_177_XU") {
+                        errors.push("foFollowUpJson.inlinePackedHarvest.stopped mismatch".into());
+                    }
+                    if hv.get("extraIdentInStub") != Some(&Value::Bool(false)) {
+                        errors.push("inlinePackedHarvest.extraIdentInStub should be false".into());
+                    }
+                    if hv.get("lastOpcode").and_then(|x| x.as_u64()) != Some(177) {
+                        errors.push("inlinePackedHarvest.lastOpcode should be 177".into());
+                    }
+                }
                 if let Some(ident) = fj.get("identKeys").and_then(|x| x.as_array()) {
                     let names: Vec<String> = ident
                         .iter()

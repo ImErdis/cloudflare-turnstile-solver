@@ -92,6 +92,72 @@ pub const FOLLOWUP_EXTRA_IDENT_HTML_B: &[ExtraIdentHtmlSource] = &[
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct FollowUpFieldWrite {
+    pub name: &'static str,
+    /// `chl_opt` / `other_object` / `string_table` / `absent` / `init_obj` / `numeric_family`.
+    pub source: &'static str,
+    /// `host_copy` / `bytecode_string` / `glue` / `host_xi` / `vm_entry_index` / `unseen_in_dumps`.
+    pub write_path: &'static str,
+    pub opcode: Option<u8>,
+    pub evidence: &'static str,
+}
+
+const fn w(
+    name: &'static str,
+    source: &'static str,
+    write_path: &'static str,
+    opcode: Option<u8>,
+    evidence: &'static str,
+) -> FollowUpFieldWrite {
+    FollowUpFieldWrite {
+        name,
+        source,
+        write_path,
+        opcode,
+        evidence,
+    }
+}
+
+/// How each follow-up field is written (56907 dumps). Names were already known.
+/// The 822k live `/fo/` packed body was not saved; skip-harvest of the HTML-embedded
+/// 5k `runProgram(\`71GxwDch…\`)` stub does not contain the 14 extra ident names.
+/// Do not fill values or POST.
+pub const FOLLOWUP_FIELD_WRITE_B: &[FollowUpFieldWrite] = &[
+    w("SMrTl9", "chl_opt", "host_copy", None,
+        "_cf_chl_opt SMrTl9 is the 16-hex ray; follow-up kind string. Not on the init JSON literal. Assignment onto initObj is not in HTML."),
+    w("OQbM0", "absent", "unseen_in_dumps", None,
+        "not in 56907 HTML or the HTML-embedded packed stub; Chrome kind undefined (stringify omits)"),
+    w("xBCsP4", "chl_opt", "host_copy", None,
+        "_cf_chl_opt xBCsP4: []; follow-up kind array. Early f4 is init plus this key (no numeric slots) before the later mutated f4."),
+    w("UjLjP6", "absent", "unseen_in_dumps", None,
+        "not in 56907 HTML or the HTML-embedded packed stub; Chrome kind function (stringify omits)"),
+    w("YfDjo7", "absent", "unseen_in_dumps", None,
+        "not in 56907 HTML or the HTML-embedded packed stub; Chrome kind undefined"),
+    w("Iqrc9", "absent", "unseen_in_dumps", None,
+        "not in 56907 HTML or the HTML-embedded packed stub; Chrome kind undefined"),
+    w("OZgbm6", "absent", "unseen_in_dumps", None,
+        "not in 56907 HTML or the HTML-embedded packed stub; Chrome kind function (stringify omits)"),
+    w("pFyv1", "absent", "unseen_in_dumps", None,
+        "not in 56907 HTML or the HTML-embedded packed stub; Chrome kind number"),
+    w("SfUI1", "absent", "unseen_in_dumps", None,
+        "not in 56907 HTML or the HTML-embedded packed stub; Chrome kind array"),
+    w("sqKXG6", "other_object", "unseen_in_dumps", None,
+        "HTML has Xu={\"sqKXG6\":W?W:undefined,...} on an /eb/ error beacon (stack file string), not the /fo/ init literal. Follow-up kind string. Copy onto initObj not in HTML; stub harvest miss."),
+    w("HUDi4", "absent", "unseen_in_dumps", None,
+        "not in 56907 HTML or the HTML-embedded packed stub; Chrome kind string"),
+    w("DTBF3", "absent", "unseen_in_dumps", None,
+        "not in 56907 HTML or the HTML-embedded packed stub; Chrome kind string"),
+    w("mQiic7", "string_table", "unseen_in_dumps", None,
+        "semicolon string-table token only; follow-up kind number. Stub harvest miss."),
+    w("gNcr3", "absent", "unseen_in_dumps", None,
+        "not in 56907 HTML or the HTML-embedded packed stub; Chrome kind number"),
+    w("MaOkK2", "init_obj", "glue", None,
+        "on the init object literal (\"MaOkK2\": host call). Absent from later f4 identKeys. delete/drop not in HTML."),
+    w("1..39", "numeric_family", "vm_entry_index", None,
+        "consecutive 1-based keys, count 39, no quoted \"1\": in HTML. Same kind as orchestrate-era parsed_vm.entries under \"1\"..\"N\". ge/169 can write an integer key imm; the HTML-embedded stub harvested none in 1..=39. Kinds for numeric slots were not saved."),
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FoPlaintextKind {
     Init,
@@ -220,6 +286,23 @@ mod tests {
         for (src, name) in FOLLOWUP_EXTRA_IDENT_HTML_B.iter().zip(FOLLOWUP_EXTRA_IDENT_B) {
             assert_eq!(src.name, *name);
         }
+        assert_eq!(FOLLOWUP_FIELD_WRITE_B.len(), FOLLOWUP_EXTRA_IDENT_B.len() + 2);
+        for (row, name) in FOLLOWUP_FIELD_WRITE_B.iter().zip(FOLLOWUP_EXTRA_IDENT_B) {
+            assert_eq!(row.name, *name);
+            assert_eq!(row.opcode, None);
+        }
+        assert_eq!(FOLLOWUP_FIELD_WRITE_B[0].write_path, "host_copy");
+        assert_eq!(FOLLOWUP_FIELD_WRITE_B[2].write_path, "host_copy");
+        assert_eq!(FOLLOWUP_FIELD_WRITE_B[2].name, "xBCsP4");
+        assert_eq!(FOLLOWUP_FIELD_WRITE_B[9].name, "sqKXG6");
+        assert_eq!(FOLLOWUP_FIELD_WRITE_B[9].source, "other_object");
+        assert_eq!(FOLLOWUP_FIELD_WRITE_B[9].write_path, "unseen_in_dumps");
+        let dropped = FOLLOWUP_FIELD_WRITE_B.iter().find(|r| r.name == "MaOkK2").unwrap();
+        assert_eq!(dropped.write_path, "glue");
+        assert_eq!(dropped.source, "init_obj");
+        let numeric = FOLLOWUP_FIELD_WRITE_B.iter().find(|r| r.name == "1..39").unwrap();
+        assert_eq!(numeric.write_path, "vm_entry_index");
+        assert_eq!(NEXT_AFTER_FOLLOWUP_JSON, "handler_semantics");
         let path = std::path::Path::new("artifacts/re-out/chrome-oracle/iframe-1.html");
         if path.is_file() {
             let html = std::fs::read_to_string(path).unwrap();
@@ -240,6 +323,12 @@ mod tests {
             }
             assert!(!html.contains("\"1\":"));
             assert!(!html.contains("'1':"));
+            assert!(html.contains("SMrTl9: '"));
+            assert!(html.contains("xBCsP4: []"));
+            assert!(html.contains("\"sqKXG6\":"));
+            assert!(html.contains("\"MaOkK2\":"));
+            assert!(html.contains("XK=A[rH(JY.aj)](runProgram,XS,E)"));
+            assert!(html.contains("A[rH(JY.aH)](XK,n,fj)"));
         }
     }
 
